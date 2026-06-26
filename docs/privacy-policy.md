@@ -6,7 +6,7 @@
 
 本隐私政策说明 iPad App「Mimi Remote」如何处理数据。
 
-Mimi Remote 是一个面向开发者的 iPad 原生客户端，用来连接用户自己 Mac 上运行的 `agentd`。本 App 是独立开发的第三方客户端，不隶属于 OpenAI，也不代表 OpenAI 官方产品。
+Mimi Remote 是一个面向开发者的 iPad 原生客户端，用来连接用户自己的本地开发环境中运行的 `agentd`。本 App 是独立开发的第三方客户端，不隶属于任何平台厂商，也不代表官方产品。
 
 ## 数据收集
 
@@ -18,21 +18,21 @@ Mimi Remote 不收集、上传、出售或共享用户的个人数据。
 
 为完成连接和使用流程，Mimi Remote 会在用户设备本地保存少量配置数据：
 
-- 用户配置的 Mac `agentd` endpoint。
-- 用于连接用户自己 Mac 上 `agentd` 的访问 token。
+- 用户配置的 `agentd` endpoint。
+- 用于连接用户自己 `agentd` 的访问 token。
 - 最近使用的工作区、会话索引、外观设置等本地偏好。
 
-其中访问 token 会保存在 iOS Keychain 中。上述数据仅用于连接用户自己配置的 Mac 端服务，不会发送给本 App 开发者。
+其中访问 token 会保存在 iOS Keychain 中。上述数据仅用于连接用户自己配置的本地 agent 服务，不会发送给本 App 开发者。
 
-## Mac 端与第三方服务
+## 本地环境与第三方服务
 
-Mimi Remote 本身不在 iPad 上执行代码，也不下载可执行代码。它只连接用户自己 Mac 上运行的 `agentd`。
+Mimi Remote 本身不在 iPad 上执行代码，也不下载可执行代码。它只连接用户自己运行的 `agentd`。
 
-如果用户在 Mac 上使用 Codex CLI、OpenAI API 或其他第三方开发工具，这些工具的数据处理方式由对应服务或工具的条款和隐私政策约束。Mimi Remote 不托管这些第三方账号凭证，也不会从用户 Mac 主动收集这些凭证。
+如果用户在本地环境中使用第三方开发工具，这些工具的数据处理方式由对应服务或工具的条款和隐私政策约束。Mimi Remote 不托管这些第三方账号凭证，也不会从用户本地环境主动收集这些凭证。
 
 ## 网络连接
 
-Mimi Remote 会连接用户手动配置或扫码导入的 Mac endpoint。推荐仅在本地网络或 Tailscale 等私有网络中使用，不建议将 `agentd` 暴露到公网。
+Mimi Remote 会连接用户手动配置或扫码导入的 `agentd` endpoint。推荐仅在本地网络或 Tailscale 等私有网络中使用，不建议将 `agentd` 暴露到公网。
 
 ## 儿童隐私
 

@@ -98,6 +98,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
     let usage: UsageSummary?
     let rateLimit: RateLimitSummary?
     var pendingApproval: ApprovalSummary?
+    var goal: ThreadGoal?
     let context: SessionContextSnapshot?
 
     var isAppServerHistory: Bool {
@@ -150,6 +151,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
         usage: UsageSummary? = nil,
         rateLimit: RateLimitSummary? = nil,
         pendingApproval: ApprovalSummary? = nil,
+        goal: ThreadGoal? = nil,
         context: SessionContextSnapshot? = nil
     ) {
         self.id = id
@@ -171,6 +173,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
         // pendingApproval 只在真实等待审批状态下有效；历史快照偶发带回旧值时，
         // 这里先做归一化，避免输入框展示已经失效的审批卡。
         self.pendingApproval = status == "waiting_for_approval" ? pendingApproval : nil
+        self.goal = goal ?? context?.goal
         self.context = context
     }
 
@@ -194,6 +197,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
             usage: row.usage,
             rateLimit: row.rateLimit,
             pendingApproval: row.pendingApproval,
+            goal: row.context?.goal,
             context: row.context
         )
     }
@@ -216,8 +220,252 @@ struct AgentSession: Identifiable, Codable, Hashable {
         case usage
         case rateLimit = "rate_limit"
         case pendingApproval = "pending_approval"
+        case goal
         case context
     }
+}
+
+enum ThreadGoalStatus: String, Codable, Hashable, CaseIterable {
+    case active
+    case paused
+    case blocked
+    case usageLimited
+    case budgetLimited
+    case complete
+
+    var displayText: String {
+        switch self {
+        case .active:
+            return "运行中"
+        case .paused:
+            return "已暂停"
+        case .blocked:
+            return "已阻塞"
+        case .usageLimited:
+            return "用量受限"
+        case .budgetLimited:
+            return "预算用尽"
+        case .complete:
+            return "已完成"
+        }
+    }
+
+    var tintRole: String {
+        switch self {
+        case .active:
+            return "success"
+        case .blocked, .usageLimited, .budgetLimited:
+            return "warning"
+        case .complete:
+            return "complete"
+        case .paused:
+            return "neutral"
+        }
+    }
+}
+
+struct ThreadGoal: Identifiable, Codable, Hashable {
+    var id: String { threadID }
+
+    let threadID: SessionID
+    let objective: String
+    let status: ThreadGoalStatus
+    let tokenBudget: Int64?
+    let tokensUsed: Int64
+    let timeUsedSeconds: Int64
+    let createdAt: Date?
+    let updatedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case objective
+        case status
+        case tokenBudget
+        case tokensUsed
+        case timeUsedSeconds
+        case createdAt
+        case updatedAt
+    }
+
+    private enum SnakeCodingKeys: String, CodingKey {
+        case threadID = "thread_id"
+        case tokenBudget = "token_budget"
+        case tokensUsed = "tokens_used"
+        case timeUsedSeconds = "time_used_seconds"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    init(
+        threadID: SessionID,
+        objective: String,
+        status: ThreadGoalStatus,
+        tokenBudget: Int64? = nil,
+        tokensUsed: Int64 = 0,
+        timeUsedSeconds: Int64 = 0,
+        createdAt: Date? = nil,
+        updatedAt: Date? = nil
+    ) {
+        self.threadID = threadID
+        self.objective = objective
+        self.status = status
+        self.tokenBudget = tokenBudget
+        self.tokensUsed = tokensUsed
+        self.timeUsedSeconds = timeUsedSeconds
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init?(object: [String: CodexAppServerJSONValue]) {
+        guard
+            let threadID = object["threadId"]?.stringValue ?? object["thread_id"]?.stringValue,
+            let rawObjective = object["objective"]?.stringValue,
+            let rawStatus = object["status"]?.stringValue,
+            let status = ThreadGoalStatus(rawValue: rawStatus)
+        else {
+            return nil
+        }
+        let objective = rawObjective.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !threadID.isEmpty, !objective.isEmpty else {
+            return nil
+        }
+        self.init(
+            threadID: threadID,
+            objective: objective,
+            status: status,
+            tokenBudget: Self.int64(from: object["tokenBudget"] ?? object["token_budget"]),
+            tokensUsed: Self.int64(from: object["tokensUsed"] ?? object["tokens_used"]) ?? 0,
+            timeUsedSeconds: Self.int64(from: object["timeUsedSeconds"] ?? object["time_used_seconds"]) ?? 0,
+            createdAt: Self.date(from: object["createdAt"] ?? object["created_at"]),
+            updatedAt: Self.date(from: object["updatedAt"] ?? object["updated_at"])
+        )
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let snake = try decoder.container(keyedBy: SnakeCodingKeys.self)
+        self.threadID = try container.decodeIfPresent(SessionID.self, forKey: .threadID)
+            ?? snake.decode(SessionID.self, forKey: .threadID)
+        self.objective = try container.decode(String.self, forKey: .objective)
+        self.status = try container.decode(ThreadGoalStatus.self, forKey: .status)
+        self.tokenBudget = try container.decodeIfPresent(Int64.self, forKey: .tokenBudget)
+            ?? snake.decodeIfPresent(Int64.self, forKey: .tokenBudget)
+        self.tokensUsed = try container.decodeIfPresent(Int64.self, forKey: .tokensUsed)
+            ?? snake.decodeIfPresent(Int64.self, forKey: .tokensUsed)
+            ?? 0
+        self.timeUsedSeconds = try container.decodeIfPresent(Int64.self, forKey: .timeUsedSeconds)
+            ?? snake.decodeIfPresent(Int64.self, forKey: .timeUsedSeconds)
+            ?? 0
+        self.createdAt = try Self.decodeFlexibleDate(container, key: .createdAt)
+            ?? Self.decodeFlexibleDate(snake, key: .createdAt)
+        self.updatedAt = try Self.decodeFlexibleDate(container, key: .updatedAt)
+            ?? Self.decodeFlexibleDate(snake, key: .updatedAt)
+    }
+
+    var progressText: String {
+        guard let tokenBudget else {
+            return "\(Self.compactNumber(tokensUsed)) tokens"
+        }
+        return "\(Self.compactNumber(tokensUsed)) / \(Self.compactNumber(tokenBudget)) tokens"
+    }
+
+    var elapsedText: String {
+        Self.durationText(seconds: timeUsedSeconds)
+    }
+
+    private static func int64(from value: CodexAppServerJSONValue?) -> Int64? {
+        switch value {
+        case .int(let number):
+            return number
+        case .double(let number):
+            return number.isFinite ? Int64(number) : nil
+        case .string(let text):
+            return Int64(text)
+        default:
+            return nil
+        }
+    }
+
+    private static func date(from value: CodexAppServerJSONValue?) -> Date? {
+        switch value {
+        case .int(let number):
+            return date(fromNumericSeconds: Double(number))
+        case .double(let number):
+            return date(fromNumericSeconds: number)
+        case .string(let text):
+            return date(from: text)
+        default:
+            return nil
+        }
+    }
+
+    private static func date(from text: String) -> Date? {
+        if let number = Double(text) {
+            return date(fromNumericSeconds: number)
+        }
+        if let date = iso8601Fractional.date(from: text) ?? iso8601.date(from: text) {
+            return date
+        }
+        return nil
+    }
+
+    private static func date(fromNumericSeconds value: Double) -> Date? {
+        guard value.isFinite, value > 0 else {
+            return nil
+        }
+        // app-server 版本可能用秒，也可能经 JSON 桥接成毫秒；这里按数量级兼容。
+        let seconds = value > 10_000_000_000 ? value / 1_000 : value
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func decodeFlexibleDate<K: CodingKey>(
+        _ container: KeyedDecodingContainer<K>,
+        key: K
+    ) throws -> Date? {
+        if let date = try? container.decodeIfPresent(Date.self, forKey: key) {
+            return date
+        }
+        if let number = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return date(fromNumericSeconds: number)
+        }
+        if let text = try? container.decodeIfPresent(String.self, forKey: key) {
+            return date(from: text)
+        }
+        return nil
+    }
+
+    private static func compactNumber(_ value: Int64) -> String {
+        let absolute = abs(value)
+        if absolute >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        }
+        if absolute >= 1_000 {
+            return String(format: "%.1fK", Double(value) / 1_000)
+        }
+        return "\(value)"
+    }
+
+    private static func durationText(seconds: Int64) -> String {
+        if seconds >= 3_600 {
+            return "\(seconds / 3_600)h \((seconds % 3_600) / 60)m"
+        }
+        if seconds >= 60 {
+            return "\(seconds / 60)m"
+        }
+        return "\(max(0, seconds))s"
+    }
+
+    private static let iso8601Fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let iso8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }
 
 struct CodexHistoryMessage: Identifiable, Codable, Hashable {
@@ -437,6 +685,78 @@ final class MessageRenderPlanCache {
             accessOrder.removeFirst()
             plansByMessageKey.removeValue(forKey: oldest)
         }
+    }
+}
+
+struct ConversationFileReference: Identifiable, Hashable {
+    let path: String
+    let name: String
+
+    var id: String { path }
+}
+
+enum ConversationFileReferenceDetector {
+    private static let previewExtensions: Set<String> = [
+        "csv", "doc", "docx", "gif", "heic", "html", "jpeg", "jpg", "json", "log",
+        "md", "numbers", "pages", "pdf", "png", "ppt", "pptx", "rtf", "txt", "webp",
+        "xls", "xlsx", "yaml", "yml", "zip"
+    ]
+    private static let tokenSeparators = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+    private static let edgeTrimCharacters = CharacterSet(charactersIn: "`\"'“”‘’()[]{}<>.,;")
+
+    static func references(in text: String, limit: Int = 5) -> [ConversationFileReference] {
+        guard limit > 0 else {
+            return []
+        }
+
+        var result: [ConversationFileReference] = []
+        var seen = Set<String>()
+        for rawToken in text.components(separatedBy: tokenSeparators) {
+            guard let path = normalizedPathCandidate(rawToken) else {
+                continue
+            }
+            let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+            guard previewExtensions.contains(ext), seen.insert(path).inserted else {
+                continue
+            }
+            result.append(ConversationFileReference(path: path, name: URL(fileURLWithPath: path).lastPathComponent))
+            if result.count >= limit {
+                break
+            }
+        }
+        return result
+    }
+
+    private static func normalizedPathCandidate(_ raw: String) -> String? {
+        var token = raw.trimmingCharacters(in: edgeTrimCharacters)
+        guard !token.isEmpty else {
+            return nil
+        }
+        if let queryIndex = token.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+            token = String(token[..<queryIndex])
+        }
+        if token.lowercased().hasPrefix("file://") {
+            guard let url = URL(string: token), url.isFileURL else {
+                return nil
+            }
+            token = url.path
+        }
+        token = stripLineSuffix(from: token)
+        guard token.hasPrefix("/"), token.count > 1, !token.contains("\u{0}") else {
+            return nil
+        }
+        return token.replacingOccurrences(of: "\\ ", with: " ")
+    }
+
+    private static func stripLineSuffix(from token: String) -> String {
+        guard let colonIndex = token.lastIndex(of: ":") else {
+            return token
+        }
+        let suffix = token[token.index(after: colonIndex)...]
+        guard !suffix.isEmpty, suffix.allSatisfy(\.isNumber) else {
+            return token
+        }
+        return String(token[..<colonIndex])
     }
 }
 

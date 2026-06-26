@@ -85,4 +85,13 @@ final class PairingLinkTests: XCTestCase {
         XCTAssertEqual(credentials.endpoint, "http://100.64.0.1:8787")
         XCTAssertEqual(credentials.token, "0123456789abcdef0123456789abcdef")
     }
+
+    func testParsesLegacyMimiScheme() throws {
+        let url = try XCTUnwrap(URL(string: "mimi://connect?endpoint=http%3A%2F%2F192.168.31.163%3A8787&token=0123456789abcdef0123456789abcdef"))
+
+        let credentials = try AppStore.pairingCredentials(from: url)
+
+        XCTAssertEqual(credentials.endpoint, "http://192.168.31.163:8787")
+        XCTAssertEqual(credentials.token, "0123456789abcdef0123456789abcdef")
+    }
 }

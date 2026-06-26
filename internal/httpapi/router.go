@@ -35,8 +35,10 @@ type Router struct {
 	version  string
 	upgrader websocket.Upgrader
 
-	gatewayThreadsMu sync.Mutex
-	gatewayThreads   map[string]appServerGatewayAllowedThread
+	gatewayThreadsMu   sync.Mutex
+	gatewayThreads     map[string]appServerGatewayAllowedThread
+	managedWorktreesMu sync.Mutex
+	managedWorktrees   map[string]managedWorktree
 }
 
 func NewRouter(cfg config.Config, registry *projects.Registry, manager *session.Manager, checker *doctor.Checker, version string) http.Handler {
@@ -57,7 +59,8 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 		upgrader: websocket.Upgrader{
 			CheckOrigin: sameOriginOrNoOrigin,
 		},
-		gatewayThreads: map[string]appServerGatewayAllowedThread{},
+		gatewayThreads:   map[string]appServerGatewayAllowedThread{},
+		managedWorktrees: map[string]managedWorktree{},
 	}
 
 	mux := http.NewServeMux()
@@ -72,8 +75,25 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 		mux.HandleFunc("/api/debug/codex-history", r.codexHistoryDebugDisabledHandler)
 	}
 	mux.Handle("/api/projects", r.auth.Middleware(http.HandlerFunc(r.projectsHandler)))
+	mux.Handle("/api/workspaces/chat", r.auth.Middleware(http.HandlerFunc(r.chatWorkspaceHandler)))
 	mux.Handle("/api/workspaces/resolve", r.auth.Middleware(http.HandlerFunc(r.workspaceResolveHandler)))
 	mux.Handle("/api/directories/list", r.auth.Middleware(http.HandlerFunc(r.directoryListHandler)))
+	mux.Handle("/api/files/read", r.auth.Middleware(http.HandlerFunc(r.fileReadHandler)))
+	mux.Handle("/api/worktrees/list", r.auth.Middleware(http.HandlerFunc(r.worktreeListHandler)))
+	mux.Handle("/api/worktrees/branches", r.auth.Middleware(http.HandlerFunc(r.worktreeBranchListHandler)))
+	mux.Handle("/api/worktrees/create", r.auth.Middleware(http.HandlerFunc(r.worktreeCreateHandler)))
+	mux.Handle("/api/worktrees/delete", r.auth.Middleware(http.HandlerFunc(r.worktreeDeleteHandler)))
+	mux.Handle("/api/worktrees/prune", r.auth.Middleware(http.HandlerFunc(r.worktreePruneHandler)))
+	mux.Handle("/api/capabilities/list", r.auth.Middleware(http.HandlerFunc(r.capabilityListHandler)))
+	mux.Handle("/api/actions/list", r.auth.Middleware(http.HandlerFunc(r.commandActionListHandler)))
+	mux.Handle("/api/actions/run", r.auth.Middleware(http.HandlerFunc(r.commandActionRunHandler)))
+	mux.Handle("/api/git/status", r.auth.Middleware(http.HandlerFunc(r.gitStatusHandler)))
+	mux.Handle("/api/git/action", r.auth.Middleware(http.HandlerFunc(r.gitActionHandler)))
+	mux.Handle("/api/git/commit", r.auth.Middleware(http.HandlerFunc(r.gitCommitHandler)))
+	mux.Handle("/api/git/push", r.auth.Middleware(http.HandlerFunc(r.gitPushHandler)))
+	mux.Handle("/api/git/pull-request", r.auth.Middleware(http.HandlerFunc(r.gitPullRequestHandler)))
+	mux.Handle("/api/git/pull-request/status", r.auth.Middleware(http.HandlerFunc(r.gitPullRequestStatusHandler)))
+	mux.Handle("/api/voice/transcribe", r.auth.Middleware(http.HandlerFunc(r.voiceTranscribeHandler)))
 	mux.Handle("/api/app-server/config", r.auth.Middleware(http.HandlerFunc(r.appServerConfigHandler)))
 	mux.Handle("/api/app-server/ws", r.auth.Middleware(http.HandlerFunc(r.appServerGatewayWS)))
 	return logging(mux)

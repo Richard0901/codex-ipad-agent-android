@@ -1,16 +1,40 @@
 import Foundation
+import UserNotifications
 
 protocol SessionStoreAPIClient {
     func projects() async throws -> [AgentProject]
     func modelOptions() async throws -> [CodexAppServerModelOption]
+    func capabilities(path: String?) async throws -> CapabilityListResponse
     func resolveWorkspace(path: String) async throws -> AgentWorkspace
+    func chatWorkspace() async throws -> AgentWorkspace
+    func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse
+    func worktreeBranches(path: String) async throws -> WorktreeBranchListResponse
+    func listWorktrees() async throws -> [WorktreeListItem]
+    func deleteWorktree(path: String, force: Bool) async throws -> WorktreeDeleteResponse
+    func pruneMissingWorktrees() async throws -> WorktreePruneResponse
     func listDirectories(path: String) async throws -> DirectoryListResponse
+    func readFile(path: String) async throws -> FileReadResponse
+    func commandActions(path: String) async throws -> [AgentCommandAction]
+    func runCommandAction(path: String, id: String) async throws -> CommandActionRunResponse
+    func gitStatus(path: String) async throws -> GitStatusResponse
+    func gitAction(path: String, action: GitActionKind, files: [String]) async throws -> GitStatusResponse
+    func gitPatchAction(path: String, action: GitActionKind, patch: String) async throws -> GitStatusResponse
+    func gitCommit(path: String, message: String) async throws -> GitStatusResponse
+    func gitPush(path: String, remote: String?) async throws -> GitPushResponse
+    func gitCreatePullRequest(path: String, title: String, body: String, draft: Bool) async throws -> GitPullRequestResponse
+    func gitPullRequestStatus(path: String) async throws -> GitPullRequestStatusResponse
+    func transcribeVoice(filename: String, contentType: String, audioData: Data, language: String?, prompt: String?) async throws -> VoiceTranscriptionResponse
     func sessions(projectID: String?, cursor: String?, limit: Int?) async throws -> [AgentSession]
     func sessionsPage(projectID: String?, cursor: String?, limit: Int?) async throws -> SessionsPage
     func sessionsPage(workspace: AgentWorkspace, cursor: String?, limit: Int?) async throws -> SessionsPage
     func session(id: String, afterSeq: EventSequence?) async throws -> SessionResponse
+    func threadGoal(threadID: String) async throws -> ThreadGoal?
+    func setThreadGoal(threadID: String, objective: String?, status: ThreadGoalStatus?, tokenBudget: Int64?) async throws -> ThreadGoal
+    func clearThreadGoal(threadID: String) async throws
     func createSession(_ payload: CreateSessionRequest) async throws -> CreateSessionResponse
+    func forkSession(threadID: String, workspace: AgentWorkspace) async throws -> AgentSession
     func stopSession(id: String) async throws
+    func setSessionArchived(id: String, archived: Bool) async throws
     func messages(sessionID: String, before: String?, limit: Int?) async throws -> [CodexHistoryMessage]
     func messagesPage(sessionID: String, before: String?, limit: Int?) async throws -> HistoryMessagesPage
 }
@@ -20,8 +44,32 @@ extension SessionStoreAPIClient {
         []
     }
 
+    func capabilities(path: String?) async throws -> CapabilityListResponse {
+        throw AgentAPIError.invalidResponse
+    }
+
     func session(id: String) async throws -> SessionResponse {
         try await session(id: id, afterSeq: nil)
+    }
+
+    func setSessionArchived(id: String, archived: Bool) async throws {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func threadGoal(threadID: String) async throws -> ThreadGoal? {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func setThreadGoal(threadID: String, objective: String?, status: ThreadGoalStatus?, tokenBudget: Int64?) async throws -> ThreadGoal {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func clearThreadGoal(threadID: String) async throws {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func forkSession(threadID: String, workspace: AgentWorkspace) async throws -> AgentSession {
+        throw AgentAPIError.invalidResponse
     }
 
     func resolveWorkspace(path: String) async throws -> AgentWorkspace {
@@ -29,8 +77,93 @@ extension SessionStoreAPIClient {
         throw AgentAPIError.invalidResponse
     }
 
+    func chatWorkspace() async throws -> AgentWorkspace {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/workspaces/chat。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/worktrees/create。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func worktreeBranches(path: String) async throws -> WorktreeBranchListResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/worktrees/branches。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func listWorktrees() async throws -> [WorktreeListItem] {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/worktrees/list。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func deleteWorktree(path: String, force: Bool) async throws -> WorktreeDeleteResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/worktrees/delete。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/worktrees/prune。
+        throw AgentAPIError.invalidResponse
+    }
+
     func listDirectories(path: String) async throws -> DirectoryListResponse {
         // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/directories/list。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func readFile(path: String) async throws -> FileReadResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/files/read。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func commandActions(path: String) async throws -> [AgentCommandAction] {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/actions/list。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func runCommandAction(path: String, id: String) async throws -> CommandActionRunResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/actions/run。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func gitStatus(path: String) async throws -> GitStatusResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/git/status。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func gitAction(path: String, action: GitActionKind, files: [String]) async throws -> GitStatusResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/git/action。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func gitPatchAction(path: String, action: GitActionKind, patch: String) async throws -> GitStatusResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/git/action。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func gitCommit(path: String, message: String) async throws -> GitStatusResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/git/commit。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func gitPush(path: String, remote: String?) async throws -> GitPushResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/git/push。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func gitCreatePullRequest(path: String, title: String, body: String, draft: Bool) async throws -> GitPullRequestResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/git/pull-request。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func gitPullRequestStatus(path: String) async throws -> GitPullRequestStatusResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/git/pull-request/status。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func transcribeVoice(filename: String, contentType: String, audioData: Data, language: String?, prompt: String?) async throws -> VoiceTranscriptionResponse {
+        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/voice/transcribe。
         throw AgentAPIError.invalidResponse
     }
 
@@ -98,6 +231,11 @@ actor TerminalStreamStore {
     }
 }
 
+private struct QueuedCommandActionRun: Equatable {
+    let path: String
+    let id: String
+}
+
 struct ProjectSessionListSnapshot: Equatable {
     let projectID: String
     let isExpanded: Bool
@@ -128,6 +266,258 @@ struct ProjectSessionListSnapshot: Equatable {
     }
 }
 
+struct SessionListPreferences: Codable, Equatable {
+    var pinnedSessionIDs: Set<SessionID> = []
+    var archivedSessionIDs: Set<SessionID> = []
+}
+
+struct SessionListPreferenceStore {
+    private struct Storage: Codable {
+        var byEndpoint: [String: SessionListPreferences] = [:]
+    }
+
+    private let defaults: UserDefaults
+    private let key: String
+
+    init(defaults: UserDefaults = .standard, key: String = "agentd.sessionListPreferences") {
+        self.defaults = defaults
+        self.key = key
+    }
+
+    func load(endpoint: String) -> SessionListPreferences {
+        storage().byEndpoint[normalizedEndpoint(endpoint)] ?? SessionListPreferences()
+    }
+
+    func save(_ preferences: SessionListPreferences, endpoint: String) {
+        var storage = storage()
+        storage.byEndpoint[normalizedEndpoint(endpoint)] = preferences
+        persist(storage)
+    }
+
+    private func storage() -> Storage {
+        guard let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode(Storage.self, from: data)
+        else {
+            return Storage()
+        }
+        return decoded
+    }
+
+    private func persist(_ storage: Storage) {
+        guard let data = try? JSONEncoder().encode(storage) else {
+            return
+        }
+        defaults.set(data, forKey: key)
+    }
+
+    private func normalizedEndpoint(_ endpoint: String) -> String {
+        AgentAPIClient.normalizedEndpoint(endpoint)
+    }
+}
+
+struct SessionReminder: Codable, Equatable, Identifiable {
+    let sessionID: SessionID
+    var title: String
+    var fireAt: Date
+    var createdAt: Date
+
+    var id: SessionID { sessionID }
+
+    func isDue(now: Date = Date()) -> Bool {
+        fireAt <= now
+    }
+}
+
+struct SessionRuntimeNotification: Equatable {
+    enum Kind: String {
+        case approval
+        case completed
+        case failed
+    }
+
+    let id: String
+    let sessionID: SessionID
+    let title: String
+    let body: String
+    let kind: Kind
+}
+
+struct SessionReminderStore {
+    private struct Storage: Codable {
+        var byEndpoint: [String: [SessionID: SessionReminder]] = [:]
+    }
+
+    private let defaults: UserDefaults
+    private let key: String
+
+    init(defaults: UserDefaults = .standard, key: String = "agentd.sessionReminders") {
+        self.defaults = defaults
+        self.key = key
+    }
+
+    func load(endpoint: String) -> [SessionID: SessionReminder] {
+        storage().byEndpoint[normalizedEndpoint(endpoint)] ?? [:]
+    }
+
+    func save(_ reminders: [SessionID: SessionReminder], endpoint: String) {
+        var storage = storage()
+        storage.byEndpoint[normalizedEndpoint(endpoint)] = reminders
+        persist(storage)
+    }
+
+    private func storage() -> Storage {
+        guard let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode(Storage.self, from: data)
+        else {
+            return Storage()
+        }
+        return decoded
+    }
+
+    private func persist(_ storage: Storage) {
+        guard let data = try? JSONEncoder().encode(storage) else {
+            return
+        }
+        defaults.set(data, forKey: key)
+    }
+
+    private func normalizedEndpoint(_ endpoint: String) -> String {
+        AgentAPIClient.normalizedEndpoint(endpoint)
+    }
+}
+
+protocol SessionReminderScheduling {
+    func schedule(_ reminder: SessionReminder) async throws
+    func notify(_ notification: SessionRuntimeNotification) async throws
+    func cancel(sessionID: SessionID)
+}
+
+struct UserNotificationSessionReminderScheduler: SessionReminderScheduling {
+    private let center: UNUserNotificationCenter
+
+    init(center: UNUserNotificationCenter = .current()) {
+        self.center = center
+    }
+
+    func schedule(_ reminder: SessionReminder) async throws {
+        let granted = try await requestAuthorizationIfNeeded()
+        guard granted else {
+            return
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = "会话提醒"
+        content.body = reminder.title
+        content.sound = .default
+
+        let interval = max(reminder.fireAt.timeIntervalSinceNow, 1)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: Self.notificationID(for: reminder.sessionID),
+            content: content,
+            trigger: trigger
+        )
+        center.removePendingNotificationRequests(withIdentifiers: [Self.notificationID(for: reminder.sessionID)])
+        try await add(request)
+    }
+
+    func notify(_ notification: SessionRuntimeNotification) async throws {
+        let granted = try await requestAuthorizationIfNeeded()
+        guard granted else {
+            return
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = notification.title
+        content.body = notification.body
+        content.sound = .default
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: Self.runtimeNotificationID(for: notification.id),
+            content: content,
+            trigger: trigger
+        )
+        center.removePendingNotificationRequests(withIdentifiers: [Self.runtimeNotificationID(for: notification.id)])
+        try await add(request)
+    }
+
+    func cancel(sessionID: SessionID) {
+        center.removePendingNotificationRequests(withIdentifiers: [Self.notificationID(for: sessionID)])
+    }
+
+    private func requestAuthorizationIfNeeded() async throws -> Bool {
+        let settings = await notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .denied:
+            return false
+        case .notDetermined:
+            return try await requestAuthorization()
+        @unknown default:
+            return false
+        }
+    }
+
+    private func notificationSettings() async -> UNNotificationSettings {
+        await withCheckedContinuation { continuation in
+            center.getNotificationSettings { settings in
+                continuation.resume(returning: settings)
+            }
+        }
+    }
+
+    private func requestAuthorization() async throws -> Bool {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+            center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: granted)
+                }
+            }
+        }
+    }
+
+    private func add(_ request: UNNotificationRequest) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            center.add(request) { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    private static func notificationID(for sessionID: SessionID) -> String {
+        "mimi.sessionReminder.\(sessionID)"
+    }
+
+    private static func runtimeNotificationID(for id: String) -> String {
+        "mimi.sessionRuntime.\(id)"
+    }
+}
+
+struct NoopSessionReminderScheduler: SessionReminderScheduling {
+    func schedule(_ reminder: SessionReminder) async throws {}
+    func notify(_ notification: SessionRuntimeNotification) async throws {}
+    func cancel(sessionID: SessionID) {}
+}
+
+enum FilePreviewStoreError: LocalizedError {
+    case invalidPayload
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPayload:
+            return "文件预览内容无效"
+        }
+    }
+}
+
 @MainActor
 final class SessionStore: ObservableObject {
     @Published private(set) var projects: [AgentProject] = [] {
@@ -153,8 +543,19 @@ final class SessionStore: ObservableObject {
             rebuildSessionIndexes()
         }
     }
+    @Published private(set) var pinnedSessionIDs: Set<SessionID> = []
+    @Published private(set) var archivedSessionIDs: Set<SessionID> = []
+    @Published private(set) var sessionRemindersByID: [SessionID: SessionReminder] = [:]
     @Published var selectedProjectID: String?
     @Published var selectedSessionID: String?
+    @Published var sessionSearchQuery = "" {
+        didSet {
+            guard oldValue != sessionSearchQuery else {
+                return
+            }
+            rebuildProjectSessionListSnapshots()
+        }
+    }
     @Published private(set) var expandedProjectIDs: Set<String> = []
     @Published private(set) var showingAllSessionProjectIDs: Set<String> = []
     @Published var isLoading = false
@@ -162,8 +563,42 @@ final class SessionStore: ObservableObject {
     @Published var statusMessage: String?
     @Published var errorMessage: String?
     @Published private(set) var isRefreshingSelectedSession = false
+    @Published private(set) var isUpdatingThreadGoal = false
+    @Published private(set) var threadGoalErrorMessage: String?
     @Published private(set) var appServerModelOptions: [CodexAppServerModelOption] = []
     @Published private(set) var isRefreshingAppServerModels = false
+    @Published private(set) var capabilityList: CapabilityListResponse?
+    @Published private(set) var isRefreshingCapabilities = false
+    @Published private(set) var capabilityErrorMessage: String?
+    @Published private(set) var isCreatingWorktree = false
+    @Published private(set) var worktreeBranchesByPath: [String: WorktreeBranchListResponse] = [:]
+    @Published private(set) var worktreeBranchErrorByPath: [String: String] = [:]
+    @Published private(set) var isRefreshingWorktreeBranches = false
+    @Published private(set) var managedWorktrees: [WorktreeListItem] = []
+    @Published private(set) var isRefreshingWorktrees = false
+    @Published private(set) var isDeletingWorktree = false
+    @Published private(set) var isPruningWorktrees = false
+    @Published private(set) var worktreeErrorMessage: String?
+    @Published private(set) var gitStatusByPath: [String: GitStatusResponse] = [:]
+    @Published private(set) var gitStatusErrorByPath: [String: String] = [:]
+    @Published private(set) var isRefreshingGitStatus = false
+    @Published private(set) var gitActionErrorByPath: [String: String] = [:]
+    @Published private(set) var commandActionsByPath: [String: [AgentCommandAction]] = [:]
+    @Published private(set) var commandActionErrorByPath: [String: String] = [:]
+    @Published private(set) var commandActionResultByPath: [String: CommandActionRunResponse] = [:]
+    @Published private(set) var commandActionHistoryByPath: [String: [CommandActionRunResponse]] = [:]
+    @Published private(set) var isRefreshingCommandActions = false
+    @Published private(set) var queuedCommandActionIDsByPath: [String: [String]] = [:]
+    @Published private(set) var runningCommandActionPath: String?
+    @Published private(set) var runningCommandActionID: String?
+    @Published private(set) var isRunningGitAction = false
+    @Published private(set) var isCommittingGitChanges = false
+    @Published private(set) var isPushingGitBranch = false
+    @Published private(set) var isCreatingPullRequest = false
+    @Published private(set) var pullRequestURLByPath: [String: String] = [:]
+    @Published private(set) var pullRequestStatusByPath: [String: GitPullRequestStatusResponse] = [:]
+    @Published private(set) var pullRequestStatusErrorByPath: [String: String] = [:]
+    @Published private(set) var isRefreshingPullRequestStatus = false
     @Published private var pendingApprovalDecisionIDsBySessionID: [SessionID: Set<String>] = [:]
     @Published private var foregroundActivityBySessionID: [SessionID: SessionForegroundActivity] = [:]
 
@@ -173,6 +608,9 @@ final class SessionStore: ObservableObject {
     private let contextStore: SessionContextStore
     private let eventReducer: EventReducer
     private let recentWorkspaceStore: RecentWorkspaceStore
+    private let sessionListPreferenceStore: SessionListPreferenceStore
+    private let sessionReminderStore: SessionReminderStore
+    private let sessionReminderScheduler: any SessionReminderScheduling
     private let terminalStreamStore = TerminalStreamStore()
     private let clientFactory: () throws -> any SessionStoreAPIClient
     private let webSocketFactory: () -> any SessionWebSocketClient
@@ -186,6 +624,8 @@ final class SessionStore: ObservableObject {
     private var historySnapshotSeqBySessionID: [SessionID: EventSequence] = [:]
     private var runtimeEventFlushTasks: [SessionID: Task<Void, Never>] = [:]
     private var foregroundActivityClearTasks: [SessionID: Task<Void, Never>] = [:]
+    private var deliveredRuntimeNotificationIDs: Set<String> = []
+    private var queuedCommandActionRuns: [QueuedCommandActionRun] = []
     private var projectsByID: [String: AgentProject] = [:]
     private var workspacesByID: [String: AgentWorkspace] = [:]
     private var sidebarProjectsByID: [String: AgentProject] = [:]
@@ -216,6 +656,7 @@ final class SessionStore: ObservableObject {
     static let sessionPreviewLimit = 3
     private static let initialSessionPageLimit = 80
     private static let expandedSessionPageLimit = 120
+    private static let commandActionHistoryLimit = 10
 
     init(
         appStore: AppStore,
@@ -223,6 +664,9 @@ final class SessionStore: ObservableObject {
         logStore: LogStore,
         contextStore: SessionContextStore? = nil,
         recentWorkspaceStore: RecentWorkspaceStore? = nil,
+        sessionListPreferenceStore: SessionListPreferenceStore? = nil,
+        sessionReminderStore: SessionReminderStore? = nil,
+        sessionReminderScheduler: (any SessionReminderScheduling)? = nil,
         clientFactory: (() throws -> any SessionStoreAPIClient)? = nil,
         webSocketFactory: (() -> any SessionWebSocketClient)? = nil,
         webSocketReconnectDelayNanoseconds: ((Int) -> UInt64)? = nil
@@ -240,15 +684,55 @@ final class SessionStore: ObservableObject {
         } else {
             self.recentWorkspaceStore = RecentWorkspaceStore()
         }
+        if let sessionListPreferenceStore {
+            self.sessionListPreferenceStore = sessionListPreferenceStore
+        } else if clientFactory != nil {
+            let defaults = UserDefaults(suiteName: "SessionStore.SessionListPreferences.\(UUID().uuidString)") ?? .standard
+            self.sessionListPreferenceStore = SessionListPreferenceStore(defaults: defaults)
+        } else {
+            self.sessionListPreferenceStore = SessionListPreferenceStore()
+        }
+        if let sessionReminderStore {
+            self.sessionReminderStore = sessionReminderStore
+        } else if clientFactory != nil {
+            let defaults = UserDefaults(suiteName: "SessionStore.SessionReminders.\(UUID().uuidString)") ?? .standard
+            self.sessionReminderStore = SessionReminderStore(defaults: defaults)
+        } else {
+            self.sessionReminderStore = SessionReminderStore()
+        }
+        if let sessionReminderScheduler {
+            self.sessionReminderScheduler = sessionReminderScheduler
+        } else if clientFactory != nil {
+            self.sessionReminderScheduler = NoopSessionReminderScheduler()
+        } else {
+            self.sessionReminderScheduler = UserNotificationSessionReminderScheduler()
+        }
         self.clientFactory = clientFactory ?? { try appStore.makeSessionStoreAPIClient() }
         self.webSocketFactory = webSocketFactory ?? { appStore.makeSessionWebSocketClient() }
         self.webSocketReconnectDelayNanoseconds = webSocketReconnectDelayNanoseconds ?? Self.defaultWebSocketReconnectDelayNanoseconds
+        reloadSessionListPreferences()
+        reloadSessionReminders()
     }
 
     private static func defaultWebSocketReconnectDelayNanoseconds(attempt: Int) -> UInt64 {
         let boundedAttempt = max(1, min(attempt, 4))
         let seconds = UInt64(1 << (boundedAttempt - 1))
         return seconds * 1_000_000_000
+    }
+
+    private static func safePreviewFilename(_ rawName: String) -> String {
+        let fallback = "preview"
+        let lastComponent = (rawName as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !lastComponent.isEmpty else {
+            return fallback
+        }
+        let blocked = CharacterSet(charactersIn: "/\\:\u{0}")
+        let cleaned = lastComponent
+            .components(separatedBy: blocked)
+            .filter { !$0.isEmpty }
+            .joined(separator: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? fallback : cleaned
     }
 
     var selectedProject: AgentProject? {
@@ -265,6 +749,10 @@ final class SessionStore: ObservableObject {
         return sessionsByID[selectedSessionID]
     }
 
+    var selectedThreadGoal: ThreadGoal? {
+        selectedSession?.goal ?? contextStore.context(for: selectedSessionID)?.goal
+    }
+
     var selectedForegroundActivity: SessionForegroundActivity? {
         if isRefreshingSelectedSession {
             return .refreshing
@@ -276,6 +764,98 @@ final class SessionStore: ObservableObject {
             return nil
         }
         return foregroundActivityBySessionID[selectedSessionID]
+    }
+
+    var selectedGitStatusPath: String? {
+        if let session = selectedSession, !session.dir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return session.dir
+        }
+        return selectedProject?.path
+    }
+
+    var selectedCommandActionPath: String? {
+        selectedGitStatusPath
+    }
+
+    var selectedCommandActions: [AgentCommandAction] {
+        guard let path = selectedCommandActionPath else {
+            return []
+        }
+        return commandActionsByPath[path] ?? []
+    }
+
+    var selectedCommandActionErrorMessage: String? {
+        guard let path = selectedCommandActionPath else {
+            return nil
+        }
+        return commandActionErrorByPath[path]
+    }
+
+    var selectedCommandActionResult: CommandActionRunResponse? {
+        guard let path = selectedCommandActionPath else {
+            return nil
+        }
+        return commandActionResultByPath[path]
+    }
+
+    var selectedCommandActionHistory: [CommandActionRunResponse] {
+        guard let path = selectedCommandActionPath else {
+            return []
+        }
+        return commandActionHistoryByPath[path] ?? []
+    }
+
+    var selectedQueuedCommandActionIDs: [String] {
+        guard let path = selectedCommandActionPath else {
+            return []
+        }
+        return queuedCommandActionIDsByPath[path] ?? []
+    }
+
+    var isRunningCommandAction: Bool {
+        runningCommandActionID != nil
+    }
+
+    var selectedGitStatus: GitStatusResponse? {
+        guard let path = selectedGitStatusPath else {
+            return nil
+        }
+        return gitStatusByPath[path]
+    }
+
+    var selectedGitStatusErrorMessage: String? {
+        guard let path = selectedGitStatusPath else {
+            return nil
+        }
+        return gitStatusErrorByPath[path]
+    }
+
+    var selectedGitActionErrorMessage: String? {
+        guard let path = selectedGitStatusPath else {
+            return nil
+        }
+        return gitActionErrorByPath[path]
+    }
+
+    var selectedPullRequestURL: String? {
+        guard let path = selectedGitStatusPath else {
+            return nil
+        }
+        return pullRequestStatusByPath[path]?.url ?? pullRequestURLByPath[path]
+    }
+
+    var selectedPullRequestStatus: GitPullRequestStatusResponse? {
+        guard let path = selectedGitStatusPath else {
+            return nil
+        }
+        return pullRequestStatusByPath[path]
+    }
+
+    var selectedPullRequestStatusErrorMessage: String? {
+        guard let path = selectedGitStatusPath else {
+            return nil
+        }
+        return pullRequestStatusErrorByPath[path]
     }
 
     var connectionBadgeTitle: String? {
@@ -292,10 +872,26 @@ final class SessionStore: ObservableObject {
     }
 
     var filteredSessions: [AgentSession] {
+        let base: [AgentSession]
         guard let selectedProjectID else {
-            return sortedAllSessions
+            base = sortedAllSessions
+            return sessionsMatchingSearch(base)
         }
-        return sortedSessionsByProjectID[selectedProjectID] ?? []
+        base = sortedSessionsByProjectID[selectedProjectID] ?? []
+        return sessionsMatchingSearch(base)
+    }
+
+    var filteredSidebarProjects: [AgentProject] {
+        guard isSessionSearchActive else {
+            return sidebarProjects
+        }
+        return sidebarProjects.filter { project in
+            projectMatchesSearch(project) || !sessionsMatchingSearch(sortedSessionsByProjectID[project.id] ?? []).isEmpty
+        }
+    }
+
+    var isSessionSearchActive: Bool {
+        !normalizedSessionSearchQuery.isEmpty
     }
 
     func isProjectExpanded(_ projectID: String) -> Bool {
@@ -308,6 +904,14 @@ final class SessionStore: ObservableObject {
 
     func sessions(forProjectID projectID: String) -> [AgentSession] {
         sortedSessionsByProjectID[projectID] ?? []
+    }
+
+    func isSessionPinned(_ sessionID: SessionID) -> Bool {
+        pinnedSessionIDs.contains(sessionID)
+    }
+
+    func isSessionArchived(_ sessionID: SessionID) -> Bool {
+        archivedSessionIDs.contains(sessionID)
     }
 
     func visibleSessions(forProjectID projectID: String) -> [AgentSession] {
@@ -487,7 +1091,7 @@ final class SessionStore: ObservableObject {
     func openWorkspace(path: String) async -> Bool {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            setErrorMessage("请输入 Mac 上的目录路径")
+            setErrorMessage("请输入开发环境中的目录路径")
             return false
         }
         do {
@@ -514,9 +1118,645 @@ final class SessionStore: ObservableObject {
         await openWorkspace(path: project.path)
     }
 
+    @discardableResult
+    func openChatWorkspace() async -> Bool {
+        do {
+            let workspace = try await clientFactory().chatWorkspace()
+            rememberWorkspace(workspace)
+            clearWorkspaceUnavailable(workspace.id)
+            setSelectedProjectID(workspace.id)
+            setSelectedSessionID(nil)
+            insertExpandedProjectID(workspace.id)
+            setErrorMessage(nil)
+            disconnectWebSocket()
+            await refreshSessions(forProjectID: workspace.id)
+            return true
+        } catch {
+            setErrorMessage(error.localizedDescription)
+            return false
+        }
+    }
+
+    @discardableResult
+    func createWorktreeAndOpen(project: AgentProject, name: String? = nil, base: String? = nil, branch: String? = nil) async -> Bool {
+        isCreatingWorktree = true
+        defer { isCreatingWorktree = false }
+        do {
+            let response = try await clientFactory().createWorktree(
+                path: project.path,
+                name: name?.trimmingCharacters(in: .whitespacesAndNewlines),
+                base: base?.trimmingCharacters(in: .whitespacesAndNewlines),
+                branch: branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            let workspace = response.workspace
+            // Worktree 成功创建后作为一个普通 workspace 接入，后续 thread/list 和 thread/start 复用现有 cwd 安全链路。
+            rememberWorkspace(workspace)
+            upsertManagedWorktree(WorktreeListItem(workspace: workspace, worktree: response.worktree))
+            clearWorkspaceUnavailable(workspace.id)
+            setSelectedProjectID(workspace.id)
+            setSelectedSessionID(nil)
+            insertExpandedProjectID(workspace.id)
+            setErrorMessage(nil)
+            disconnectWebSocket()
+            await refreshSessions(forProjectID: workspace.id)
+            return true
+        } catch {
+            setErrorMessage(error.localizedDescription)
+            return false
+        }
+    }
+
+    @discardableResult
+    func handoffSessionToWorktree(_ session: AgentSession, name: String? = nil, base: String? = nil, branch: String? = nil) async -> Bool {
+        guard !session.isRunning else {
+            setErrorMessage("运行中的会话不能直接转到 Worktree，请先停止或等待完成。")
+            return false
+        }
+        let rootProjectID = rootProjectID(forProjectID: session.projectID)
+        guard let rootWorkspace = ensureWorkspaceForKnownProjectID(rootProjectID) else {
+            setErrorMessage("来源会话的根项目已失效，请重新打开工作区。")
+            return false
+        }
+
+        isCreatingWorktree = true
+        defer { isCreatingWorktree = false }
+        do {
+            // handoff 仍然创建真实 managed Worktree，再用普通 thread/start 启动新线程；
+            // 不伪造历史迁移，避免跨 cwd resume 带来不可预测状态。
+            let response = try await clientFactory().createWorktree(
+                path: rootWorkspace.path,
+                name: normalizedOptional(name) ?? defaultHandoffWorktreeName(for: session),
+                base: normalizedOptional(base),
+                branch: normalizedOptional(branch)
+            )
+            let workspace = response.workspace
+            rememberWorkspace(workspace)
+            upsertManagedWorktree(WorktreeListItem(workspace: workspace, worktree: response.worktree))
+            clearWorkspaceUnavailable(workspace.id)
+            setSelectedProjectID(workspace.id)
+            setSelectedSessionID(nil)
+            insertExpandedProjectID(workspace.id)
+            setErrorMessage(nil)
+            worktreeErrorMessage = nil
+            disconnectWebSocket()
+            await refreshSessions(forProjectID: workspace.id)
+
+            let sourceThreadID = normalizedOptional(session.resumeID) ?? session.id
+            do {
+                let forked = try await clientFactory().forkSession(threadID: sourceThreadID, workspace: workspace)
+                let responseSession = self.session(forked, in: workspace)
+                upsert(responseSession)
+                setSelectedProjectID(responseSession.projectID)
+                setSelectedSessionID(responseSession.id)
+                insertExpandedProjectID(responseSession.projectID)
+                await loadHistoryIfNeeded(for: responseSession)
+                if responseSession.isRunning {
+                    connectWebSocket(responseSession)
+                } else {
+                    disconnectWebSocket()
+                }
+                conversationStore.appendSystem("已从来源会话 fork 到这个 Worktree。", sessionID: responseSession.id)
+                setStatusMessage("已 fork 到新 Worktree")
+                return true
+            } catch {
+                setStatusMessage("原生 fork 不可用，改用提示式 Worktree 交接：\(error.localizedDescription)")
+            }
+
+            var options = CodexAppServerTurnOptions.default
+            options.sessionStartSource = "mimi_remote_worktree_handoff"
+            options.threadSource = "worktree_handoff"
+            let prompt = worktreeHandoffPrompt(
+                source: session,
+                rootWorkspace: rootWorkspace,
+                targetWorkspace: workspace,
+                worktree: response.worktree
+            )
+            let started = await createSession(
+                projectID: workspace.id,
+                payload: CodexAppServerTurnPayload(prompt: prompt, options: options),
+                resume: nil,
+                clientMessageID: UUID().uuidString
+            )
+            if started {
+                setStatusMessage("已转到新 Worktree")
+            }
+            return started
+        } catch {
+            setErrorMessage(error.localizedDescription)
+            return false
+        }
+    }
+
+    private func normalizedOptional(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func defaultHandoffWorktreeName(for session: AgentSession) -> String {
+        let title = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "handoff" : "handoff-\(String(title.prefix(36)))"
+    }
+
+    private func worktreeHandoffPrompt(
+        source session: AgentSession,
+        rootWorkspace: AgentWorkspace,
+        targetWorkspace: AgentWorkspace,
+        worktree: WorktreeDescriptor
+    ) -> String {
+        let sourceThreadID = normalizedOptional(session.resumeID) ?? session.id
+        let branch = normalizedOptional(worktree.branch) ?? "未命名分支"
+        let preview = normalizedOptional(session.preview).map { "\n来源摘要：\($0)" } ?? ""
+        return """
+        请在这个新的 Worktree 中继续处理来源会话的任务。
+
+        来源会话：
+        - 标题：\(session.title)
+        - 线程 ID：\(sourceThreadID)
+        - 原工作区：\(rootWorkspace.path)\(preview)
+
+        新 Worktree：
+        - 路径：\(targetWorkspace.path)
+        - Base：\(worktree.base)
+        - 分支：\(branch)
+
+        继续要求：
+        1. 先检查当前目录的 Git 状态和关键文件。
+        2. 不要假设原工作区的未提交改动已经复制到这里；这个 Worktree 是从上面的 Base 创建的隔离 checkout。
+        3. 如果需要来源会话更完整的上下文，请先向我确认要补充哪些信息。
+        """
+    }
+
+    func worktreeBranches(path: String) -> WorktreeBranchListResponse? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return worktreeBranchesByPath[trimmed]
+    }
+
+    func worktreeBranchError(path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return worktreeBranchErrorByPath[trimmed]
+    }
+
+    func refreshWorktreeBranches(path: String) async {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+
+        isRefreshingWorktreeBranches = true
+        defer { isRefreshingWorktreeBranches = false }
+        do {
+            // 分支列表是只读建议值：缓存服务端 canonical path，同时保留调用方原始 key，避免 /var 和 /private/var 这类路径差异影响 UI 命中。
+            let response = try await clientFactory().worktreeBranches(path: trimmed)
+            worktreeBranchesByPath[trimmed] = response
+            worktreeBranchesByPath[response.path] = response
+            worktreeBranchErrorByPath.removeValue(forKey: trimmed)
+            worktreeBranchErrorByPath.removeValue(forKey: response.path)
+        } catch {
+            worktreeBranchErrorByPath[trimmed] = error.localizedDescription
+        }
+    }
+
+    func refreshManagedWorktrees() async {
+        isRefreshingWorktrees = true
+        defer { isRefreshingWorktrees = false }
+        do {
+            let worktrees = try await clientFactory().listWorktrees()
+            setManagedWorktreesIfChanged(worktrees)
+            worktreeErrorMessage = nil
+        } catch {
+            worktreeErrorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func pruneMissingManagedWorktrees() async -> Int {
+        isPruningWorktrees = true
+        defer { isPruningWorktrees = false }
+        do {
+            let response = try await clientFactory().pruneMissingWorktrees()
+            setManagedWorktreesIfChanged(response.worktrees)
+            worktreeErrorMessage = nil
+            let count = response.prunedPaths.count
+            setStatusMessage(count == 0 ? "没有需要清理的 Worktree 登记" : "已清理 \(count) 条丢失的 Worktree 登记")
+            return count
+        } catch {
+            worktreeErrorMessage = error.localizedDescription
+            return 0
+        }
+    }
+
+    func managedWorktrees(rootProjectID: String? = nil) -> [WorktreeListItem] {
+        let root = rootProjectID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let root, !root.isEmpty else {
+            return managedWorktrees
+        }
+        return managedWorktrees.filter { $0.worktree.rootProjectID == root }
+    }
+
+    func rootProjectID(forProjectID projectID: String) -> String {
+        workspacesByID[projectID]?.rootProjectID ?? projectID
+    }
+
+    func hasRunningSession(in worktree: WorktreeListItem) -> Bool {
+        sessions.contains { session in
+            session.projectID == worktree.workspace.id && session.isRunning
+        }
+    }
+
+    @discardableResult
+    func openManagedWorktree(_ item: WorktreeListItem) async -> Bool {
+        let workspace = item.workspace
+        rememberWorkspace(workspace)
+        clearWorkspaceUnavailable(workspace.id)
+        setSelectedProjectID(workspace.id)
+        setSelectedSessionID(nil)
+        insertExpandedProjectID(workspace.id)
+        setErrorMessage(nil)
+        worktreeErrorMessage = nil
+        disconnectWebSocket()
+        await refreshSessions(forProjectID: workspace.id)
+        return true
+    }
+
+    @discardableResult
+    func deleteManagedWorktree(_ item: WorktreeListItem, force: Bool = false) async -> Bool {
+        if hasRunningSession(in: item) {
+            worktreeErrorMessage = "该 Worktree 还有运行中的会话，先停止会话后再删除。"
+            return false
+        }
+
+        let workspace = item.workspace
+        isDeletingWorktree = true
+        defer { isDeletingWorktree = false }
+        do {
+            let response = try await clientFactory().deleteWorktree(path: workspace.path, force: force)
+            setManagedWorktreesIfChanged(response.worktrees)
+            forgetWorkspaceAfterWorktreeDeletion(workspace)
+            gitStatusByPath.removeValue(forKey: workspace.path)
+            gitStatusErrorByPath.removeValue(forKey: workspace.path)
+            gitActionErrorByPath.removeValue(forKey: workspace.path)
+            commandActionsByPath.removeValue(forKey: workspace.path)
+            commandActionErrorByPath.removeValue(forKey: workspace.path)
+            commandActionResultByPath.removeValue(forKey: workspace.path)
+            commandActionHistoryByPath.removeValue(forKey: workspace.path)
+            queuedCommandActionRuns.removeAll { $0.path == workspace.path }
+            queuedCommandActionIDsByPath.removeValue(forKey: workspace.path)
+            worktreeBranchesByPath.removeValue(forKey: workspace.path)
+            worktreeBranchErrorByPath.removeValue(forKey: workspace.path)
+            pullRequestURLByPath.removeValue(forKey: workspace.path)
+            pullRequestStatusByPath.removeValue(forKey: workspace.path)
+            pullRequestStatusErrorByPath.removeValue(forKey: workspace.path)
+            worktreeErrorMessage = nil
+            setStatusMessage("已删除 Worktree \(workspace.name)")
+            return true
+        } catch {
+            worktreeErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     // 目录浏览只读不改状态，错误交给调用方（打开面板内联展示），不污染全局 errorMessage。
     func listDirectories(path: String) async throws -> DirectoryListResponse {
         try await clientFactory().listDirectories(path: path)
+    }
+
+    // 文件预览同样不污染全局错误状态：后端只返回授权边界内的普通文件，客户端落到临时目录后交给 QuickLook。
+    func previewFile(path: String) async throws -> URL {
+        let response = try await clientFactory().readFile(path: path)
+        guard let data = Data(base64Encoded: response.contentBase64) else {
+            throw FilePreviewStoreError.invalidPayload
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MimiRemotePreviews", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let filename = Self.safePreviewFilename(response.name)
+        let url = directory.appendingPathComponent("\(UUID().uuidString)-\(filename)", isDirectory: false)
+        try data.write(to: url, options: [.atomic])
+        return url
+    }
+
+    func refreshSelectedCommandActions() async {
+        guard let path = selectedCommandActionPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await refreshCommandActions(path: path)
+    }
+
+    func refreshCommandActions(path: String) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty else {
+            return
+        }
+        isRefreshingCommandActions = true
+        defer { isRefreshingCommandActions = false }
+        do {
+            let actions = try await clientFactory().commandActions(path: targetPath)
+            // action 是 agentd 配置里的 allowlist，只按工作区 path 缓存，避免跨会话串结果。
+            commandActionsByPath[targetPath] = actions
+            commandActionErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            commandActionsByPath[targetPath] = []
+            commandActionErrorByPath[targetPath] = error.localizedDescription
+        }
+    }
+
+    func runSelectedCommandAction(_ action: AgentCommandAction) async {
+        guard let path = selectedCommandActionPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await runCommandAction(path: path, id: action.id)
+    }
+
+    func runCommandAction(path: String, id: String) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let actionID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty, !actionID.isEmpty else {
+            return
+        }
+
+        let run = QueuedCommandActionRun(path: targetPath, id: actionID)
+        if isRunningCommandAction {
+            enqueueCommandActionRun(run)
+            return
+        }
+
+        await drainCommandActionRuns(startingWith: run)
+    }
+
+    private func enqueueCommandActionRun(_ run: QueuedCommandActionRun) {
+        queuedCommandActionRuns.append(run)
+        var ids = queuedCommandActionIDsByPath[run.path] ?? []
+        ids.append(run.id)
+        queuedCommandActionIDsByPath[run.path] = ids
+    }
+
+    private func dequeueCommandActionRun() -> QueuedCommandActionRun? {
+        guard !queuedCommandActionRuns.isEmpty else {
+            return nil
+        }
+        let run = queuedCommandActionRuns.removeFirst()
+        var ids = queuedCommandActionIDsByPath[run.path] ?? []
+        if let index = ids.firstIndex(of: run.id) {
+            ids.remove(at: index)
+        }
+        if ids.isEmpty {
+            queuedCommandActionIDsByPath.removeValue(forKey: run.path)
+        } else {
+            queuedCommandActionIDsByPath[run.path] = ids
+        }
+        return run
+    }
+
+    private func drainCommandActionRuns(startingWith firstRun: QueuedCommandActionRun) async {
+        var nextRun: QueuedCommandActionRun? = firstRun
+        while let run = nextRun {
+            await performCommandActionRun(run)
+            nextRun = dequeueCommandActionRun()
+        }
+    }
+
+    private func performCommandActionRun(_ run: QueuedCommandActionRun) async {
+        runningCommandActionPath = run.path
+        runningCommandActionID = run.id
+        defer {
+            runningCommandActionPath = nil
+            runningCommandActionID = nil
+        }
+        do {
+            let response = try await clientFactory().runCommandAction(path: run.path, id: run.id)
+            commandActionResultByPath[run.path] = response
+            var history = commandActionHistoryByPath[run.path] ?? []
+            // 执行历史只做本地短缓存，不写后端，避免命令输出长期留存在配置服务里。
+            history.insert(response, at: 0)
+            if history.count > Self.commandActionHistoryLimit {
+                history.removeLast(history.count - Self.commandActionHistoryLimit)
+            }
+            commandActionHistoryByPath[run.path] = history
+            commandActionErrorByPath.removeValue(forKey: run.path)
+        } catch {
+            commandActionErrorByPath[run.path] = error.localizedDescription
+        }
+    }
+
+    func refreshSelectedGitStatus() async {
+        guard let path = selectedGitStatusPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await refreshGitStatus(path: path)
+    }
+
+    func refreshGitStatus(path: String) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty else {
+            return
+        }
+        isRefreshingGitStatus = true
+        defer { isRefreshingGitStatus = false }
+        do {
+            let status = try await clientFactory().gitStatus(path: targetPath)
+            // Git 状态是只读辅助信息，按路径缓存；用户切换会话后，旧请求只会更新旧路径缓存。
+            gitStatusByPath[targetPath] = status
+            gitStatusErrorByPath.removeValue(forKey: targetPath)
+            gitActionErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            gitStatusErrorByPath[targetPath] = error.localizedDescription
+        }
+    }
+
+    func performSelectedGitAction(_ action: GitActionKind, files: [String]) async {
+        guard let path = selectedGitStatusPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await performGitAction(path: path, action: action, files: files)
+    }
+
+    func performGitAction(path: String, action: GitActionKind, files: [String]) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetFiles = files
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !targetPath.isEmpty, !targetFiles.isEmpty else {
+            return
+        }
+
+        isRunningGitAction = true
+        defer { isRunningGitAction = false }
+        do {
+            let status = try await clientFactory().gitAction(path: targetPath, action: action, files: targetFiles)
+            // 写动作成功后直接采用服务端返回的新状态，避免前端本地推断 Git index。
+            gitStatusByPath[targetPath] = status
+            gitStatusErrorByPath.removeValue(forKey: targetPath)
+            gitActionErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            gitActionErrorByPath[targetPath] = error.localizedDescription
+        }
+    }
+
+    func performSelectedGitPatchAction(_ action: GitActionKind, patch: String) async {
+        guard let path = selectedGitStatusPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await performGitPatchAction(path: path, action: action, patch: patch)
+    }
+
+    func performGitPatchAction(path: String, action: GitActionKind, patch: String) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetPatch = patch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty, !targetPatch.isEmpty else {
+            return
+        }
+
+        isRunningGitAction = true
+        defer { isRunningGitAction = false }
+        do {
+            let status = try await clientFactory().gitPatchAction(path: targetPath, action: action, patch: targetPatch)
+            // hunk 操作同样以服务端返回为准，避免本地解析 patch 后再二次推断状态。
+            gitStatusByPath[targetPath] = status
+            gitStatusErrorByPath.removeValue(forKey: targetPath)
+            gitActionErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            gitActionErrorByPath[targetPath] = error.localizedDescription
+        }
+    }
+
+    func commitSelectedGitChanges(message: String) async {
+        guard let path = selectedGitStatusPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await commitGitChanges(path: path, message: message)
+    }
+
+    func commitGitChanges(path: String, message: String) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commitMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty, !commitMessage.isEmpty else {
+            return
+        }
+
+        isCommittingGitChanges = true
+        defer { isCommittingGitChanges = false }
+        do {
+            let status = try await clientFactory().gitCommit(path: targetPath, message: commitMessage)
+            // commit 只提交已暂存内容；成功后用服务端状态清理 staged diff 和文件列表。
+            gitStatusByPath[targetPath] = status
+            gitStatusErrorByPath.removeValue(forKey: targetPath)
+            gitActionErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            gitActionErrorByPath[targetPath] = error.localizedDescription
+        }
+    }
+
+    func pushSelectedGitBranch(remote: String? = nil) async {
+        guard let path = selectedGitStatusPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await pushGitBranch(path: path, remote: remote)
+    }
+
+    func pushGitBranch(path: String, remote: String? = nil) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetRemote = remote?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty else {
+            return
+        }
+
+        isPushingGitBranch = true
+        defer { isPushingGitBranch = false }
+        do {
+            let response = try await clientFactory().gitPush(path: targetPath, remote: targetRemote?.isEmpty == true ? nil : targetRemote)
+            gitStatusByPath[targetPath] = response.status
+            gitStatusErrorByPath.removeValue(forKey: targetPath)
+            gitActionErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            gitActionErrorByPath[targetPath] = error.localizedDescription
+        }
+    }
+
+    func createSelectedPullRequest(title: String, body: String = "", draft: Bool = true) async {
+        guard let path = selectedGitStatusPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await createPullRequest(path: path, title: title, body: body, draft: draft)
+    }
+
+    func createPullRequest(path: String, title: String, body: String = "", draft: Bool = true) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty, !prTitle.isEmpty else {
+            return
+        }
+
+        isCreatingPullRequest = true
+        defer { isCreatingPullRequest = false }
+        do {
+            let response = try await clientFactory().gitCreatePullRequest(path: targetPath, title: prTitle, body: body, draft: draft)
+            if let url = response.url?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty {
+                pullRequestURLByPath[targetPath] = url
+                pullRequestStatusByPath[targetPath] = GitPullRequestStatusResponse(
+                    path: targetPath,
+                    branch: response.branch,
+                    exists: true,
+                    title: prTitle,
+                    url: url,
+                    isDraft: draft
+                )
+            }
+            pullRequestStatusErrorByPath.removeValue(forKey: targetPath)
+            gitActionErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            gitActionErrorByPath[targetPath] = error.localizedDescription
+        }
+    }
+
+    func refreshSelectedPullRequestStatus() async {
+        guard let path = selectedGitStatusPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty
+        else {
+            return
+        }
+        await refreshPullRequestStatus(path: path)
+    }
+
+    func refreshPullRequestStatus(path: String) async {
+        let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetPath.isEmpty else {
+            return
+        }
+
+        isRefreshingPullRequestStatus = true
+        defer { isRefreshingPullRequestStatus = false }
+        do {
+            let response = try await clientFactory().gitPullRequestStatus(path: targetPath)
+            pullRequestStatusByPath[targetPath] = response
+            if let url = response.url?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty {
+                pullRequestURLByPath[targetPath] = url
+            }
+            pullRequestStatusErrorByPath.removeValue(forKey: targetPath)
+        } catch {
+            pullRequestStatusErrorByPath[targetPath] = error.localizedDescription
+        }
     }
 
     func forgetWorkspace(_ project: AgentProject) {
@@ -528,6 +1768,7 @@ final class SessionStore: ObservableObject {
         sessionHasMoreByProjectID.removeValue(forKey: project.id)
         sessionPageRequestTokenByProjectID.removeValue(forKey: project.id)
         sessionPageLoadingTokenByProjectID.removeValue(forKey: project.id)
+        clearSessionReminders(forProjectID: project.id)
         sessions = sessions.filter { $0.projectID != project.id }
         clearWorkspaceUnavailable(project.id)
         if selectedProjectID == project.id {
@@ -536,6 +1777,81 @@ final class SessionStore: ObservableObject {
             disconnectWebSocket()
         }
         setStatusMessage("已从当前设备移除 \(project.name)")
+    }
+
+    func toggleSessionPinned(_ session: AgentSession) {
+        if pinnedSessionIDs.contains(session.id) {
+            pinnedSessionIDs.remove(session.id)
+            setStatusMessage("已取消置顶 \(session.title)")
+        } else {
+            archivedSessionIDs.remove(session.id)
+            pinnedSessionIDs.insert(session.id)
+            setStatusMessage("已置顶 \(session.title)")
+        }
+        saveSessionListPreferences()
+        rebuildSessionIndexes()
+    }
+
+    func toggleSessionArchived(_ session: AgentSession) {
+        if archivedSessionIDs.contains(session.id) {
+            archivedSessionIDs.remove(session.id)
+            setStatusMessage("已取消归档 \(session.title)")
+        } else {
+            archivedSessionIDs.insert(session.id)
+            pinnedSessionIDs.remove(session.id)
+            setStatusMessage("已归档 \(session.title)")
+        }
+        saveSessionListPreferences()
+        rebuildSessionIndexes()
+    }
+
+    @discardableResult
+    func toggleSessionArchivedRemote(_ session: AgentSession) async -> Bool {
+        let shouldArchive = !archivedSessionIDs.contains(session.id)
+        toggleSessionArchived(session)
+        do {
+            try await clientFactory().setSessionArchived(id: session.id, archived: shouldArchive)
+            setStatusMessage(shouldArchive ? "已归档远端会话 \(session.title)" : "已取消远端归档 \(session.title)")
+            return true
+        } catch {
+            setStatusMessage(
+                shouldArchive
+                    ? "已在本地归档，远端归档失败：\(error.localizedDescription)"
+                    : "已在本地取消归档，远端取消失败：\(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    func sessionReminder(for sessionID: SessionID) -> SessionReminder? {
+        sessionRemindersByID[sessionID]
+    }
+
+    func scheduleSessionReminder(_ session: AgentSession, after interval: TimeInterval, now: Date = Date()) async {
+        let boundedInterval = max(60, interval)
+        let reminder = SessionReminder(
+            sessionID: session.id,
+            title: session.title,
+            fireAt: now.addingTimeInterval(boundedInterval),
+            createdAt: now
+        )
+        sessionRemindersByID[session.id] = reminder
+        saveSessionReminders()
+
+        do {
+            // 先持久化，再尽力交给系统通知；即使用户未授权通知，侧栏仍能显示提醒状态。
+            try await sessionReminderScheduler.schedule(reminder)
+            setStatusMessage("已设置提醒 \(session.title)")
+        } catch {
+            setStatusMessage("已保存提醒，但通知调度失败：\(error.localizedDescription)")
+        }
+    }
+
+    func clearSessionReminder(_ session: AgentSession) {
+        sessionRemindersByID.removeValue(forKey: session.id)
+        saveSessionReminders()
+        sessionReminderScheduler.cancel(sessionID: session.id)
+        setStatusMessage("已清除提醒 \(session.title)")
     }
 
     func isWorkspaceUnavailable(_ projectID: String) -> Bool {
@@ -657,6 +1973,23 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    func refreshCapabilities() async {
+        if isRefreshingCapabilities {
+            return
+        }
+        let path = selectedCommandActionPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        isRefreshingCapabilities = true
+        defer { isRefreshingCapabilities = false }
+        do {
+            let response = try await clientFactory().capabilities(path: path?.isEmpty == true ? nil : path)
+            capabilityList = response
+            capabilityErrorMessage = nil
+        } catch {
+            capabilityErrorMessage = error.localizedDescription
+        }
+    }
+
     func loadEarlierHistoryForSelectedSession() async {
         guard let session = selectedSession,
               let cursor = historyPreviousCursorBySessionID[session.id],
@@ -750,6 +2083,73 @@ final class SessionStore: ObservableObject {
     }
 
     @discardableResult
+    func startGoalTurn(
+        payload: CodexAppServerTurnPayload,
+        objective: String,
+        tokenBudget: Int64? = nil
+    ) async -> Bool {
+        let normalizedObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedObjective.isEmpty else {
+            threadGoalErrorMessage = "目标内容不能为空"
+            return false
+        }
+        if let tokenBudget, tokenBudget <= 0 {
+            threadGoalErrorMessage = "Token 预算必须大于 0"
+            return false
+        }
+        threadGoalErrorMessage = nil
+
+        if let session = selectedSession, session.isRunning {
+            // 运行中目标要先确认实时通道可用；否则会出现目标已写入但任务没有真正发送的中间态。
+            guard readyWebSocket(for: session) != nil else {
+                return false
+            }
+            // 运行中 thread 已经绑定了 WebSocket，先更新 thread 级目标，再把同一份输入作为目标任务发送。
+            guard await setThreadGoal(
+                threadID: session.id,
+                objective: normalizedObjective,
+                status: .active,
+                tokenBudget: tokenBudget
+            ) else {
+                return false
+            }
+            let sent = await sendTurn(payload)
+            if sent {
+                setStatusMessage("目标任务已启动")
+            }
+            return sent
+        }
+
+        let resume = selectedSession
+        let projectID = resume?.projectID ?? selectedProjectID
+        guard let projectID else {
+            setErrorMessage("请先选择项目")
+            return false
+        }
+        let started = await createSession(
+            projectID: projectID,
+            payload: payload,
+            resume: resume,
+            clientMessageID: UUID().uuidString,
+            initialGoalObjective: normalizedObjective
+        )
+        if started {
+            setStatusMessage("目标任务已启动")
+        }
+        return started
+    }
+
+    func transcribeVoice(filename: String, contentType: String, audioData: Data, language: String?, prompt: String?) async throws -> VoiceTranscriptionResponse {
+        try await clientFactory().transcribeVoice(
+            filename: filename,
+            contentType: contentType,
+            audioData: audioData,
+            language: language,
+            prompt: prompt
+        )
+    }
+
+    @discardableResult
     func sendTurn(_ payload: CodexAppServerTurnPayload) async -> Bool {
         guard !payload.isEmpty else {
             return false
@@ -806,7 +2206,7 @@ final class SessionStore: ObservableObject {
             setErrorMessage("审批发送失败：WebSocket 未连接")
             return
         }
-        setStatusMessage(accept ? "批准决定已发送，等待 Codex 继续执行" : "拒绝决定已发送，等待 Codex 确认")
+        setStatusMessage(accept ? "批准决定已发送，等待 Agent 继续执行" : "拒绝决定已发送，等待 Agent 确认")
     }
 
     func isApprovalDecisionPending(_ approval: ApprovalSummary) -> Bool {
@@ -843,7 +2243,7 @@ final class SessionStore: ObservableObject {
             return true
         }
 
-        // 会话已经结束或失败时，沿用普通发送路径重新创建/恢复 Codex thread。
+        // 会话已经结束或失败时，沿用普通发送路径重新创建/恢复后端 thread。
         return await sendTurn(message.turnPayload ?? CodexAppServerTurnPayload(prompt: prompt))
     }
 
@@ -869,10 +2269,101 @@ final class SessionStore: ObservableObject {
                 item.activeTurnID = nil
             }
             clearForegroundActivity(sessionID: session.id)
-            conversationStore.appendSystem("Codex 会话已停止。", sessionID: session.id)
+            conversationStore.appendSystem("会话已停止。", sessionID: session.id)
             disconnectWebSocket()
             setStatusMessage("已停止会话")
         } catch {
+            setErrorMessage(error.localizedDescription)
+        }
+    }
+
+    func refreshSelectedThreadGoal() async {
+        guard let sessionID = selectedSessionID else {
+            return
+        }
+        isUpdatingThreadGoal = true
+        threadGoalErrorMessage = nil
+        defer { isUpdatingThreadGoal = false }
+        do {
+            let goal = try await clientFactory().threadGoal(threadID: sessionID)
+            if let goal {
+                applyThreadGoal(goal, fallbackSessionID: sessionID)
+            } else {
+                clearThreadGoal(sessionID: sessionID)
+            }
+        } catch {
+            threadGoalErrorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func setThreadGoal(
+        threadID: SessionID,
+        objective: String?,
+        status: ThreadGoalStatus?,
+        tokenBudget: Int64?
+    ) async -> Bool {
+        let normalizedObjective = objective?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedObjective, normalizedObjective.isEmpty {
+            threadGoalErrorMessage = "目标内容不能为空"
+            return false
+        }
+        if let tokenBudget, tokenBudget <= 0 {
+            threadGoalErrorMessage = "Token 预算必须大于 0"
+            return false
+        }
+        isUpdatingThreadGoal = true
+        threadGoalErrorMessage = nil
+        defer { isUpdatingThreadGoal = false }
+        do {
+            let goal = try await clientFactory().setThreadGoal(
+                threadID: threadID,
+                objective: normalizedObjective,
+                status: status,
+                tokenBudget: tokenBudget
+            )
+            applyThreadGoal(goal, fallbackSessionID: threadID)
+            setStatusMessage("目标已更新")
+            return true
+        } catch {
+            threadGoalErrorMessage = error.localizedDescription
+            setErrorMessage(error.localizedDescription)
+            return false
+        }
+    }
+
+    @discardableResult
+    func setSelectedThreadGoal(
+        objective: String?,
+        status: ThreadGoalStatus?,
+        tokenBudget: Int64?
+    ) async -> Bool {
+        guard let sessionID = selectedSessionID else {
+            return false
+        }
+        return await setThreadGoal(threadID: sessionID, objective: objective, status: status, tokenBudget: tokenBudget)
+    }
+
+    func updateSelectedThreadGoalStatus(_ status: ThreadGoalStatus) async {
+        guard let sessionID = selectedSessionID else {
+            return
+        }
+        _ = await setThreadGoal(threadID: sessionID, objective: nil, status: status, tokenBudget: nil)
+    }
+
+    func clearSelectedThreadGoal() async {
+        guard let sessionID = selectedSessionID else {
+            return
+        }
+        isUpdatingThreadGoal = true
+        threadGoalErrorMessage = nil
+        defer { isUpdatingThreadGoal = false }
+        do {
+            try await clientFactory().clearThreadGoal(threadID: sessionID)
+            clearThreadGoal(sessionID: sessionID)
+            setStatusMessage("目标已清除")
+        } catch {
+            threadGoalErrorMessage = error.localizedDescription
             setErrorMessage(error.localizedDescription)
         }
     }
@@ -883,7 +2374,13 @@ final class SessionStore: ObservableObject {
     }
 
     @discardableResult
-    private func createSession(projectID: String, payload: CodexAppServerTurnPayload, resume: AgentSession?, clientMessageID: ClientMessageID? = nil) async -> Bool {
+    private func createSession(
+        projectID: String,
+        payload: CodexAppServerTurnPayload,
+        resume: AgentSession?,
+        clientMessageID: ClientMessageID? = nil,
+        initialGoalObjective: String? = nil
+    ) async -> Bool {
         var projectID = projectID
         guard let workspace = ensureWorkspaceForKnownProjectID(projectID) else {
             setErrorMessage("工作区已失效，请重新打开")
@@ -918,6 +2415,7 @@ final class SessionStore: ObservableObject {
                 prompt: prompt,
                 input: payload.input,
                 turnOptions: payload.options,
+                initialGoalObjective: initialGoalObjective,
                 resumeID: resume?.resumeID ?? "",
                 clientMessageID: clientMessageID
             ))
@@ -956,7 +2454,7 @@ final class SessionStore: ObservableObject {
                 }
                 setForegroundActivity(.waitingForAssistant, sessionID: responseSession.id)
             } else {
-                conversationStore.appendSystem("Codex 交互式会话已启动。", sessionID: responseSession.id)
+                conversationStore.appendSystem("交互式会话已启动。", sessionID: responseSession.id)
             }
             if let firstMessage = response.firstMessage {
                 conversationStore.completeMessage(firstMessage, metadata: .empty, fallbackSessionID: responseSession.id)
@@ -965,7 +2463,7 @@ final class SessionStore: ObservableObject {
                 }
             }
             if resume != nil {
-                conversationStore.appendSystem("已继续这个 Codex 历史会话。", sessionID: responseSession.id)
+                conversationStore.appendSystem("已继续这个历史会话。", sessionID: responseSession.id)
             }
             connectWebSocket(responseSession)
             setStatusMessage("会话已启动")
@@ -1119,7 +2617,8 @@ final class SessionStore: ObservableObject {
     }
 
     private func replaceSessionsIfChanged(with fresh: [AgentSession], projectID: String?) {
-        let next = Self.replacingSessions(sessions, with: fresh.map(Self.normalizedSession), projectID: projectID)
+        let nextFresh = fresh.map(sessionPreservingActiveApproval)
+        let next = Self.replacingSessions(sessions, with: nextFresh, projectID: projectID)
         ingestSessionContexts(next)
         guard next != sessions else {
             return
@@ -1166,6 +2665,7 @@ final class SessionStore: ObservableObject {
             usage: item.usage,
             rateLimit: item.rateLimit,
             pendingApproval: item.pendingApproval,
+            goal: item.goal,
             context: item.context
         )
     }
@@ -1204,6 +2704,7 @@ final class SessionStore: ObservableObject {
         guard !pageSessions.isEmpty else {
             return
         }
+        let pageSessions = pageSessions.map(sessionPreservingActiveApproval)
         ingestSessionContexts(pageSessions)
         var next = sessions
         var indexByID = sessionIndexByID
@@ -1292,7 +2793,7 @@ final class SessionStore: ObservableObject {
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
         guard !collapsed.isEmpty else {
-            return "新 Codex 会话"
+            return "新会话"
         }
         if collapsed.count <= 42 {
             return collapsed
@@ -1388,7 +2889,8 @@ final class SessionStore: ObservableObject {
 
         // 和 Codex/Litter 的 snapshot 思路一致：Store 在数据变更时生成排序/分组投影，
         // SwiftUI 列表渲染时只读取缓存，避免每个项目行反复 filter + sort。
-        let sorted = Self.sortedSessions(sessions)
+        let listableSessions = sessions.filter(isListableSession)
+        let sorted = sortedSessionsForList(listableSessions)
         if sessions.contains(where: \.isRunning) {
             let previousOrder = frozenAllSessionOrder.isEmpty ? Self.sessionIDs(sortedAllSessions) : frozenAllSessionOrder
             let frozen = Self.applyFrozenOrder(to: sorted, previousOrder: previousOrder)
@@ -1407,7 +2909,7 @@ final class SessionStore: ObservableObject {
 
         var runningProjectIDs: Set<String> = []
         runningProjectIDs.reserveCapacity(naturalGrouped.count)
-        for session in sessions where session.isRunning {
+        for session in listableSessions where session.isRunning {
             runningProjectIDs.insert(session.projectID)
         }
         var grouped: [String: [AgentSession]] = [:]
@@ -1449,7 +2951,23 @@ final class SessionStore: ObservableObject {
     }
 
     private func makeProjectSessionListSnapshot(forProjectID projectID: String) -> ProjectSessionListSnapshot {
-        let allSessions = sortedSessionsByProjectID[projectID] ?? []
+        let baseSessions = sortedSessionsByProjectID[projectID] ?? []
+        if isSessionSearchActive {
+            let matchingSessions = sessionsMatchingSearch(baseSessions)
+            return ProjectSessionListSnapshot(
+                projectID: projectID,
+                isExpanded: true,
+                isShowingAll: true,
+                visibleSessions: matchingSessions,
+                allSessionCount: matchingSessions.count,
+                hiddenCount: 0,
+                canLoadMore: false,
+                isLoadingMore: false,
+                hasCollapsedPreview: false
+            )
+        }
+
+        let allSessions = baseSessions
         let isShowingAll = isShowingAllSessions(projectID: projectID)
         let visibleSessions = isShowingAll ? allSessions : previewSessionsByProjectID[projectID] ?? []
 
@@ -1491,6 +3009,56 @@ final class SessionStore: ObservableObject {
         sessionListSnapshotsByProjectID = snapshots
     }
 
+    private var normalizedSessionSearchQuery: String {
+        Self.normalizedSearchText(sessionSearchQuery)
+    }
+
+    private func sessionsMatchingSearch(_ items: [AgentSession]) -> [AgentSession] {
+        let query = normalizedSessionSearchQuery
+        guard !query.isEmpty else {
+            return items
+        }
+        // 搜索只作用于已加载会话投影，不改原始 sessions；这样清空搜索后能恢复分页、冻结顺序和选择状态。
+        return items.filter { sessionMatchesSearch($0, query: query) }
+    }
+
+    private func sessionMatchesSearch(_ session: AgentSession, query: String) -> Bool {
+        [
+            session.title,
+            session.preview,
+            session.project,
+            session.dir,
+            session.displayStatusText,
+            session.id,
+            session.resumeID
+        ].contains { value in
+            Self.normalizedSearchText(value ?? "").contains(query)
+        }
+    }
+
+    private func isListableSession(_ session: AgentSession) -> Bool {
+        !archivedSessionIDs.contains(session.id) || session.id == selectedSessionID || session.isRunning
+    }
+
+    private func projectMatchesSearch(_ project: AgentProject) -> Bool {
+        let query = normalizedSessionSearchQuery
+        guard !query.isEmpty else {
+            return true
+        }
+        return [
+            project.name,
+            project.path,
+            project.id
+        ].contains { value in
+            Self.normalizedSearchText(value).contains(query)
+        }
+    }
+
+    private static func normalizedSearchText(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+    }
+
     private func pruneSessionScopedState(validSessionIDs: Set<SessionID>) {
         // 会话分页只保留当前已知列表和被选中保留的 session；旧 session 的 cursor/token/activity
         // 继续留在字典里没有业务价值，长时间浏览大量历史时还会慢慢堆内存。
@@ -1519,6 +3087,19 @@ final class SessionStore: ObservableObject {
 
     private static func sortedSessions(_ items: [AgentSession]) -> [AgentSession] {
         SessionIndexStore.sortedSessions(items)
+    }
+
+    private func sortedSessionsForList(_ items: [AgentSession]) -> [AgentSession] {
+        let sorted = Self.sortedSessions(items)
+        let indexByID = Dictionary(uniqueKeysWithValues: sorted.enumerated().map { ($0.element.id, $0.offset) })
+        return sorted.sorted { lhs, rhs in
+            let leftPinned = pinnedSessionIDs.contains(lhs.id)
+            let rightPinned = pinnedSessionIDs.contains(rhs.id)
+            if leftPinned != rightPinned {
+                return leftPinned
+            }
+            return (indexByID[lhs.id] ?? 0) < (indexByID[rhs.id] ?? 0)
+        }
     }
 
     private static func applyFrozenOrder(to items: [AgentSession], previousOrder: [SessionID]) -> [AgentSession] {
@@ -1898,12 +3479,30 @@ final class SessionStore: ObservableObject {
         if let metadata = metadata(for: event) {
             recordEventWatermark(metadata, fallbackSessionID: sessionID)
         }
+        let runtimeNotification = runtimeNotification(for: event, fallbackSessionID: sessionID)
         let output = await eventReducer.reduce(
             event,
             fallbackSessionID: sessionID,
             outputIdleClearDelay: foregroundOutputIdleClearDelay
         )
         applyEventReducerOutput(output)
+        await scheduleRuntimeNotificationIfNeeded(runtimeNotification)
+    }
+
+    private func scheduleRuntimeNotificationIfNeeded(_ notification: SessionRuntimeNotification?) async {
+        guard let notification else {
+            return
+        }
+        guard !deliveredRuntimeNotificationIDs.contains(notification.id) else {
+            return
+        }
+        deliveredRuntimeNotificationIDs.insert(notification.id)
+        do {
+            // 运行态通知不持久化：它只是实时提示，不应该在会话列表状态里留下“待处理任务”的假象。
+            try await sessionReminderScheduler.notify(notification)
+        } catch {
+            setStatusMessage("通知调度失败：\(error.localizedDescription)")
+        }
     }
 
     private func applyEventReducerOutput(_ output: EventReducerOutput) {
@@ -1926,6 +3525,13 @@ final class SessionStore: ObservableObject {
         }
         for (context, fallbackSessionID) in output.contextUpdates {
             contextStore.upsert(context, fallbackSessionID: fallbackSessionID)
+        }
+        for (id, goal) in output.goalUpdates {
+            if let goal {
+                applyThreadGoal(goal, fallbackSessionID: id)
+            } else {
+                clearThreadGoal(sessionID: id)
+            }
         }
         for id in output.pendingApprovalTaskClears {
             contextStore.clearPendingApprovalTasks(sessionID: id)
@@ -1975,6 +3581,8 @@ final class SessionStore: ObservableObject {
         case .sessionRow(_, let metadata),
              .sessionStatus(_, let metadata),
              .sessionContext(_, let metadata),
+             .goalUpdated(_, let metadata),
+             .goalCleared(let metadata),
              .turnStarted(let metadata),
              .assistantDelta(_, let metadata),
              .messageCompleted(_, let metadata),
@@ -1989,6 +3597,58 @@ final class SessionStore: ObservableObject {
         case .error, .unknown:
             return nil
         }
+    }
+
+    private func runtimeNotification(for event: AgentEvent, fallbackSessionID: SessionID) -> SessionRuntimeNotification? {
+        switch event {
+        case .approvalRequest(let request, let metadata):
+            let sessionID = metadata.sessionID ?? fallbackSessionID
+            return SessionRuntimeNotification(
+                id: "approval:\(sessionID):\(request.id)",
+                sessionID: sessionID,
+                title: "等待审批",
+                body: "\(sessionDisplayTitle(sessionID: sessionID))：\(request.title)",
+                kind: .approval
+            )
+        case .turnCompleted(let metadata):
+            let sessionID = metadata.sessionID ?? fallbackSessionID
+            let token = metadata.turnID ?? metadata.messageID ?? metadata.seq.map(String.init) ?? "latest"
+            return SessionRuntimeNotification(
+                id: "completed:\(sessionID):\(token)",
+                sessionID: sessionID,
+                title: "会话已完成",
+                body: sessionDisplayTitle(sessionID: sessionID),
+                kind: .completed
+            )
+        case .sessionStatus(let status, let metadata) where status == "failed":
+            let sessionID = metadata.sessionID ?? fallbackSessionID
+            let token = metadata.turnID ?? metadata.seq.map(String.init) ?? "latest"
+            return SessionRuntimeNotification(
+                id: "failed:\(sessionID):\(token)",
+                sessionID: sessionID,
+                title: "会话失败",
+                body: sessionDisplayTitle(sessionID: sessionID),
+                kind: .failed
+            )
+        case .error(let message):
+            return SessionRuntimeNotification(
+                id: "failed:\(fallbackSessionID):\(message)",
+                sessionID: fallbackSessionID,
+                title: "会话错误",
+                body: message,
+                kind: .failed
+            )
+        default:
+            return nil
+        }
+    }
+
+    private func sessionDisplayTitle(sessionID: SessionID) -> String {
+        if let title = sessionsByID[sessionID]?.title.trimmingCharacters(in: .whitespacesAndNewlines),
+           !title.isEmpty {
+            return title
+        }
+        return "当前会话"
     }
 
     private func recordEventWatermark(_ metadata: AgentEventMetadata, fallbackSessionID: SessionID) {
@@ -2037,6 +3697,13 @@ final class SessionStore: ObservableObject {
         recentWorkspaces = value
     }
 
+    private func setManagedWorktreesIfChanged(_ value: [WorktreeListItem]) {
+        guard managedWorktrees != value else {
+            return
+        }
+        managedWorktrees = value
+    }
+
     private func setSidebarProjectsIfChanged(_ value: [AgentProject]) {
         guard sidebarProjects != value else {
             return
@@ -2053,11 +3720,82 @@ final class SessionStore: ObservableObject {
 
     private func reloadRecentWorkspaces() {
         setRecentWorkspacesIfChanged(recentWorkspaceStore.load(endpoint: appStore.endpoint))
+        reloadSessionListPreferences()
+        reloadSessionReminders()
+    }
+
+    private func reloadSessionListPreferences() {
+        let preferences = sessionListPreferenceStore.load(endpoint: appStore.endpoint)
+        guard pinnedSessionIDs != preferences.pinnedSessionIDs || archivedSessionIDs != preferences.archivedSessionIDs else {
+            return
+        }
+        pinnedSessionIDs = preferences.pinnedSessionIDs
+        archivedSessionIDs = preferences.archivedSessionIDs
+        rebuildSessionIndexes()
+    }
+
+    private func saveSessionListPreferences() {
+        sessionListPreferenceStore.save(
+            SessionListPreferences(pinnedSessionIDs: pinnedSessionIDs, archivedSessionIDs: archivedSessionIDs),
+            endpoint: appStore.endpoint
+        )
+    }
+
+    private func reloadSessionReminders() {
+        let reminders = sessionReminderStore.load(endpoint: appStore.endpoint)
+        guard sessionRemindersByID != reminders else {
+            return
+        }
+        sessionRemindersByID = reminders
+    }
+
+    private func saveSessionReminders() {
+        sessionReminderStore.save(sessionRemindersByID, endpoint: appStore.endpoint)
+    }
+
+    private func clearSessionReminders(forProjectID projectID: String) {
+        let sessionIDs = sessions
+            .filter { $0.projectID == projectID }
+            .map(\.id)
+        guard !sessionIDs.isEmpty else {
+            return
+        }
+        for sessionID in sessionIDs {
+            sessionRemindersByID.removeValue(forKey: sessionID)
+            sessionReminderScheduler.cancel(sessionID: sessionID)
+        }
+        saveSessionReminders()
     }
 
     private func rememberWorkspace(_ workspace: AgentWorkspace) {
         let next = recentWorkspaceStore.upsert(workspace, endpoint: appStore.endpoint)
         setRecentWorkspacesIfChanged(next)
+    }
+
+    private func upsertManagedWorktree(_ item: WorktreeListItem) {
+        var next = managedWorktrees.filter { $0.id != item.id }
+        next.insert(item, at: 0)
+        setManagedWorktreesIfChanged(next)
+    }
+
+    private func forgetWorkspaceAfterWorktreeDeletion(_ workspace: AgentWorkspace) {
+        let project = workspace.project
+        let next = recentWorkspaceStore.forget(id: project.id, endpoint: appStore.endpoint)
+        setRecentWorkspacesIfChanged(next)
+        removeExpandedProjectID(project.id)
+        removeShowingAllSessionProjectID(project.id)
+        sessionPageCursorByProjectID.removeValue(forKey: project.id)
+        sessionHasMoreByProjectID.removeValue(forKey: project.id)
+        sessionPageRequestTokenByProjectID.removeValue(forKey: project.id)
+        sessionPageLoadingTokenByProjectID.removeValue(forKey: project.id)
+        clearSessionReminders(forProjectID: project.id)
+        sessions = sessions.filter { $0.projectID != project.id }
+        clearWorkspaceUnavailable(project.id)
+        if selectedProjectID == project.id {
+            setSelectedProjectID(nil)
+            setSelectedSessionID(nil)
+            disconnectWebSocket()
+        }
     }
 
     private func ensureWorkspace(for project: AgentProject) -> AgentWorkspace {
@@ -2096,7 +3834,7 @@ final class SessionStore: ObservableObject {
             return .available
         } catch let error as AgentAPIError {
             if case let .server(status, _) = error, (400..<500).contains(status) {
-                return .unavailable("“\(workspace.name)”已不在 Mac 允许范围或已被删除，可重试或从当前设备移除")
+                return .unavailable("“\(workspace.name)”已不在允许范围或已被删除，可重试或从当前设备移除")
             }
             return .indeterminate
         } catch {
@@ -2269,7 +4007,7 @@ final class SessionStore: ObservableObject {
     }
 
     private func upsert(_ session: AgentSession) {
-        let session = Self.normalizedSession(alignSessionToKnownWorkspace(session))
+        let session = sessionPreservingActiveApproval(alignSessionToKnownWorkspace(session))
         contextStore.upsert(from: session)
         if let index = sessionIndexByID[session.id] {
             guard sessions[index] != session else {
@@ -2304,11 +4042,38 @@ final class SessionStore: ObservableObject {
         var next = sessions
         let oldValue = next[index]
         mutate(&next[index])
-        next[index] = Self.normalizedSession(next[index])
         guard next[index] != oldValue else {
             return
         }
         sessions = next
+    }
+
+    private func applyThreadGoal(_ goal: ThreadGoal, fallbackSessionID: SessionID? = nil) {
+        let sessionID = fallbackSessionID ?? goal.threadID
+        updateSession(sessionID) { item in
+            item.goal = goal
+        }
+        if sessionID != goal.threadID {
+            updateSession(goal.threadID) { item in
+                item.goal = goal
+            }
+        }
+        contextStore.upsert(
+            SessionContextSnapshot(
+                sessionID: sessionID,
+                threadID: goal.threadID,
+                goal: goal,
+                updatedAt: Date()
+            ),
+            fallbackSessionID: sessionID
+        )
+    }
+
+    private func clearThreadGoal(sessionID: SessionID) {
+        updateSession(sessionID) { item in
+            item.goal = nil
+        }
+        contextStore.clearGoal(sessionID: sessionID)
     }
 
     private func markApprovalDecisionPending(_ approvalID: String, sessionID: SessionID) {
@@ -2344,6 +4109,37 @@ final class SessionStore: ObservableObject {
         var next = session
         next.pendingApproval = nil
         return next
+    }
+
+    private func sessionPreservingActiveApproval(_ incoming: AgentSession) -> AgentSession {
+        sessionPreservingActiveApproval(incoming, existing: sessionsByID[incoming.id])
+    }
+
+    private func sessionPreservingActiveApproval(_ incoming: AgentSession, existing: AgentSession?) -> AgentSession {
+        var next = Self.normalizedSession(incoming)
+        if next.goal == nil {
+            next.goal = existing?.goal ?? contextStore.context(for: next.id)?.goal
+        }
+        guard next.pendingApproval == nil,
+              let existingApproval = existing?.pendingApproval,
+              Self.canPreservePendingApproval(whileStatusIs: next.status)
+        else {
+            return next
+        }
+        // 列表/历史刷新拿到的 session 可能只是通用 running 快照；本地已有明确 approval_request 时，
+        // 以实时事件为准保留审批入口，直到 approval_resolved/turn_completed/error 显式清理。
+        next.status = "waiting_for_approval"
+        next.pendingApproval = existingApproval
+        return next
+    }
+
+    private static func canPreservePendingApproval(whileStatusIs status: String) -> Bool {
+        switch status {
+        case "running", "waiting_for_approval", "waiting_for_input":
+            return true
+        default:
+            return false
+        }
     }
 
     private func setForegroundActivity(

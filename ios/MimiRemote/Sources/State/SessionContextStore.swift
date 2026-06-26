@@ -29,7 +29,10 @@ final class SessionContextStore: ObservableObject {
     }
 
     func upsert(from session: AgentSession) {
-        if let context = session.context {
+        if var context = session.context {
+            if context.goal == nil {
+                context.goal = session.goal
+            }
             upsert(context, fallbackSessionID: session.id)
             return
         }
@@ -38,6 +41,7 @@ final class SessionContextStore: ObservableObject {
             threadID: session.resumeID,
             status: SessionContextStatus(type: Self.statusType(from: session.status)),
             environment: SessionContextEnvironment(id: "local", kind: "local", label: "本地", cwd: session.dir, provider: session.source),
+            goal: session.goal,
             tasks: [],
             sources: [SessionContextSource(id: "session_source", kind: "session", label: session.source, subtitle: nil)],
             updatedAt: session.updatedAt
@@ -56,12 +60,28 @@ final class SessionContextStore: ObservableObject {
         )
     }
 
+    func clearGoal(sessionID: SessionID) {
+        guard var context = contextsBySessionID[sessionID] else {
+            return
+        }
+        guard context.goal != nil else {
+            return
+        }
+        context.goal = nil
+        context.updatedAt = Date()
+        contextsBySessionID[sessionID] = context
+    }
+
     func clearPendingApprovalTasks(sessionID: SessionID) {
         guard var context = contextsBySessionID[sessionID] else {
             return
         }
         let filtered = context.tasks.filter { task in
-            !(task.status == "waiting" && task.title.hasPrefix("Codex 请求"))
+            guard task.status == "waiting" else {
+                return true
+            }
+            let kind = task.kind.lowercased()
+            return !(kind.contains("approval") || kind == "command" || kind == "file_change")
         }
         guard filtered != context.tasks else {
             return
@@ -110,6 +130,7 @@ final class SessionContextStore: ObservableObject {
         base.status = update.status ?? base.status
         base.environment = mergeEnvironment(base.environment, update.environment)
         base.git = update.git ?? base.git
+        base.goal = update.goal ?? base.goal
         base.tasks = mergeTasks(base.tasks, update.tasks, limit: maxTasks)
         base.sources = mergeSources(base.sources, update.sources)
         base.subagents = mergeSubagents(base.subagents, update.subagents)

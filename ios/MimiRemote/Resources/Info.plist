@@ -26,6 +26,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>mimiremote</string>
+				<string>mimi</string>
 			</array>
 		</dict>
 	</array>

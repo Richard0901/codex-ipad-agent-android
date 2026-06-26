@@ -9,6 +9,7 @@ struct SettingsView: View {
     let isInitialSetup: Bool
 
     @AppStorage("agentd.developerMode") private var developerModeEnabled = false
+    @AppStorage("runtime.keepAwakeWhileRunning") private var keepAwakeWhileRunning = false
 
     var body: some View {
         let systemColorScheme = themeSystemColorScheme ?? colorScheme
@@ -31,6 +32,20 @@ struct SettingsView: View {
                     } label: {
                         Label("诊断", systemImage: "stethoscope")
                     }
+
+                    NavigationLink {
+                        CapabilitiesView()
+                    } label: {
+                        Label("能力", systemImage: "wand.and.stars")
+                    }
+                }
+
+                Section {
+                    Toggle(isOn: $keepAwakeWhileRunning) {
+                        Label("运行中保持屏幕常亮", systemImage: "sun.max")
+                    }
+                } footer: {
+                    Text("仅当前台选中会话处于运行或等待审批状态时生效；离开运行会话后会恢复系统默认锁屏。")
                 }
 
                 Section {
@@ -242,6 +257,243 @@ private struct ConnectionSettingsSections: View {
         } catch {
             localError = error.localizedDescription
         }
+    }
+}
+
+private struct CapabilitiesView: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
+
+    var body: some View {
+        Form {
+            Section {
+                if let path = sessionStore.capabilityList?.path, !path.isEmpty {
+                    CapabilityValueRow(title: "工作区", value: path)
+                } else {
+                    CapabilityValueRow(title: "工作区", value: sessionStore.selectedCommandActionPath ?? "仅用户级配置")
+                }
+                Button {
+                    Task { await sessionStore.refreshCapabilities() }
+                } label: {
+                    if sessionStore.isRefreshingCapabilities {
+                        Label("正在刷新", systemImage: "arrow.clockwise")
+                    } else {
+                        Label("刷新能力", systemImage: "arrow.clockwise")
+                    }
+                }
+                .disabled(sessionStore.isRefreshingCapabilities)
+            } footer: {
+                Text("这里只读展示 agentd 可发现的本地 Skills 和 MCP 配置，不会启动 MCP server，也不会读取或显示环境变量值。")
+            }
+
+            if let error = sessionStore.capabilityErrorMessage {
+                Section("错误") {
+                    Text(error)
+                        .font(themeStore.uiFont(.caption))
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section("Skills") {
+                let skills = sessionStore.capabilityList?.skills ?? []
+                if skills.isEmpty {
+                    ContentUnavailableView("未发现 Skills", systemImage: "wand.and.stars")
+                        .font(themeStore.uiFont(.caption))
+                } else {
+                    ForEach(skills) { skill in
+                        CapabilityItemRow(
+                            symbolName: "wand.and.stars",
+                            title: skill.name,
+                            subtitle: skill.description,
+                            detail: "\(scopeText(skill.scope)) · \(skill.path)",
+                            isEnabled: skill.enabled
+                        )
+                    }
+                }
+            }
+
+            Section("MCP") {
+                let servers = sessionStore.capabilityList?.mcpServers ?? []
+                if servers.isEmpty {
+                    ContentUnavailableView("未发现 MCP server", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(themeStore.uiFont(.caption))
+                } else {
+                    ForEach(servers) { server in
+                        CapabilityItemRow(
+                            symbolName: "point.3.connected.trianglepath.dotted",
+                            title: serverTitle(server),
+                            subtitle: serverSubtitle(server),
+                            detail: serverDetail(server),
+                            isEnabled: serverIsUsable(server),
+                            statusText: serverStatusText(server),
+                            statusColor: serverStatusColor(server)
+                        )
+                    }
+                }
+            }
+        }
+        .navigationTitle("能力")
+        .task {
+            if sessionStore.capabilityList == nil {
+                await sessionStore.refreshCapabilities()
+            }
+        }
+    }
+
+    private func serverTitle(_ server: MCPCapability) -> String {
+        if let plugin = server.plugin, !plugin.isEmpty {
+            return "\(server.name) · \(plugin)"
+        }
+        return server.name
+    }
+
+    private func serverSubtitle(_ server: MCPCapability) -> String? {
+        if let url = server.url, !url.isEmpty {
+            return url
+        }
+        if let command = server.command, !command.isEmpty {
+            return command
+        }
+        return server.transport
+    }
+
+    private func serverDetail(_ server: MCPCapability) -> String {
+        let base = "\(scopeText(server.scope)) · \(server.configPath)"
+        guard let note = server.statusNote, !note.isEmpty else {
+            return base
+        }
+        return "\(base)\n\(note)"
+    }
+
+    private func serverStatusText(_ server: MCPCapability) -> String? {
+        switch server.status {
+        case "ready":
+            return "可用"
+        case "configured":
+            return "已配置"
+        case "missing_command":
+            return "缺少命令"
+        case "invalid":
+            return "配置异常"
+        case "disabled":
+            return "已停用"
+        default:
+            return server.enabled ? nil : "已停用"
+        }
+    }
+
+    private func serverStatusColor(_ server: MCPCapability) -> Color {
+        switch server.status {
+        case "ready":
+            return .green
+        case "missing_command", "invalid":
+            return .orange
+        default:
+            return .secondary
+        }
+    }
+
+    private func serverIsUsable(_ server: MCPCapability) -> Bool {
+        server.enabled && server.status != "missing_command" && server.status != "invalid"
+    }
+
+    private func scopeText(_ scope: String) -> String {
+        switch scope {
+        case "repo":
+            return "项目"
+        case "user":
+            return "用户"
+        case "admin":
+            return "系统"
+        default:
+            return scope
+        }
+    }
+}
+
+private struct CapabilityValueRow: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(themeStore.uiFont(.caption, weight: .medium))
+            Text(value)
+                .font(themeStore.codeFont(.caption2))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+private struct CapabilityItemRow: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    let symbolName: String
+    let title: String
+    let subtitle: String?
+    let detail: String
+    let isEnabled: Bool
+    let statusText: String?
+    let statusColor: Color
+
+    init(
+        symbolName: String,
+        title: String,
+        subtitle: String?,
+        detail: String,
+        isEnabled: Bool,
+        statusText: String? = nil,
+        statusColor: Color = .secondary
+    ) {
+        self.symbolName = symbolName
+        self.title = title
+        self.subtitle = subtitle
+        self.detail = detail
+        self.isEnabled = isEnabled
+        self.statusText = statusText
+        self.statusColor = statusColor
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbolName)
+                .font(themeStore.uiFont(.caption, weight: .semibold))
+                .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary)
+                .frame(width: 20, height: 20)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title)
+                        .font(themeStore.uiFont(.caption, weight: .semibold))
+                        .lineLimit(2)
+                    if let statusText {
+                        Text(statusText)
+                            .font(themeStore.uiFont(.caption2, weight: .medium))
+                            .foregroundStyle(statusColor)
+                    } else if !isEnabled {
+                        Text("已停用")
+                            .font(themeStore.uiFont(.caption2, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(themeStore.uiFont(.caption2))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Text(detail)
+                    .font(themeStore.codeFont(.caption2))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 

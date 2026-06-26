@@ -132,7 +132,9 @@ final class AppStore: ObservableObject {
 
     static func pairingCredentials(from url: URL) throws -> PairingCredentials {
         let route = url.host ?? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard ["mimiremote"].contains(url.scheme?.lowercased() ?? ""),
+        let allowedSchemes = ["mimiremote", "mimi"]
+        // 兼容早期 agentd 二进制输出的 mimi:// 短链接；新版仍以 mimiremote:// 为主。
+        guard allowedSchemes.contains(url.scheme?.lowercased() ?? ""),
               route == "pair" || route == "connect"
         else {
             throw PairingLinkError.unsupportedURL

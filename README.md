@@ -135,14 +135,25 @@ agentd serve
 
 `brew services start mimi-remote` 本身不会把服务 stdout 回传到当前终端，所以想要“后台运行但终端显示二维码”时请用 `agentd start`。为避免 Token 留在后台服务日志里，Homebrew service 模式不会打印二维码。`agentd serve` 默认读取当前系统的用户配置目录；也可以用 `AGENTD_CONFIG=/path/to/config.json` 覆盖。在 `app_server.transport=ws` 且 `app_server.managed=true` 时，`agentd` 会自动启动并托管本机 loopback `codex app-server`，用户不需要手动再开一个终端。
 
-### 1.1 开发构建
+### 1.1 语音输入
+
+`/api/voice/transcribe` 默认使用 `voice.transcription_provider=auto`：
+
+- 如果配置了 `AGENTD_TRANSCRIPTION_API_KEY` 或 `OPENAI_API_KEY`，走公开 OpenAI Speech-to-text API。
+- 如果没有 API Key，走本机 Codex 登录态，读取 `~/.codex/auth.json`，请求 ChatGPT 后端 `/transcribe`。Token 只在 Mac 上使用，不会返回给 iPad。
+- 如果想强制使用 Codex 登录态，设置 `AGENTD_TRANSCRIPTION_PROVIDER=codex`。
+- 如果想强制使用公开 API，设置 `AGENTD_TRANSCRIPTION_PROVIDER=openai`。
+
+这条默认链路适合个人开发者：先在 Mac 上完成 `codex login`，iPad 端录音上传给自己的 `agentd`，由 Mac 端转写后再把文本送进真实对话。
+
+### 1.2 开发构建
 
 ```bash
 cd "$HOME/code/mimi-remote"
 go build -o bin/agentd ./cmd/agentd
 ```
 
-### 1.2 构建原生 iPad App
+### 1.3 构建原生 iPad App
 
 原生 App 工程位于：
 
@@ -373,12 +384,61 @@ AGENTD_APP_SERVER_MANAGED
 AGENTD_PROJECTS
 AGENTD_SCAN_ROOTS
 AGENTD_BROWSE_ROOTS
+AGENTD_WORKTREES_ROOT
 AGENTD_DEV_INSECURE
 AGENTD_DEBUG_CODEX_HISTORY
 AGENTD_OUTPUT_BUFFER_BYTES
 ```
 
 `AGENTD_PROJECTS` 用于精确声明项目目录，多个目录用逗号分隔。`AGENTD_SCAN_ROOTS` 用于扫描工作区，会把根目录和根目录下一层子目录加入项目列表。
+
+Worktree 创建前可以先读取当前仓库已有分支，iPad 会用它自动填默认 base；接口只读本机 Git refs，不会执行 fetch/pull：
+
+```bash
+curl -X POST "http://127.0.0.1:8787/api/worktrees/branches" \
+  -H "Authorization: Bearer $AGENTD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/Users/me/code/my-repo"}'
+```
+
+项目级快捷动作通过配置文件里的 `actions` 定义。iPad 只能读取和执行这里声明过的 action，不能临时传入任意 shell：
+
+```json
+{
+  "actions": [
+    {
+      "id": "go-test",
+      "name": "Go Test",
+      "command": "go",
+      "args": ["test", "./..."],
+      "timeout_seconds": 60
+    },
+    {
+      "id": "git-status",
+      "name": "Git Status",
+      "command": "git",
+      "args": ["status", "--short"],
+      "working_dir": ".",
+      "timeout_seconds": 10
+    },
+    {
+      "id": "clean-go-cache",
+      "name": "Clean Go Cache",
+      "command": "go",
+      "args": ["clean", "-cache"],
+      "timeout_seconds": 30,
+      "requires_confirmation": true
+    }
+  ]
+}
+```
+
+设计约束：
+
+- `command` 必须是单个可执行文件路径或 PATH 命令名，参数必须放在 `args`。
+- `working_dir` 为空时使用当前 iPad 选中的工作区；相对路径相对该工作区，绝对路径也必须落在当前项目、browse root 或 managed worktree 的授权边界内。
+- `requires_confirmation: true` 会让 iPad 执行前弹出二次确认，适合清缓存、部署、数据库迁移、删除文件等高风险动作；它是防误触机制，真正安全边界仍是 allowlist + `working_dir` scope。
+- 单个 action 最多运行 120 秒，输出会截断，避免移动端误触长时间任务。
 
 ### 5. Doctor 排查
 
@@ -419,7 +479,14 @@ curl -H "Authorization: Bearer $AGENTD_TOKEN" \
   http://127.0.0.1:8787/api/app-server/config
 ```
 
-目录浏览（供 iPad「打开工作区」选目录用；只列允许范围内的子目录，不递归、不列文件）：
+打开无项目 Chats 工作区（返回并确保 `~/.codex/threads` 作为真实 cwd 可用）：
+
+```bash
+curl -H "Authorization: Bearer $AGENTD_TOKEN" \
+  http://127.0.0.1:8787/api/workspaces/chat
+```
+
+目录浏览（供 iPad「打开工作区」选目录和预览文件用；只列允许范围内的一级目录/普通文件，不递归）：
 
 ```bash
 # path 传空字符串时从第一个 browse root（没配置则第一个 scan root）开始浏览
@@ -441,13 +508,51 @@ curl -H "Authorization: Bearer $AGENTD_TOKEN" \
       "path": "/Users/me/finance",
       "is_dir": true,
       "can_open": true,
-      "can_browse": true
+      "can_browse": true,
+      "can_preview": false
+    },
+    {
+      "name": "report.pdf",
+      "path": "/Users/me/report.pdf",
+      "is_dir": false,
+      "can_open": false,
+      "can_browse": false,
+      "can_preview": true
     }
   ]
 }
 ```
 
 浏览边界 = 项目 allowlist ∪ `browse_roots`：路径在允许范围外时统一返回 403（不区分“不存在”与“无权限”），指向允许范围外的 symlink 不会出现在列表里。
+
+列出当前工作区可用快捷动作：
+
+```bash
+curl -H "Authorization: Bearer $AGENTD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/Users/me/code/app"}' \
+  http://127.0.0.1:8787/api/actions/list
+```
+
+执行一个已配置动作：
+
+```bash
+curl -H "Authorization: Bearer $AGENTD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/Users/me/code/app", "id": "go-test"}' \
+  http://127.0.0.1:8787/api/actions/run
+```
+
+只读查看当前工作区可发现的 Skills 和 MCP 配置：
+
+```bash
+curl -H "Authorization: Bearer $AGENTD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/Users/me/code/app"}' \
+  http://127.0.0.1:8787/api/capabilities/list
+```
+
+该接口只读取 `SKILL.md` 元数据和 `.codex/config.toml` 里的 MCP server 摘要，不启动 MCP server，不返回环境变量值。
 
 ## 发布
 

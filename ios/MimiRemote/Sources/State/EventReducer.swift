@@ -4,6 +4,7 @@ struct EventReducerOutput {
     var upsertSessions: [AgentSession] = []
     var statusUpdates: [(SessionID, String)] = []
     var pendingApprovalUpdates: [(SessionID, ApprovalSummary?)] = []
+    var goalUpdates: [(SessionID, ThreadGoal?)] = []
     var pendingApprovalTaskClears: [SessionID] = []
     var contextUpdates: [(SessionContextSnapshot, SessionID?)] = []
     var foregroundUpdates: [(SessionID, SessionForegroundActivity, UInt64?)] = []
@@ -40,12 +41,18 @@ actor EventReducer {
         switch event {
         case .session(let session):
             output.upsertSessions.append(session)
+            if let goal = session.goal {
+                output.goalUpdates.append((session.id, goal))
+            }
             if let context = session.context {
                 output.contextUpdates.append((context, session.id))
             }
         case .sessionRow(let row, _):
             let session = AgentSession(row: row)
             output.upsertSessions.append(session)
+            if let goal = session.goal {
+                output.goalUpdates.append((session.id, goal))
+            }
             if let context = row.context {
                 output.contextUpdates.append((context, row.id))
             }
@@ -54,7 +61,7 @@ actor EventReducer {
                 return output
             }
             output.statusUpdates.append((id, status))
-            if status != "waiting_for_approval" {
+            if shouldClearPendingApproval(for: status) {
                 output.pendingApprovalUpdates.append((id, nil))
             }
             output.contextUpdates.append((
@@ -66,6 +73,21 @@ actor EventReducer {
             }
         case .sessionContext(let context, let metadata):
             output.contextUpdates.append((context, metadata.sessionID))
+            if let goal = context.goal, let id = context.sessionID ?? metadata.sessionID ?? context.threadID {
+                output.goalUpdates.append((id, goal))
+            }
+        case .goalUpdated(let goal, let metadata):
+            let id = metadata.sessionID ?? goal.threadID
+            output.goalUpdates.append((id, goal))
+            output.contextUpdates.append((
+                SessionContextSnapshot(sessionID: id, threadID: goal.threadID, goal: goal, updatedAt: Date()),
+                id
+            ))
+        case .goalCleared(let metadata):
+            guard let id = metadata.sessionID else {
+                return output
+            }
+            output.goalUpdates.append((id, nil))
         case .turnStarted(let metadata):
             guard let id = metadata.sessionID else {
                 return output
@@ -191,6 +213,16 @@ actor EventReducer {
             return "notLoaded"
         default:
             return status
+        }
+    }
+
+    private func shouldClearPendingApproval(for status: String) -> Bool {
+        switch status {
+        case "running", "waiting_for_approval", "waiting_for_input":
+            // 实时事件可能乱序：approval_request 后又到一条泛化 running 状态时，不能把审批入口抹掉。
+            return false
+        default:
+            return true
         }
     }
 }

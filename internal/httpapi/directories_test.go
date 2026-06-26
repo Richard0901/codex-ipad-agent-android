@@ -42,7 +42,7 @@ func directoryEntryNames(t *testing.T, body map[string]any) []string {
 	return names
 }
 
-func TestDirectoryListReturnsSortedChildDirectoriesOnly(t *testing.T) {
+func TestDirectoryListReturnsSortedChildDirectoriesAndPreviewableFiles(t *testing.T) {
 	server := newTestServer(t)
 	projectDir := configuredProjectPath(t, server.handler)
 
@@ -51,7 +51,7 @@ func TestDirectoryListReturnsSortedChildDirectoriesOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// 隐藏目录、缓存目录和普通文件都不应出现在浏览列表里。
+	// 隐藏目录、缓存目录不应出现在浏览列表里；普通文件会作为可预览项展示。
 	for _, name := range []string{".git", "node_modules", "Library"} {
 		if err := os.Mkdir(filepath.Join(projectDir, name), 0o755); err != nil {
 			t.Fatal(err)
@@ -66,9 +66,9 @@ func TestDirectoryListReturnsSortedChildDirectoriesOnly(t *testing.T) {
 		t.Fatalf("期望目录浏览返回 200，实际 %d body=%s", rec.Code, rec.Body.String())
 	}
 	names := directoryEntryNames(t, body)
-	want := []string{"Apps", "finance", "zeta"}
+	want := []string{"Apps", "finance", "zeta", "README.md"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
-		t.Fatalf("目录列表应只含可见子目录且按名称排序：got=%v want=%v", names, want)
+		t.Fatalf("目录列表应按目录优先、名称排序：got=%v want=%v", names, want)
 	}
 	realProjectDir, err := filepath.EvalSymlinks(projectDir)
 	if err != nil {
@@ -81,6 +81,13 @@ func TestDirectoryListReturnsSortedChildDirectoriesOnly(t *testing.T) {
 	}
 	if first["is_dir"] != true || first["can_open"] != true || first["can_browse"] != true {
 		t.Fatalf("allowlist 内子目录应可打开可浏览：%v", first)
+	}
+	fileEntry := entries[len(entries)-1].(map[string]any)
+	if fileEntry["path"] != filepath.Join(realProjectDir, "README.md") {
+		t.Fatalf("文件 entry path 应为真实绝对路径：%v", fileEntry)
+	}
+	if fileEntry["is_dir"] != false || fileEntry["can_open"] != false || fileEntry["can_browse"] != false || fileEntry["can_preview"] != true {
+		t.Fatalf("allowlist 内普通文件应只可预览：%v", fileEntry)
 	}
 }
 

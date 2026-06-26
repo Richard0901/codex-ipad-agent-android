@@ -107,6 +107,9 @@ func TestLoadEnvListenPrecedenceAndSessionBuffer(t *testing.T) {
 	t.Setenv("AGENTD_APP_SERVER_MANAGED", "true")
 	t.Setenv("AGENTD_APP_SERVER_WS_TOKEN_FILE", "/tmp/codex-app-server-ws-token")
 	t.Setenv("AGENTD_DEBUG_CODEX_HISTORY", "true")
+	t.Setenv("AGENTD_TRANSCRIPTION_PROVIDER", "codex")
+	t.Setenv("AGENTD_CODEX_TRANSCRIPTION_BASE_URL", "https://chatgpt.com/backend-api")
+	t.Setenv("AGENTD_CODEX_AUTH_FILE", filepath.Join(t.TempDir(), "auth.json"))
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "missing.json"))
 	if err != nil {
@@ -127,6 +130,9 @@ func TestLoadEnvListenPrecedenceAndSessionBuffer(t *testing.T) {
 	}
 	if cfg.AppServer.Transport != "ws" || !cfg.AppServer.Managed || cfg.AppServer.WSTokenFile != "/tmp/codex-app-server-ws-token" {
 		t.Fatalf("app_server 环境变量解析异常：%+v", cfg.AppServer)
+	}
+	if cfg.Voice.TranscriptionProvider != "codex" || cfg.Voice.CodexTranscriptionBaseURL != "https://chatgpt.com/backend-api" || cfg.Voice.CodexAuthFile == "" {
+		t.Fatalf("voice 环境变量解析异常：%+v", cfg.Voice)
 	}
 	if !cfg.Debug.EnableCodexHistory {
 		t.Fatal("AGENTD_DEBUG_CODEX_HISTORY=true 应启用 Codex history debug endpoint")
@@ -249,6 +255,56 @@ func TestValidateRejectsUnsafeAppServerListen(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsSafeActions(t *testing.T) {
+	cfg := defaults()
+	cfg.Auth.Token = "0123456789abcdef0123456789abcdef"
+	cfg.Projects = []ProjectConfig{{ID: "demo", Name: "demo", Path: t.TempDir()}}
+	cfg.Actions = []ActionConfig{{
+		ID:             "go-test",
+		Name:           "Go Test",
+		Command:        "go",
+		Args:           []string{"test", "./..."},
+		WorkingDir:     ".",
+		TimeoutSeconds: 30,
+		// 高风险动作可要求 iPad 端二次确认；它不改变后端 allowlist 安全边界。
+		RequiresConfirmation: true,
+	}}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("安全 action 配置应允许：%v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeActions(t *testing.T) {
+	base := defaults()
+	base.Auth.Token = "0123456789abcdef0123456789abcdef"
+	base.Projects = []ProjectConfig{{ID: "demo", Name: "demo", Path: t.TempDir()}}
+
+	cases := []ActionConfig{
+		{ID: "", Name: "Empty", Command: "go"},
+		{ID: "bad id", Name: "Bad", Command: "go"},
+		{ID: "dup", Name: "Dup", Command: "go"},
+		{ID: "unsafe-command", Name: "Unsafe", Command: "go test"},
+		{ID: "bad-timeout", Name: "Timeout", Command: "go", TimeoutSeconds: 121},
+	}
+	for _, action := range cases {
+		t.Run(action.ID+"-"+action.Name, func(t *testing.T) {
+			cfg := base
+			if action.ID == "dup" {
+				cfg.Actions = []ActionConfig{
+					{ID: "dup", Name: "One", Command: "go"},
+					{ID: "dup", Name: "Two", Command: "go"},
+				}
+			} else {
+				cfg.Actions = []ActionConfig{action}
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("不安全 action 应被拒绝：%+v", cfg.Actions)
+			}
+		})
+	}
+}
+
 func clearAgentdEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -264,12 +320,21 @@ func clearAgentdEnv(t *testing.T) {
 		"AGENTD_APP_SERVER_LISTEN",
 		"AGENTD_APP_SERVER_WS_TOKEN_FILE",
 		"AGENTD_APP_SERVER_MANAGED",
+		"AGENTD_TRANSCRIPTION_PROVIDER",
+		"AGENTD_TRANSCRIPTION_MODEL",
+		"AGENTD_TRANSCRIPTION_BASE_URL",
+		"AGENTD_TRANSCRIPTION_API_KEY",
+		"AGENTD_CODEX_TRANSCRIPTION_BASE_URL",
+		"AGENTD_CODEX_AUTH_FILE",
+		"OPENAI_API_KEY",
+		"CODEX_API_BASE_URL",
 		"AGENTD_DEBUG_CODEX_HISTORY",
 		"AGENTD_DEV_INSECURE",
 		"AGENTD_OUTPUT_BUFFER_BYTES",
 		"AGENTD_PROJECTS",
 		"AGENTD_SCAN_ROOTS",
 		"AGENTD_BROWSE_ROOTS",
+		"AGENTD_WORKTREES_ROOT",
 	} {
 		t.Setenv(key, "")
 	}

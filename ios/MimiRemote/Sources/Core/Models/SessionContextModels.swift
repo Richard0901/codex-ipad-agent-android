@@ -6,6 +6,7 @@ struct SessionContextSnapshot: Codable, Hashable {
     var status: SessionContextStatus?
     var environment: SessionContextEnvironment?
     var git: SessionContextGitInfo?
+    var goal: ThreadGoal?
     var tasks: [SessionContextTask]
     var sources: [SessionContextSource]
     var subagents: [SessionContextSubagent]
@@ -17,6 +18,7 @@ struct SessionContextSnapshot: Codable, Hashable {
         case status
         case environment
         case git
+        case goal
         case tasks
         case sources
         case subagents
@@ -29,6 +31,7 @@ struct SessionContextSnapshot: Codable, Hashable {
         status: SessionContextStatus? = nil,
         environment: SessionContextEnvironment? = nil,
         git: SessionContextGitInfo? = nil,
+        goal: ThreadGoal? = nil,
         tasks: [SessionContextTask] = [],
         sources: [SessionContextSource] = [],
         subagents: [SessionContextSubagent] = [],
@@ -39,6 +42,7 @@ struct SessionContextSnapshot: Codable, Hashable {
         self.status = status
         self.environment = environment
         self.git = git
+        self.goal = goal
         self.tasks = tasks
         self.sources = sources
         self.subagents = subagents
@@ -52,6 +56,7 @@ struct SessionContextSnapshot: Codable, Hashable {
         self.status = try container.decodeIfPresent(SessionContextStatus.self, forKey: .status)
         self.environment = try container.decodeIfPresent(SessionContextEnvironment.self, forKey: .environment)
         self.git = try container.decodeIfPresent(SessionContextGitInfo.self, forKey: .git)
+        self.goal = try container.decodeIfPresent(ThreadGoal.self, forKey: .goal)
         self.tasks = try container.decodeIfPresent([SessionContextTask].self, forKey: .tasks) ?? []
         self.sources = try container.decodeIfPresent([SessionContextSource].self, forKey: .sources) ?? []
         self.subagents = try container.decodeIfPresent([SessionContextSubagent].self, forKey: .subagents) ?? []

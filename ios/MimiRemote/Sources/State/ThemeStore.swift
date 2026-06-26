@@ -68,7 +68,7 @@ enum ThemePreset: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .codex:
-            return "Codex"
+            return "Default"
         case .github:
             return "GitHub"
         case .xcode:

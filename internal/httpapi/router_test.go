@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,6 +168,1154 @@ func TestCodexHistoryDebugCanBeEnabled(t *testing.T) {
 	}
 }
 
+func TestGitStatusReturnsReadonlyDiffForAllowedWorkspace(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/status", gitStatusRequest{Path: repo})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("git status 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if !response.IsRepository {
+		t.Fatalf("Git 仓库应标记为 is_repository=true：%+v", response)
+	}
+	if !strings.Contains(response.StatusText, "README.md") {
+		t.Fatalf("status 应包含变更文件：%+v", response)
+	}
+	if !strings.Contains(response.UnstagedDiff, "+after") {
+		t.Fatalf("diff 应包含未暂存变更：%s", response.UnstagedDiff)
+	}
+	if len(response.Files) != 1 || response.Files[0].Path != "README.md" || !response.Files[0].Unstaged {
+		t.Fatalf("响应应包含结构化文件状态：%+v", response.Files)
+	}
+}
+
+func TestGitActionStagesAndUnstagesAllowedFile(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/action", gitActionRequest{
+		Path:   repo,
+		Action: "stage",
+		Files:  []string{"README.md"},
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stage 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var staged gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&staged); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if !strings.Contains(staged.StagedDiff, "+after") || strings.Contains(staged.UnstagedDiff, "+after") {
+		t.Fatalf("stage 后应只有 staged diff，got staged=%q unstaged=%q", staged.StagedDiff, staged.UnstagedDiff)
+	}
+	if len(staged.Files) != 1 || !staged.Files[0].Staged || staged.Files[0].Unstaged {
+		t.Fatalf("stage 后文件状态异常：%+v", staged.Files)
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodPost, "/api/git/action", gitActionRequest{
+		Path:   repo,
+		Action: "unstage",
+		Files:  []string{"README.md"},
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unstage 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var unstaged gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&unstaged); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if strings.Contains(unstaged.StagedDiff, "+after") || !strings.Contains(unstaged.UnstagedDiff, "+after") {
+		t.Fatalf("unstage 后应回到 unstaged diff，got staged=%q unstaged=%q", unstaged.StagedDiff, unstaged.UnstagedDiff)
+	}
+}
+
+func TestGitPatchActionStagesAndRevertsSingleHunk(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	baseLines := numberedLines("line", 20)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte(strings.Join(baseLines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, repo, "add", "README.md")
+	runGitTestCommand(t, repo, "commit", "-m", "baseline lines")
+
+	changedLines := append([]string(nil), baseLines...)
+	changedLines[1] = "changed 2"
+	changedLines[17] = "changed 18"
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte(strings.Join(changedLines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patches := splitGitDiffIntoSingleHunkPatches(t, gitTestOutput(t, repo, "diff", "-U0", "--", "README.md"))
+	if len(patches) != 2 {
+		t.Fatalf("测试 diff 应拆出两个 hunk，got=%d patches=%q", len(patches), patches)
+	}
+
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/action", gitActionRequest{
+		Path:   repo,
+		Action: "stage_patch",
+		Patch:  patches[0],
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stage_patch 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var staged gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&staged); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if !strings.Contains(staged.StagedDiff, "changed 2") || strings.Contains(staged.StagedDiff, "changed 18") {
+		t.Fatalf("stage_patch 应只暂存第一个 hunk，staged=%q", staged.StagedDiff)
+	}
+	if !strings.Contains(staged.UnstagedDiff, "changed 18") {
+		t.Fatalf("stage_patch 后第二个 hunk 应仍未暂存，unstaged=%q", staged.UnstagedDiff)
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodPost, "/api/git/action", gitActionRequest{
+		Path:   repo,
+		Action: "revert_patch",
+		Patch:  patches[1],
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revert_patch 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	readme := readTestFile(t, filepath.Join(repo, "README.md"))
+	if strings.Contains(readme, "changed 18") || !strings.Contains(readme, "changed 2") {
+		t.Fatalf("revert_patch 应只撤销第二个 hunk，README=%q", readme)
+	}
+	var reverted gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&reverted); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if !strings.Contains(reverted.StagedDiff, "changed 2") || strings.Contains(reverted.UnstagedDiff, "changed 18") {
+		t.Fatalf("revert_patch 后状态异常，staged=%q unstaged=%q", reverted.StagedDiff, reverted.UnstagedDiff)
+	}
+}
+
+func TestGitActionRevertsTrackedWorktreeChangeWithoutDeletingUntrackedFile(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	untrackedPath := filepath.Join(repo, "NOTES.md")
+	if err := os.WriteFile(untrackedPath, []byte("draft\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/action", gitActionRequest{
+		Path:   repo,
+		Action: "revert",
+		Files:  []string{"README.md"},
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revert 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	readme, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(readme) != "before\n" {
+		t.Fatalf("revert 应恢复已跟踪文件，got=%q", string(readme))
+	}
+	if _, err := os.Stat(untrackedPath); err != nil {
+		t.Fatalf("revert 不应删除未跟踪文件：%v", err)
+	}
+	var status gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if !strings.Contains(status.StatusText, "NOTES.md") || strings.Contains(status.StatusText, "README.md") {
+		t.Fatalf("revert 后只应剩未跟踪文件，status=%q", status.StatusText)
+	}
+}
+
+func TestGitActionRejectsUnsafeFilePath(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/action", gitActionRequest{
+		Path:   repo,
+		Action: "stage",
+		Files:  []string{"../outside.txt"},
+	})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("越界文件路径应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGitPatchActionRejectsUnsafePatchPath(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/action", gitActionRequest{
+		Path:   repo,
+		Action: "stage_patch",
+		Patch:  "diff --git a/../secret b/../secret\n--- a/../secret\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n",
+	})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("越界 patch 路径应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGitCommitCreatesLocalCommitFromStagedFiles(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	previousHead := gitTestOutput(t, repo, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, repo, "add", "README.md")
+
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/commit", gitCommitRequest{
+		Path:    repo,
+		Message: "update readme",
+	})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("commit 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	nextHead := gitTestOutput(t, repo, "rev-parse", "HEAD")
+	if nextHead == previousHead {
+		t.Fatalf("commit 后 HEAD 应变化，仍为 %s", nextHead)
+	}
+	var status gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if status.StatusText != "" || status.StagedDiff != "" || status.UnstagedDiff != "" || len(status.Files) != 0 {
+		t.Fatalf("commit 后工作区应干净：%+v", status)
+	}
+}
+
+func TestGitCommitRejectsBlankMessage(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/commit", gitCommitRequest{
+		Path:    repo,
+		Message: " ",
+	})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("空 commit message 应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGitPushPushesCurrentBranchToRemote(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	runGitTestCommand(t, t.TempDir(), "init", "--bare", remote)
+	runGitTestCommand(t, repo, "remote", "add", "origin", remote)
+	branch := gitTestOutput(t, repo, "branch", "--show-current")
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/push", gitPushRequest{Path: repo})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("push 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response gitPushResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 gitPushResponse：%v", err)
+	}
+	if response.Remote != "origin" || response.Branch != branch || !response.Status.IsRepository {
+		t.Fatalf("push 响应异常：%+v", response)
+	}
+	remoteHead := gitTestOutput(t, remote, "rev-parse", branch)
+	localHead := gitTestOutput(t, repo, "rev-parse", branch)
+	if remoteHead != localHead {
+		t.Fatalf("remote 分支应指向本地 HEAD，remote=%s local=%s", remoteHead, localHead)
+	}
+}
+
+func TestGitPushRejectsUnsafeRemote(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/push", gitPushRequest{
+		Path:   repo,
+		Remote: "-origin",
+	})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("不安全 remote 应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGitPullRequestCreatesDraftWithGH(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	fakeBin := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "gh.args")
+	pwdFile := filepath.Join(t.TempDir(), "gh.pwd")
+	ghScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$PWD\" > %q\nprintf '%%s\\n' \"$@\" > %q\necho 'https://github.com/example/repo/pull/1'\n", pwdFile, argsFile)
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/pull-request", gitPullRequestRequest{
+		Path:  repo,
+		Title: "Add review changes",
+		Body:  "Summary",
+		Draft: true,
+	})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR 创建应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response gitPullRequestResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 gitPullRequestResponse：%v", err)
+	}
+	if response.URL != "https://github.com/example/repo/pull/1" || response.Branch == "" {
+		t.Fatalf("PR 响应异常：%+v", response)
+	}
+	gotPWD := canonicalTestPath(t, strings.TrimSpace(readTestFile(t, pwdFile)))
+	wantPWD := canonicalTestPath(t, repo)
+	if gotPWD != wantPWD {
+		t.Fatalf("gh 应在仓库目录执行，got=%s want=%s", gotPWD, wantPWD)
+	}
+	args := strings.Split(strings.TrimSpace(readTestFile(t, argsFile)), "\n")
+	if strings.Join(args, " ") != "pr create --title Add review changes --body Summary --draft" {
+		t.Fatalf("gh 参数异常：%q", args)
+	}
+}
+
+func TestGitPullRequestStatusReadsCurrentBranchPR(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	fakeBin := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "gh.status.args")
+	ghScript := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\ncat <<'JSON'\n{\"number\":42,\"title\":\"Review changes\",\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/42\",\"isDraft\":true,\"reviewDecision\":\"REVIEW_REQUIRED\",\"mergeStateStatus\":\"CLEAN\",\"headRefName\":\"feature/mobile\",\"baseRefName\":\"main\"}\nJSON\n", argsFile)
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/pull-request/status", gitPullRequestStatusRequest{Path: repo})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PR 状态应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response gitPullRequestStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 gitPullRequestStatusResponse：%v", err)
+	}
+	if !response.Exists || response.Number != 42 || response.URL != "https://github.com/example/repo/pull/42" || !response.IsDraft {
+		t.Fatalf("PR 状态响应异常：%+v", response)
+	}
+	args := strings.Split(strings.TrimSpace(readTestFile(t, argsFile)), "\n")
+	want := "pr view --json number,title,state,url,isDraft,reviewDecision,mergeStateStatus,headRefName,baseRefName"
+	if strings.Join(args, " ") != want {
+		t.Fatalf("gh 参数异常：%q want=%q", args, want)
+	}
+}
+
+func TestGitPullRequestStatusReturnsEmptyWhenCurrentBranchHasNoPR(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	fakeBin := t.TempDir()
+	ghScript := "#!/bin/sh\necho 'no pull requests found for branch' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(ghScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/pull-request/status", gitPullRequestStatusRequest{Path: repo})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("无 PR 应返回空状态而不是失败，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response gitPullRequestStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 gitPullRequestStatusResponse：%v", err)
+	}
+	if response.Exists || response.URL != "" {
+		t.Fatalf("无 PR 响应异常：%+v", response)
+	}
+}
+
+func TestWorktreeCreateReturnsOpenableWorkspace(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	worktreesRoot := t.TempDir()
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.WorktreesRoot = worktreesRoot
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/create", worktreeCreateRequest{
+		Path:   repo,
+		Name:   "Review Branch",
+		Branch: "mimi/review-branch",
+	})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worktree create 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response worktreeCreateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 worktreeCreateResponse：%v", err)
+	}
+	if response.Workspace.ID == "" || !strings.HasPrefix(response.Workspace.ID, "ws_") {
+		t.Fatalf("worktree workspace 应有稳定 id：%+v", response.Workspace)
+	}
+	if response.Workspace.RootProjectID != "repo" || response.Workspace.RootProjectPath != repo {
+		t.Fatalf("worktree workspace 应保留根项目信息：%+v", response.Workspace)
+	}
+	if _, err := os.Stat(filepath.Join(response.Workspace.Path, "README.md")); err != nil {
+		t.Fatalf("worktree 应包含仓库文件：%v", err)
+	}
+	if response.Worktree.Branch != "mimi/review-branch" {
+		t.Fatalf("worktree 应返回本地分支名：%+v", response.Worktree)
+	}
+	if branch := gitTestOutput(t, response.Workspace.Path, "branch", "--show-current"); branch != response.Worktree.Branch {
+		t.Fatalf("worktree 应 checkout 到响应分支，got=%q want=%q", branch, response.Worktree.Branch)
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodPost, "/api/workspaces/resolve", workspaceResolveRequest{Path: response.Workspace.Path})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("刚创建的 worktree 应可作为 workspace resolve，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodPost, "/api/git/status", gitStatusRequest{Path: response.Workspace.Path})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("刚创建的 worktree 应可读取 Git 状态，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var status gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if !status.IsRepository {
+		t.Fatalf("worktree 应是 Git 仓库：%+v", status)
+	}
+}
+
+func TestWorktreeBranchListReturnsLocalAndRemoteBranches(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	current := gitTestOutput(t, repo, "branch", "--show-current")
+	runGitTestCommand(t, repo, "checkout", "-b", "feature/demo")
+	runGitTestCommand(t, repo, "checkout", current)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	runGitTestCommand(t, t.TempDir(), "init", "--bare", remote)
+	runGitTestCommand(t, repo, "remote", "add", "origin", remote)
+	runGitTestCommand(t, repo, "push", "-u", "origin", current)
+	runGitTestCommand(t, repo, "push", "origin", "feature/demo")
+
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/branches", worktreeBranchListRequest{Path: repo})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worktree branches 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response worktreeBranchListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 worktreeBranchListResponse：%v", err)
+	}
+	if response.Path != canonicalTestPath(t, repo) || response.CurrentBranch != current || response.DefaultBase != current {
+		t.Fatalf("分支默认值异常：%+v current=%s repo=%s", response, current, repo)
+	}
+	if !containsWorktreeBranch(response.Branches, current, "local", true, true) {
+		t.Fatalf("应返回当前本地分支并标记默认：%+v current=%s", response.Branches, current)
+	}
+	if !containsWorktreeBranch(response.Branches, "feature/demo", "local", false, false) {
+		t.Fatalf("应返回本地 feature 分支：%+v", response.Branches)
+	}
+	if !containsWorktreeBranch(response.Branches, "origin/feature/demo", "remote", false, false) {
+		t.Fatalf("应返回远端 feature 分支：%+v", response.Branches)
+	}
+}
+
+func TestWorktreeBranchListReturnsEmptyForAllowedNonRepository(t *testing.T) {
+	requireGit(t)
+	projectDir := t.TempDir()
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "plain", Name: "Plain", Path: projectDir}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/branches", worktreeBranchListRequest{Path: projectDir})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("非 Git 授权目录应返回空列表，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response worktreeBranchListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 worktreeBranchListResponse：%v", err)
+	}
+	if response.DefaultBase != "" || response.CurrentBranch != "" || len(response.Branches) != 0 {
+		t.Fatalf("非 Git 目录不应伪造分支：%+v", response)
+	}
+}
+
+func TestWorktreeBranchListRejectsOutsidePathWithoutLeakingDetails(t *testing.T) {
+	requireGit(t)
+	server := newTestServer(t)
+	outside := t.TempDir()
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/branches", worktreeBranchListRequest{Path: outside})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("越界路径应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), outside) {
+		t.Fatalf("拒绝响应不应泄漏外部路径：%s", rec.Body.String())
+	}
+}
+
+func TestWorktreeCreatePreservesSubdirectoryWorkspacePath(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	appDir := filepath.Join(repo, "app")
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, repo, "add", "app/main.go")
+	runGitTestCommand(t, repo, "commit", "-m", "add app")
+
+	worktreesRoot := t.TempDir()
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.WorktreesRoot = worktreesRoot
+		cfg.Projects = []config.ProjectConfig{{ID: "app", Name: "App", Path: appDir}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/create", worktreeCreateRequest{
+		Path: appDir,
+		Name: "App Review",
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("子目录项目创建 worktree 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response worktreeCreateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 worktreeCreateResponse：%v", err)
+	}
+	if filepath.Base(response.Workspace.Path) != "app" {
+		t.Fatalf("workspace 应指向仓库内的项目子目录，got=%s", response.Workspace.Path)
+	}
+	if _, err := os.Stat(filepath.Join(response.Workspace.Path, "main.go")); err != nil {
+		t.Fatalf("worktree 子目录应包含项目文件：%v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodPost, "/api/worktrees/create", worktreeCreateRequest{
+		Path: response.Workspace.Path,
+		Name: "Nested Review",
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("从 managed worktree 再创建 worktree 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorktreeListAndDeleteManagedWorktree(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	worktreesRoot := t.TempDir()
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.WorktreesRoot = worktreesRoot
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/create", worktreeCreateRequest{
+		Path: repo,
+		Name: "Cleanup Review",
+	})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worktree create 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created worktreeCreateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("响应不是 worktreeCreateResponse：%v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodGet, "/api/worktrees/list", nil)
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worktree list 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var listed worktreeListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&listed); err != nil {
+		t.Fatalf("响应不是 worktreeListResponse：%v", err)
+	}
+	if len(listed.Worktrees) != 1 || listed.Worktrees[0].Workspace.Path != created.Workspace.Path {
+		t.Fatalf("list 应返回刚创建的 worktree，got=%+v created=%+v", listed.Worktrees, created.Workspace)
+	}
+	if listed.Worktrees[0].Worktree.Branch != created.Worktree.Branch {
+		t.Fatalf("list 应保留 worktree 分支名，got=%+v created=%+v", listed.Worktrees[0].Worktree, created.Worktree)
+	}
+	remoteRoot := t.TempDir()
+	remote := filepath.Join(remoteRoot, "origin.git")
+	runGitTestCommand(t, remoteRoot, "init", "--bare", remote)
+	runGitTestCommand(t, repo, "remote", "add", "origin", remote)
+	runGitTestCommand(t, repo, "push", "origin", "HEAD:main")
+	runGitTestCommand(t, repo, "fetch", "origin", "main")
+	runGitTestCommand(t, created.Workspace.Path, "branch", "--set-upstream-to=origin/main")
+	if err := os.WriteFile(filepath.Join(created.Workspace.Path, "README.md"), []byte("ahead\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, created.Workspace.Path, "add", "README.md")
+	runGitTestCommand(t, created.Workspace.Path, "commit", "-m", "ahead")
+	if err := os.WriteFile(filepath.Join(created.Workspace.Path, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodGet, "/api/worktrees/list", nil)
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worktree list 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listed); err != nil {
+		t.Fatalf("响应不是 worktreeListResponse：%v", err)
+	}
+	if len(listed.Worktrees) != 1 || !listed.Worktrees[0].Worktree.Dirty || listed.Worktrees[0].Worktree.Ahead+listed.Worktrees[0].Worktree.Behind != 1 || listed.Worktrees[0].Worktree.Upstream != "origin/main" {
+		t.Fatalf("list 应返回 worktree 动态 Git 状态：%+v", listed.Worktrees)
+	}
+	runGitTestCommand(t, created.Workspace.Path, "checkout", "--", "README.md")
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodPost, "/api/worktrees/delete", worktreeDeleteRequest{Path: created.Workspace.Path})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worktree delete 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var deleted worktreeDeleteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&deleted); err != nil {
+		t.Fatalf("响应不是 worktreeDeleteResponse：%v", err)
+	}
+	if deleted.DeletedPath != created.Workspace.Path || len(deleted.Worktrees) != 0 {
+		t.Fatalf("delete 响应应返回空列表，got=%+v", deleted)
+	}
+	if _, err := os.Stat(created.Workspace.Path); !os.IsNotExist(err) {
+		t.Fatalf("worktree checkout 应被删除，stat err=%v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = authedRequest(t, http.MethodPost, "/api/workspaces/resolve", workspaceResolveRequest{Path: created.Workspace.Path})
+	server.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("删除后 workspace 不应继续 resolve，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorktreeDeleteRejectsUnmanagedPath(t *testing.T) {
+	requireGit(t)
+	repo := newCommittedGitRepo(t)
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: repo}}
+	})
+
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/delete", worktreeDeleteRequest{Path: repo})
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("非 managed worktree 不允许删除，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWorktreePruneRemovesMissingRegistryEntries(t *testing.T) {
+	worktreesRoot := t.TempDir()
+	projectDir := t.TempDir()
+	missingPath := filepath.Join(t.TempDir(), "missing-worktree")
+	registryDir := filepath.Join(worktreesRoot, "registry")
+	if err := os.MkdirAll(registryDir, 0o755); err != nil {
+		t.Fatalf("创建 registry 目录失败：%v", err)
+	}
+
+	entry := managedWorktree{
+		Path:           missingPath,
+		RepositoryPath: projectDir,
+		Base:           "main",
+		Branch:         "mimi/missing",
+		RootProject:    projects.Project{ID: "repo", Name: "Repo", Path: projectDir},
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("编码 registry 失败：%v", err)
+	}
+	registryFile := filepath.Join(registryDir, workspaceIDForRealPath(missingPath)+".json")
+	if err := os.WriteFile(registryFile, data, 0o600); err != nil {
+		t.Fatalf("写入 registry 失败：%v", err)
+	}
+
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.WorktreesRoot = worktreesRoot
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: projectDir}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/worktrees/prune", nil)
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prune 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response worktreePruneResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 worktreePruneResponse：%v", err)
+	}
+	if len(response.PrunedPaths) != 1 || response.PrunedPaths[0] != missingPath {
+		t.Fatalf("清理路径不符合预期：got=%v want=%v", response.PrunedPaths, []string{missingPath})
+	}
+	if len(response.Worktrees) != 0 {
+		t.Fatalf("缺失 worktree 清理后不应继续返回列表：%+v", response.Worktrees)
+	}
+	if _, err := os.Stat(registryFile); !os.IsNotExist(err) {
+		t.Fatalf("registry 文件应被移除，err=%v", err)
+	}
+}
+
+func TestGitStatusReturnsEmptyStateForAllowedNonRepository(t *testing.T) {
+	requireGit(t)
+	projectDir := t.TempDir()
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "plain", Name: "Plain", Path: projectDir}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/status", gitStatusRequest{Path: projectDir})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("非 Git 目录应返回可展示空态，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response gitStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 gitStatusResponse：%v", err)
+	}
+	if response.IsRepository {
+		t.Fatalf("非 Git 目录不应标记为仓库：%+v", response)
+	}
+}
+
+func TestGitStatusRejectsPathOutsideAllowlist(t *testing.T) {
+	requireGit(t)
+	outside := t.TempDir()
+	server := newTestServer(t)
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/git/status", gitStatusRequest{Path: outside})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("越界路径应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCommandActionListFiltersByWorkspaceScope(t *testing.T) {
+	projectDir := t.TempDir()
+	subdir := filepath.Join(projectDir, "app")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: projectDir}}
+		cfg.Actions = []config.ActionConfig{
+			{ID: "test", Name: "测试", Command: "/bin/echo", Args: []string{"ok"}, WorkingDir: "app", RequiresConfirmation: true},
+			{ID: "outside", Name: "越界", Command: "/bin/echo", Args: []string{"bad"}, WorkingDir: "../outside"},
+		}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/actions/list", commandActionListRequest{Path: projectDir})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("action list 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response commandActionListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 commandActionListResponse：%v", err)
+	}
+	if response.Path != canonicalTestPath(t, projectDir) {
+		t.Fatalf("响应 path 应 canonical 化，got=%q", response.Path)
+	}
+	if len(response.Actions) != 1 || response.Actions[0].ID != "test" {
+		t.Fatalf("只应返回当前 scope 内可执行 action，got=%+v", response.Actions)
+	}
+	if response.Actions[0].WorkingDir != canonicalTestPath(t, subdir) {
+		t.Fatalf("working_dir 应解析到子目录，got=%q", response.Actions[0].WorkingDir)
+	}
+	if !response.Actions[0].RequiresConfirmation {
+		t.Fatalf("requires_confirmation 应透传给 iPad 端：%+v", response.Actions[0])
+	}
+}
+
+func TestCommandActionRunExecutesConfiguredCommand(t *testing.T) {
+	projectDir := t.TempDir()
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: projectDir}}
+		cfg.Actions = []config.ActionConfig{
+			{ID: "echo", Name: "Echo", Command: "/bin/echo", Args: []string{"hello"}, TimeoutSeconds: 2},
+		}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/actions/run", commandActionRunRequest{Path: projectDir, ID: "echo"})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("action run 应成功返回执行结果，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response commandActionRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 commandActionRunResponse：%v", err)
+	}
+	if !response.Success || response.ExitCode != 0 || strings.TrimSpace(response.Output) != "hello" {
+		t.Fatalf("action 执行结果异常：%+v", response)
+	}
+}
+
+func TestCommandActionRunReturnsNonZeroExitWithoutHTTPFailure(t *testing.T) {
+	projectDir := t.TempDir()
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: projectDir}}
+		cfg.Actions = []config.ActionConfig{
+			{ID: "missing", Name: "Missing", Command: "/bin/ls", Args: []string{"definitely-missing-file"}},
+		}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/actions/run", commandActionRunRequest{Path: projectDir, ID: "missing"})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("命令非 0 退出不应变成 HTTP 失败，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response commandActionRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 commandActionRunResponse：%v", err)
+	}
+	if response.Success || response.ExitCode == 0 || !strings.Contains(response.Output, "definitely-missing-file") {
+		t.Fatalf("非 0 退出应保留 exit_code 和 stderr 输出：%+v", response)
+	}
+}
+
+func TestCommandActionRunRejectsPathOutsideAllowlist(t *testing.T) {
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Actions = []config.ActionConfig{{ID: "echo", Name: "Echo", Command: "/bin/echo"}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/actions/run", commandActionRunRequest{Path: t.TempDir(), ID: "echo"})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("越界路径应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCapabilityListDiscoversSkillsAndMCPWithoutSecrets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeMCP := filepath.Join(binDir, "fake-mcp")
+	if err := os.WriteFile(fakeMCP, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repoSkillDir := filepath.Join(projectDir, ".agents", "skills", "review")
+	if err := os.MkdirAll(repoSkillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoSkillDir, "SKILL.md"), []byte("---\nname: review\ndescription: Review code changes.\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	userSkillDir := filepath.Join(home, ".agents", "skills", "triage")
+	if err := os.MkdirAll(userSkillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userSkillDir, "SKILL.md"), []byte("---\nname: triage\ndescription: Triage issues.\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	userCodexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(userCodexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userCodexDir, "config.toml"), []byte(`
+[mcp_servers.context7]
+command = "fake-mcp"
+args = ["-y", "@upstash/context7-mcp"]
+env = { SECRET_TOKEN = "should-not-leak" }
+
+[mcp_servers.missing]
+command = "missing-mcp-command"
+
+[mcp_servers.disabled]
+url = "https://example.invalid/mcp"
+enabled = false
+
+[plugins."sample@test".mcp_servers.docs]
+url = "https://docs.example.invalid/mcp"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServerWithConfig(t, func(cfg *config.Config) {
+		cfg.Projects = []config.ProjectConfig{{ID: "repo", Name: "Repo", Path: projectDir}}
+	})
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/capabilities/list", capabilityListRequest{Path: projectDir})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capability list 应成功，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response capabilityListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("响应不是 capabilityListResponse：%v", err)
+	}
+	if !containsSkill(response.Skills, "review", "repo") || !containsSkill(response.Skills, "triage", "user") {
+		t.Fatalf("应发现 repo/user skills：%+v", response.Skills)
+	}
+	if !containsMCP(response.MCPServers, "context7", "", "stdio", true) {
+		t.Fatalf("应发现 stdio MCP server：%+v", response.MCPServers)
+	}
+	if got := findMCP(response.MCPServers, "context7", ""); got == nil || got.Status != "ready" {
+		t.Fatalf("stdio MCP command 可执行时应标记 ready：%+v", response.MCPServers)
+	}
+	if got := findMCP(response.MCPServers, "missing", ""); got == nil || got.Status != "missing_command" {
+		t.Fatalf("stdio MCP command 缺失时应标记 missing_command：%+v", response.MCPServers)
+	}
+	if !containsMCP(response.MCPServers, "disabled", "", "http", false) {
+		t.Fatalf("应保留 disabled 状态：%+v", response.MCPServers)
+	}
+	if got := findMCP(response.MCPServers, "disabled", ""); got == nil || got.Status != "disabled" {
+		t.Fatalf("disabled MCP 应标记 disabled：%+v", response.MCPServers)
+	}
+	if !containsMCP(response.MCPServers, "docs", "sample@test", "http", true) {
+		t.Fatalf("应发现 plugin-provided MCP server 配置：%+v", response.MCPServers)
+	}
+	if got := findMCP(response.MCPServers, "docs", "sample@test"); got == nil || got.Status != "configured" {
+		t.Fatalf("HTTP MCP 应标记 configured 且不发起网络探测：%+v", response.MCPServers)
+	}
+	data, _ := json.Marshal(response)
+	if strings.Contains(string(data), "should-not-leak") {
+		t.Fatalf("capability 响应不应暴露 env secret：%s", string(data))
+	}
+}
+
+func TestCapabilityListRejectsPathOutsideAllowlist(t *testing.T) {
+	server := newTestServer(t)
+	rec := httptest.NewRecorder()
+	req := authedRequest(t, http.MethodPost, "/api/capabilities/list", capabilityListRequest{Path: t.TempDir()})
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("越界路径应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git 不可用，跳过 Git 状态测试：%v", err)
+	}
+}
+
+func newCommittedGitRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	runGitTestCommand(t, repo, "init")
+	runGitTestCommand(t, repo, "config", "user.email", "test@example.invalid")
+	runGitTestCommand(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTestCommand(t, repo, "add", "README.md")
+	runGitTestCommand(t, repo, "commit", "-m", "initial")
+	return repo
+}
+
+func runGitTestCommand(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
+	}
+}
+
+func gitTestOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s failed: %v", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func numberedLines(prefix string, count int) []string {
+	lines := make([]string, 0, count)
+	for i := 1; i <= count; i++ {
+		lines = append(lines, fmt.Sprintf("%s %02d", prefix, i))
+	}
+	return lines
+}
+
+func splitGitDiffIntoSingleHunkPatches(t *testing.T, diff string) []string {
+	t.Helper()
+	if !strings.HasSuffix(diff, "\n") {
+		diff += "\n"
+	}
+
+	lines := strings.SplitAfter(diff, "\n")
+	header := make([]string, 0, 8)
+	var hunk []string
+	patches := []string{}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "@@ ") {
+			if len(hunk) > 0 {
+				patches = append(patches, strings.Join(append(append([]string{}, header...), hunk...), ""))
+			}
+			hunk = []string{line}
+			continue
+		}
+		if len(hunk) == 0 {
+			header = append(header, line)
+			continue
+		}
+		hunk = append(hunk, line)
+	}
+	if len(hunk) > 0 {
+		patches = append(patches, strings.Join(append(append([]string{}, header...), hunk...), ""))
+	}
+	return patches
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return realPath
+}
+
 func TestActiveSessionSnapshotsFiltersByProjectBeforePagination(t *testing.T) {
 	now := time.Unix(100, 0)
 	list := []*session.Session{
@@ -254,6 +1404,42 @@ func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 		t.Fatalf("响应不是合法 JSON：%v body=%q", err, rec.Body.String())
 	}
 	return out
+}
+
+func containsSkill(items []skillCapability, name string, scope string) bool {
+	for _, item := range items {
+		if item.Name == name && item.Scope == scope {
+			return true
+		}
+	}
+	return false
+}
+
+func containsMCP(items []mcpServerCapability, name string, plugin string, transport string, enabled bool) bool {
+	for _, item := range items {
+		if item.Name == name && item.Plugin == plugin && item.Transport == transport && item.Enabled == enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func findMCP(items []mcpServerCapability, name string, plugin string) *mcpServerCapability {
+	for i := range items {
+		if items[i].Name == name && items[i].Plugin == plugin {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
+func containsWorktreeBranch(items []worktreeBranchItem, name string, kind string, current bool, def bool) bool {
+	for _, item := range items {
+		if item.Name == name && item.Kind == kind && item.IsCurrent == current && item.IsDefault == def {
+			return true
+		}
+	}
+	return false
 }
 
 func sessionSnapshotIDs(items []session.SessionSnapshot) []string {
@@ -443,6 +1629,54 @@ func TestWorkspaceResolveAllowsBrowseRootDirectoryWithSelfBinding(t *testing.T) 
 	}))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("browse root 外路径应被拒绝，实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatWorkspaceCreatesAndResolvesCodexThreadsWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	server := newTestServer(t)
+
+	rec := httptest.NewRecorder()
+	server.handler.ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/workspaces/chat", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat workspace 应成功，实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+	chatPath := filepath.Join(home, ".codex", "threads")
+	realChatPath, err := filepath.EvalSymlinks(chatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat, err := os.Stat(realChatPath); err != nil || !stat.IsDir() {
+		t.Fatalf("chat workspace 应创建真实目录：stat=%v err=%v", stat, err)
+	}
+
+	body := decodeJSON(t, rec)
+	workspace, ok := body["workspace"].(map[string]any)
+	if !ok {
+		t.Fatalf("workspace 响应异常：%v", body)
+	}
+	if workspace["name"] != "Chats" || workspace["path"] != realChatPath {
+		t.Fatalf("chat workspace 基础字段异常：%v", workspace)
+	}
+	if workspace["root_project_id"] != workspace["id"] || workspace["root_project_path"] != realChatPath {
+		t.Fatalf("chat workspace 应自指 root 字段：%v", workspace)
+	}
+	if workspace["trusted"] != true || workspace["can_start_session"] != true {
+		t.Fatalf("chat workspace 应允许作为真实会话 cwd：%v", workspace)
+	}
+
+	rec = httptest.NewRecorder()
+	server.handler.ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/workspaces/resolve", map[string]string{
+		"path": chatPath,
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat workspace 应可被 resolve 复核，实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+	resolvedBody := decodeJSON(t, rec)
+	resolved, ok := resolvedBody["workspace"].(map[string]any)
+	if !ok || resolved["id"] != workspace["id"] || resolved["path"] != realChatPath {
+		t.Fatalf("resolve 后应返回同一个 chat workspace：%v", resolvedBody)
 	}
 }
 

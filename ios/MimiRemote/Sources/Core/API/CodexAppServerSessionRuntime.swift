@@ -103,6 +103,22 @@ actor CodexAppServerSessionRuntime {
         return CodexAppServerModelOption.parseListResult(result)
     }
 
+    func capabilities(path: String?) async throws -> CapabilityListResponse {
+        // Skills/MCP 浏览是 agentd 控制面的只读发现能力，不走 app-server JSON-RPC。
+        try await AgentAPIClient(endpoint: endpoint, token: token).capabilities(path: path)
+    }
+
+    func transcribeVoice(filename: String, contentType: String, audioData: Data, language: String?, prompt: String?) async throws -> VoiceTranscriptionResponse {
+        // 语音转写属于 agentd 控制面：移动端只上传音频，API Key 和模型配置都留在 agentd。
+        try await AgentAPIClient(endpoint: endpoint, token: token).transcribeVoice(
+            filename: filename,
+            contentType: contentType,
+            audioData: audioData,
+            language: language,
+            prompt: prompt
+        )
+    }
+
     func validateDirectGateway() async throws {
         let config = try await ensureConfig(forceRefresh: true)
         guard config.runtime.gatewayAvailable, !config.gatewayWSURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -138,10 +154,12 @@ actor CodexAppServerSessionRuntime {
     }
 
     func sessionsPage(workspace: AgentWorkspace, cursor: String?, limit: Int?) async throws -> SessionsPage {
-        let projects = projectsIncludingWorkspace(try await projects(), workspace: workspace)
+        let baseProjects = try await projects()
+        let projects = projectsIncludingWorkspace(baseProjects, workspace: workspace)
         let workspaceProject = workspace.project
+        let listCWD = threadListCWD(for: workspace, projects: baseProjects)
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: projects)
-        let spec = try builder.threadList(cwd: workspace.path, limit: limit, cursor: cursor)
+        let spec = try builder.threadList(cwd: listCWD, limit: limit, cursor: cursor)
 
         let result = try await ensureConnection().send(spec)
         let page = threadListPage(from: result, projects: projects, fallbackProject: workspaceProject)
@@ -160,9 +178,84 @@ actor CodexAppServerSessionRuntime {
         try await AgentAPIClient(endpoint: endpoint, token: token).resolveWorkspace(path: path)
     }
 
+    func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse {
+        // Worktree 是 agentd 管理的本机 Git checkout；创建后返回可直接用于 thread/start 的 workspace。
+        try await AgentAPIClient(endpoint: endpoint, token: token).createWorktree(path: path, name: name, base: base, branch: branch)
+    }
+
+    func worktreeBranches(path: String) async throws -> WorktreeBranchListResponse {
+        // 分支列表是 agentd 控制面的只读 Git 引用发现，不走 app-server JSON-RPC。
+        try await AgentAPIClient(endpoint: endpoint, token: token).worktreeBranches(path: path)
+    }
+
+    func listWorktrees() async throws -> [WorktreeListItem] {
+        // Worktree registry 属于 agentd 控制面状态；列表用于 iPad 管理本机 checkout，不走 app-server。
+        try await AgentAPIClient(endpoint: endpoint, token: token).listWorktrees()
+    }
+
+    func deleteWorktree(path: String, force: Bool) async throws -> WorktreeDeleteResponse {
+        // 删除会改变本机文件系统，所有路径和 managed registry 校验都留在 agentd 后端执行。
+        try await AgentAPIClient(endpoint: endpoint, token: token).deleteWorktree(path: path, force: force)
+    }
+
+    func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
+        // 只清理 agentd registry 中已经不存在的 checkout 登记，不删除真实文件。
+        try await AgentAPIClient(endpoint: endpoint, token: token).pruneMissingWorktrees()
+    }
+
     func listDirectories(path: String) async throws -> DirectoryListResponse {
         // 目录浏览同样走 agentd 控制面 REST 接口，传空 path 表示从服务端默认浏览根开始。
         try await AgentAPIClient(endpoint: endpoint, token: token).listDirectories(path: path)
+    }
+
+    func readFile(path: String) async throws -> FileReadResponse {
+        // 文件预览只通过 agentd 控制面读取授权边界内的普通文件，iPad 端不直接访问本机文件系统。
+        try await AgentAPIClient(endpoint: endpoint, token: token).readFile(path: path)
+    }
+
+    func commandActions(path: String) async throws -> [AgentCommandAction] {
+        // 快捷动作是 agentd 配置的 allowlist 能力，只在控制面列出，不让 app-server 接触命令定义。
+        try await AgentAPIClient(endpoint: endpoint, token: token).commandActions(path: path)
+    }
+
+    func runCommandAction(path: String, id: String) async throws -> CommandActionRunResponse {
+        // 执行动作会改变本机状态或产生副作用，统一交给 agentd 做路径和 action ID 校验。
+        try await AgentAPIClient(endpoint: endpoint, token: token).runCommandAction(path: path, id: id)
+    }
+
+    func gitStatus(path: String) async throws -> GitStatusResponse {
+        // Git 状态是 agentd 控制面的只读接口；不走 app-server，避免把 Git 审查和对话协议耦合。
+        try await AgentAPIClient(endpoint: endpoint, token: token).gitStatus(path: path)
+    }
+
+    func gitAction(path: String, action: GitActionKind, files: [String]) async throws -> GitStatusResponse {
+        // Git 写动作仍由 agentd 控制面执行，方便统一做 allowlist、路径和动作白名单校验。
+        try await AgentAPIClient(endpoint: endpoint, token: token).gitAction(path: path, action: action, files: files)
+    }
+
+    func gitPatchAction(path: String, action: GitActionKind, patch: String) async throws -> GitStatusResponse {
+        // hunk 级 Git 动作仍复用 agentd 控制面，由后端限制单 hunk 和安全相对路径。
+        try await AgentAPIClient(endpoint: endpoint, token: token).gitPatchAction(path: path, action: action, patch: patch)
+    }
+
+    func gitCommit(path: String, message: String) async throws -> GitStatusResponse {
+        // 本地 commit 属于 Git 控制面能力；只提交已暂存内容，保持对话协议单纯。
+        try await AgentAPIClient(endpoint: endpoint, token: token).gitCommit(path: path, message: message)
+    }
+
+    func gitPush(path: String, remote: String?) async throws -> GitPushResponse {
+        // push 仍由 agentd 控制面执行，禁止 force，复用本机 Git 凭证。
+        try await AgentAPIClient(endpoint: endpoint, token: token).gitPush(path: path, remote: remote)
+    }
+
+    func gitCreatePullRequest(path: String, title: String, body: String, draft: Bool) async throws -> GitPullRequestResponse {
+        // PR 通过本机已登录的 gh CLI 创建，iPad 不接触 GitHub token。
+        try await AgentAPIClient(endpoint: endpoint, token: token).gitCreatePullRequest(path: path, title: title, body: body, draft: draft)
+    }
+
+    func gitPullRequestStatus(path: String) async throws -> GitPullRequestStatusResponse {
+        // PR 状态同样读取本机 gh CLI，移动端只展示当前分支摘要。
+        try await AgentAPIClient(endpoint: endpoint, token: token).gitPullRequestStatus(path: path)
     }
 
     func session(id: SessionID, afterSeq: EventSequence?) async throws -> SessionResponse {
@@ -177,6 +270,49 @@ actor CodexAppServerSessionRuntime {
             activeTurnID: session.activeTurnID
         )
         return SessionResponse(session: session, recentOutput: nil, lastSeq: session.lastSeq)
+    }
+
+    func threadGoal(threadID: SessionID) async throws -> ThreadGoal? {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        let result = try await ensureConnection().send(builder.threadGoalGet(threadID: threadID))
+        guard let goal = threadGoal(from: result) else {
+            clearThreadGoalLocal(threadID: threadID)
+            emit(.goalCleared(metadata(threadID: threadID, turnID: nil)))
+            return nil
+        }
+        applyThreadGoal(goal)
+        emit(.goalUpdated(goal, metadata(threadID: goal.threadID, turnID: nil)))
+        return goal
+    }
+
+    @discardableResult
+    func setThreadGoal(
+        threadID: SessionID,
+        objective: String? = nil,
+        status: ThreadGoalStatus? = nil,
+        tokenBudget: Int64? = nil
+    ) async throws -> ThreadGoal {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        let normalizedObjective = objective?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = try await ensureConnection().send(builder.threadGoalSet(
+            threadID: threadID,
+            objective: normalizedObjective?.isEmpty == false ? normalizedObjective : nil,
+            status: status,
+            tokenBudget: tokenBudget
+        ))
+        guard let goal = threadGoal(from: result) else {
+            throw AgentAPIError.invalidResponse
+        }
+        applyThreadGoal(goal)
+        emit(.goalUpdated(goal, metadata(threadID: goal.threadID, turnID: nil)))
+        return goal
+    }
+
+    func clearThreadGoal(threadID: SessionID) async throws {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        _ = try await ensureConnection().send(builder.threadGoalClear(threadID: threadID))
+        clearThreadGoalLocal(threadID: threadID)
+        emit(.goalCleared(metadata(threadID: threadID, turnID: nil)))
     }
 
     func createSession(_ payload: CreateSessionRequest) async throws -> CreateSessionResponse {
@@ -225,6 +361,16 @@ actor CodexAppServerSessionRuntime {
         // thread/start 与 thread/resume 都已经把 thread 绑定到当前连接，记录下来避免随后的 turn/start 再重复 resume。
         threadsResumedOnConnection.insert(session.id)
 
+        let initialGoalObjective = payload.initialGoalObjective?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let initialGoalObjective, !initialGoalObjective.isEmpty {
+            // 目标任务必须先写入 thread 元数据，再启动首个 turn；这样 app-server 从一开始就知道
+            // 这次执行属于 goal，而不是普通 turn 完成后再补标签。
+            try await setThreadGoal(threadID: session.id, objective: initialGoalObjective, status: .active)
+            if let updated = contextsBySessionID[session.id]?.session {
+                session = updated
+            }
+        }
+
         let turnPayload = CodexAppServerTurnPayload(input: payload.input, options: payload.turnOptions)
         if !turnPayload.isEmpty {
             let turnID = try await startTurn(
@@ -257,6 +403,44 @@ actor CodexAppServerSessionRuntime {
             item.status = "closed"
             item.activeTurnID = nil
         }
+    }
+
+    func setSessionArchived(id: SessionID, archived: Bool) async throws {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        let spec = archived
+            ? builder.threadArchive(threadID: id)
+            : builder.threadUnarchive(threadID: id)
+        _ = try await ensureConnection().send(spec)
+        if archived {
+            contextsBySessionID.removeValue(forKey: id)
+            threadHistoryCacheBySessionID.removeValue(forKey: id)
+        }
+    }
+
+    func forkSession(threadID: SessionID, workspace: AgentWorkspace) async throws -> AgentSession {
+        let baseProjects = try await projects()
+        let project = AgentProject(id: workspace.id, name: workspace.name, path: workspace.path)
+        let projects = projectsIncludingWorkspace(baseProjects, workspace: workspace)
+        var options = CodexAppServerTurnOptions.default
+        options.threadSource = "worktree_handoff"
+        let result = try await ensureConnection().send(
+            try CodexAppServerRequestBuilder(allowlistedProjects: projects).threadFork(
+                threadID: threadID,
+                cwd: workspace.path,
+                options: options
+            )
+        )
+        guard let thread = threadObject(from: result) else {
+            throw AgentAPIError.invalidResponse
+        }
+        let session = try agentSession(from: thread, projects: projects, fallbackProject: project)
+        contextsBySessionID[session.id] = CodexAppServerSessionContext(
+            session: session,
+            cwd: session.dir,
+            activeTurnID: session.activeTurnID
+        )
+        threadsResumedOnConnection.insert(session.id)
+        return session
     }
 
     // thread/read 是整段历史的批量拉取，慢链路（Tailscale）下比交互式请求耗时得多；给它一个更宽的
@@ -362,6 +546,7 @@ actor CodexAppServerSessionRuntime {
         // hydration。移动端打开会话也要先绑定当前连接，否则历史里的 pending approval 和后续 turn 事件
         // 可能不会回流到 iPad。
         try await ensureThreadResumedOnConnection(sessionID: sessionID, cwd: context.cwd, builder: builder, connection: connection)
+        await refreshThreadGoalIfAvailable(sessionID: sessionID, builder: builder, connection: connection)
     }
 
     @discardableResult
@@ -433,6 +618,25 @@ actor CodexAppServerSessionRuntime {
             emit(.session(session))
         }
         threadsResumedOnConnection.insert(sessionID)
+    }
+
+    private func refreshThreadGoalIfAvailable(
+        sessionID: SessionID,
+        builder: CodexAppServerRequestBuilder,
+        connection: CodexAppServerConnection
+    ) async {
+        do {
+            let result = try await connection.send(builder.threadGoalGet(threadID: sessionID))
+            guard let goal = threadGoal(from: result) else {
+                clearThreadGoalLocal(threadID: sessionID)
+                emit(.goalCleared(metadata(threadID: sessionID, turnID: nil)))
+                return
+            }
+            applyThreadGoal(goal)
+            emit(.goalUpdated(goal, metadata(threadID: goal.threadID, turnID: nil)))
+        } catch {
+            // 目标能力在旧 app-server 上可能不可用；监听会话本身不应因此失败。
+        }
     }
 
     func interruptActiveTurn(sessionID: SessionID) async throws {
@@ -724,6 +928,7 @@ actor CodexAppServerSessionRuntime {
             return row.id
         case .sessionStatus(_, let metadata),
              .sessionContext(_, let metadata),
+             .goalCleared(let metadata),
              .turnStarted(let metadata),
              .assistantDelta(_, let metadata),
              .messageCompleted(_, let metadata),
@@ -735,6 +940,8 @@ actor CodexAppServerSessionRuntime {
              .turnCompleted(let metadata),
              .warning(_, let metadata):
             return metadata.sessionID
+        case .goalUpdated(let goal, let metadata):
+            return metadata.sessionID ?? goal.threadID
         case .error, .unknown:
             return nil
         }
@@ -779,6 +986,16 @@ actor CodexAppServerSessionRuntime {
                 ),
                 metadata(threadID: threadID, turnID: nil)
             ))
+        case "thread/goal/updated":
+            guard let goal = threadGoal(from: .object(params)) else {
+                return
+            }
+            applyThreadGoal(goal)
+        case "thread/goal/cleared":
+            guard let threadID = params["threadId"]?.stringValue else {
+                return
+            }
+            clearThreadGoalLocal(threadID: threadID)
         case "turn/started":
             guard let threadID = params["threadId"]?.stringValue,
                   let turnID = params["turn"]?.objectValue?["id"]?.stringValue else {
@@ -840,6 +1057,20 @@ actor CodexAppServerSessionRuntime {
         return session
     }
 
+    @discardableResult
+    private func applyThreadGoal(_ goal: ThreadGoal) -> AgentSession? {
+        withUpdatedSession(goal.threadID) { item in
+            item.goal = goal
+        }
+    }
+
+    @discardableResult
+    private func clearThreadGoalLocal(threadID: SessionID) -> AgentSession? {
+        withUpdatedSession(threadID) { item in
+            item.goal = nil
+        }
+    }
+
     private func threadListPage(
         from result: CodexAppServerJSONValue?,
         projects: [AgentProject],
@@ -855,6 +1086,16 @@ actor CodexAppServerSessionRuntime {
 
     private func threadObject(from result: CodexAppServerJSONValue?) -> [String: CodexAppServerJSONValue]? {
         result?["thread"]?.objectValue
+    }
+
+    private func threadGoal(from result: CodexAppServerJSONValue?) -> ThreadGoal? {
+        if let object = result?["goal"]?.objectValue {
+            return ThreadGoal(object: object)
+        }
+        guard let object = result?.objectValue else {
+            return nil
+        }
+        return ThreadGoal(object: object)
     }
 
     private func agentSession(
@@ -874,7 +1115,7 @@ actor CodexAppServerSessionRuntime {
         let preview = thread["preview"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = thread["name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
             ?? preview?.split(separator: "\n").first.map(String.init)
-            ?? "Codex Thread \(id.prefix(8))"
+            ?? "Thread \(id.prefix(8))"
         let cached = contextsBySessionID[id]?.session
         // thread/list 可能不带 turns，此时沿用本地 activeTurnID；但 thread/read/resume 一旦带回
         // turns，就让服务端最新的 inProgress turn 覆盖旧缓存。现场曾出现旧审批 turn 长期保持
@@ -885,13 +1126,15 @@ actor CodexAppServerSessionRuntime {
         // 非空）时，才在这一瞬间保留运行态，避免侧栏角标抖动；没有活跃 turn 的残留态（例如被放弃的审批
         // 等待）必须允许权威 history 把它降级，否则 stale 审批态会一直挂着清不掉。
         let effectiveStatus = (cached?.activeTurnID != nil && status == "history") ? (cached?.status ?? status) : status
+        let goal = thread["goal"]?.objectValue.flatMap { ThreadGoal(object: $0) } ?? cached?.goal
         let context = sessionContext(
             from: thread,
             sessionID: id,
             cwd: cwd,
             status: effectiveStatus,
             statusValue: forceRunning ? nil : thread["status"],
-            project: project ?? fallbackProject
+            project: project ?? fallbackProject,
+            goal: goal
         )
         return AgentSession(
             id: id,
@@ -908,6 +1151,7 @@ actor CodexAppServerSessionRuntime {
             activeTurnID: activeTurnID,
             lastSeq: nil,
             revision: 0,
+            goal: goal,
             context: context
         )
     }
@@ -918,7 +1162,8 @@ actor CodexAppServerSessionRuntime {
         cwd: String,
         status: String,
         statusValue: CodexAppServerJSONValue?,
-        project: AgentProject?
+        project: AgentProject?,
+        goal: ThreadGoal?
     ) -> SessionContextSnapshot {
         let threadID = thread["id"]?.stringValue ?? sessionID
         return SessionContextSnapshot(
@@ -933,6 +1178,7 @@ actor CodexAppServerSessionRuntime {
                 provider: nonEmpty(thread["modelProvider"]?.stringValue, "openai")
             ),
             git: gitInfo(from: thread["gitInfo"]?.objectValue),
+            goal: goal,
             tasks: contextTasks(from: thread),
             sources: contextSources(from: thread, project: project),
             subagents: contextSubagents(from: thread, status: status),
@@ -956,6 +1202,33 @@ actor CodexAppServerSessionRuntime {
         var next = projects.filter { $0.id != workspace.id && $0.path != workspace.path }
         next.append(workspace.project)
         return next
+    }
+
+    private func threadListCWD(for workspace: AgentWorkspace, projects: [AgentProject]) -> String {
+        let rootProjectID = workspace.rootProjectID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rootProjectID.isEmpty,
+              let rootProject = projects.first(where: { $0.id == rootProjectID }),
+              let workspacePath = standardizedPath(workspace.path),
+              let rootPath = standardizedPath(rootProject.path),
+              path(workspacePath, isEqualToOrInside: rootPath)
+        else {
+            return workspace.path
+        }
+        // 项目内子路径打开时沿用 root project 拉历史；否则 app-server 会按子目录精确 cwd 返回空列表。
+        // managed worktree / browse workspace 通常不在 rootPath 下，会保留自己的真实路径隔离历史。
+        return rootProject.path
+    }
+
+    private func path(_ path: String, isEqualToOrInside rootPath: String) -> Bool {
+        path == rootPath || path.hasPrefix(rootPath == "/" ? "/" : rootPath + "/")
+    }
+
+    private func standardizedPath(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
     }
 
     private func projectsIncludingSessionContext(_ projects: [AgentProject], context: CodexAppServerSessionContext) -> [AgentProject] {
@@ -1629,12 +1902,86 @@ final class CodexAppServerSessionAPIClient: SessionStoreAPIClient {
         try await runtime.modelOptions()
     }
 
+    func capabilities(path: String?) async throws -> CapabilityListResponse {
+        try await runtime.capabilities(path: path)
+    }
+
     func resolveWorkspace(path: String) async throws -> AgentWorkspace {
         try await runtime.resolveWorkspace(path: path)
     }
 
+    func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse {
+        try await runtime.createWorktree(path: path, name: name, base: base, branch: branch)
+    }
+
+    func worktreeBranches(path: String) async throws -> WorktreeBranchListResponse {
+        try await runtime.worktreeBranches(path: path)
+    }
+
+    func listWorktrees() async throws -> [WorktreeListItem] {
+        try await runtime.listWorktrees()
+    }
+
+    func deleteWorktree(path: String, force: Bool) async throws -> WorktreeDeleteResponse {
+        try await runtime.deleteWorktree(path: path, force: force)
+    }
+
+    func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
+        try await runtime.pruneMissingWorktrees()
+    }
+
     func listDirectories(path: String) async throws -> DirectoryListResponse {
         try await runtime.listDirectories(path: path)
+    }
+
+    func readFile(path: String) async throws -> FileReadResponse {
+        try await runtime.readFile(path: path)
+    }
+
+    func commandActions(path: String) async throws -> [AgentCommandAction] {
+        try await runtime.commandActions(path: path)
+    }
+
+    func runCommandAction(path: String, id: String) async throws -> CommandActionRunResponse {
+        try await runtime.runCommandAction(path: path, id: id)
+    }
+
+    func gitStatus(path: String) async throws -> GitStatusResponse {
+        try await runtime.gitStatus(path: path)
+    }
+
+    func gitAction(path: String, action: GitActionKind, files: [String]) async throws -> GitStatusResponse {
+        try await runtime.gitAction(path: path, action: action, files: files)
+    }
+
+    func gitPatchAction(path: String, action: GitActionKind, patch: String) async throws -> GitStatusResponse {
+        try await runtime.gitPatchAction(path: path, action: action, patch: patch)
+    }
+
+    func gitCommit(path: String, message: String) async throws -> GitStatusResponse {
+        try await runtime.gitCommit(path: path, message: message)
+    }
+
+    func gitPush(path: String, remote: String?) async throws -> GitPushResponse {
+        try await runtime.gitPush(path: path, remote: remote)
+    }
+
+    func gitCreatePullRequest(path: String, title: String, body: String, draft: Bool) async throws -> GitPullRequestResponse {
+        try await runtime.gitCreatePullRequest(path: path, title: title, body: body, draft: draft)
+    }
+
+    func gitPullRequestStatus(path: String) async throws -> GitPullRequestStatusResponse {
+        try await runtime.gitPullRequestStatus(path: path)
+    }
+
+    func transcribeVoice(filename: String, contentType: String, audioData: Data, language: String?, prompt: String?) async throws -> VoiceTranscriptionResponse {
+        try await runtime.transcribeVoice(
+            filename: filename,
+            contentType: contentType,
+            audioData: audioData,
+            language: language,
+            prompt: prompt
+        )
     }
 
     func sessions(projectID: String?, cursor: String?, limit: Int?) async throws -> [AgentSession] {
@@ -1653,12 +2000,32 @@ final class CodexAppServerSessionAPIClient: SessionStoreAPIClient {
         try await runtime.session(id: id, afterSeq: afterSeq)
     }
 
+    func threadGoal(threadID: String) async throws -> ThreadGoal? {
+        try await runtime.threadGoal(threadID: threadID)
+    }
+
+    func setThreadGoal(threadID: String, objective: String?, status: ThreadGoalStatus?, tokenBudget: Int64?) async throws -> ThreadGoal {
+        try await runtime.setThreadGoal(threadID: threadID, objective: objective, status: status, tokenBudget: tokenBudget)
+    }
+
+    func clearThreadGoal(threadID: String) async throws {
+        try await runtime.clearThreadGoal(threadID: threadID)
+    }
+
     func createSession(_ payload: CreateSessionRequest) async throws -> CreateSessionResponse {
         try await runtime.createSession(payload)
     }
 
     func stopSession(id: String) async throws {
         try await runtime.stopSession(id: id)
+    }
+
+    func setSessionArchived(id: String, archived: Bool) async throws {
+        try await runtime.setSessionArchived(id: id, archived: archived)
+    }
+
+    func forkSession(threadID: String, workspace: AgentWorkspace) async throws -> AgentSession {
+        try await runtime.forkSession(threadID: threadID, workspace: workspace)
     }
 
     func messages(sessionID: String, before: String?, limit: Int?) async throws -> [CodexHistoryMessage] {

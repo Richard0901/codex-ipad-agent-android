@@ -10,6 +10,27 @@ struct VersionResponse: Codable {
     let version: String
 }
 
+struct VoiceTranscriptionRequest: Encodable {
+    let filename: String
+    let contentType: String
+    let audioBase64: String
+    let language: String?
+    let prompt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case filename
+        case contentType = "content_type"
+        case audioBase64 = "audio_base64"
+        case language
+        case prompt
+    }
+}
+
+struct VoiceTranscriptionResponse: Decodable, Hashable {
+    let text: String
+    let model: String
+}
+
 struct CodexAppServerConfigResponse: Codable {
     let gatewayWSURL: String
     let runtime: CodexAppServerRuntimeMetadata
@@ -56,6 +77,86 @@ struct CodexAppServerPolicyMetadata: Codable, Hashable {
     }
 }
 
+struct CapabilityListRequest: Encodable {
+    let path: String?
+}
+
+struct CapabilityListResponse: Codable, Hashable {
+    let path: String?
+    let skills: [SkillCapability]
+    let mcpServers: [MCPCapability]
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case skills
+        case mcpServers = "mcp_servers"
+    }
+}
+
+struct SkillCapability: Codable, Hashable, Identifiable {
+    let name: String
+    let description: String?
+    let scope: String
+    let path: String
+    let enabled: Bool
+
+    var id: String { path }
+}
+
+struct MCPCapability: Codable, Hashable, Identifiable {
+    let name: String
+    let scope: String
+    let configPath: String
+    let transport: String?
+    let command: String?
+    let url: String?
+    let enabled: Bool
+    let plugin: String?
+    let status: String?
+    let statusNote: String?
+
+    var id: String {
+        "\(configPath)#\(plugin ?? "")#\(name)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case scope
+        case configPath = "config_path"
+        case transport
+        case command
+        case url
+        case enabled
+        case plugin
+        case status
+        case statusNote = "status_note"
+    }
+
+    init(
+        name: String,
+        scope: String,
+        configPath: String,
+        transport: String?,
+        command: String?,
+        url: String?,
+        enabled: Bool,
+        plugin: String?,
+        status: String? = nil,
+        statusNote: String? = nil
+    ) {
+        self.name = name
+        self.scope = scope
+        self.configPath = configPath
+        self.transport = transport
+        self.command = command
+        self.url = url
+        self.enabled = enabled
+        self.plugin = plugin
+        self.status = status
+        self.statusNote = statusNote
+    }
+}
+
 struct ProjectsResponse: Codable {
     let projects: [AgentProject]
 }
@@ -68,6 +169,176 @@ struct WorkspaceResolveResponse: Codable {
     let workspace: AgentWorkspace
 }
 
+struct WorktreeCreateRequest: Encodable {
+    let path: String
+    let name: String?
+    let base: String?
+    let branch: String?
+}
+
+struct WorktreeBranchListRequest: Encodable {
+    let path: String
+}
+
+struct WorktreeBranchListResponse: Codable, Hashable {
+    let path: String
+    let defaultBase: String?
+    let currentBranch: String?
+    let branches: [WorktreeBranchItem]
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case defaultBase = "default_base"
+        case currentBranch = "current_branch"
+        case branches
+    }
+}
+
+struct WorktreeBranchItem: Codable, Hashable, Identifiable {
+    let name: String
+    let kind: String
+    let isCurrent: Bool
+    let isDefault: Bool
+
+    var id: String { "\(kind):\(name)" }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case kind
+        case isCurrent = "is_current"
+        case isDefault = "is_default"
+    }
+
+    init(name: String, kind: String, isCurrent: Bool = false, isDefault: Bool = false) {
+        self.name = name
+        self.kind = kind
+        self.isCurrent = isCurrent
+        self.isDefault = isDefault
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        kind = try container.decode(String.self, forKey: .kind)
+        isCurrent = try container.decodeIfPresent(Bool.self, forKey: .isCurrent) ?? false
+        isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+    }
+}
+
+struct WorktreeListResponse: Codable {
+    let worktrees: [WorktreeListItem]
+}
+
+struct WorktreeListItem: Codable, Hashable, Identifiable {
+    let workspace: AgentWorkspace
+    let worktree: WorktreeDescriptor
+
+    var id: String { workspace.id }
+}
+
+struct WorktreeDeleteRequest: Encodable {
+    let path: String
+    let force: Bool
+}
+
+struct WorktreeDeleteResponse: Codable {
+    let deletedPath: String
+    let worktrees: [WorktreeListItem]
+    let workspace: AgentWorkspace?
+    let worktree: WorktreeDescriptor?
+
+    enum CodingKeys: String, CodingKey {
+        case deletedPath = "deleted_path"
+        case worktrees
+        case workspace
+        case worktree
+    }
+}
+
+struct WorktreePruneResponse: Codable {
+    let prunedPaths: [String]
+    let worktrees: [WorktreeListItem]
+
+    enum CodingKeys: String, CodingKey {
+        case prunedPaths = "pruned_paths"
+        case worktrees
+    }
+}
+
+struct WorktreeCreateResponse: Codable {
+    let workspace: AgentWorkspace
+    let worktree: WorktreeDescriptor
+}
+
+struct WorktreeDescriptor: Codable, Hashable {
+    let path: String
+    let repositoryPath: String
+    let base: String
+    let branch: String?
+    let dirty: Bool
+    let ahead: Int
+    let behind: Int
+    let upstream: String?
+    let rootProjectID: String
+    let rootProjectName: String
+    let rootProjectPath: String
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case repositoryPath = "repository_path"
+        case base
+        case branch
+        case dirty
+        case ahead
+        case behind
+        case upstream
+        case rootProjectID = "root_project_id"
+        case rootProjectName = "root_project_name"
+        case rootProjectPath = "root_project_path"
+    }
+
+    init(
+        path: String,
+        repositoryPath: String,
+        base: String,
+        branch: String?,
+        dirty: Bool = false,
+        ahead: Int = 0,
+        behind: Int = 0,
+        upstream: String? = nil,
+        rootProjectID: String,
+        rootProjectName: String,
+        rootProjectPath: String
+    ) {
+        self.path = path
+        self.repositoryPath = repositoryPath
+        self.base = base
+        self.branch = branch
+        self.dirty = dirty
+        self.ahead = ahead
+        self.behind = behind
+        self.upstream = upstream
+        self.rootProjectID = rootProjectID
+        self.rootProjectName = rootProjectName
+        self.rootProjectPath = rootProjectPath
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        repositoryPath = try container.decode(String.self, forKey: .repositoryPath)
+        base = try container.decode(String.self, forKey: .base)
+        branch = try container.decodeIfPresent(String.self, forKey: .branch)
+        dirty = try container.decodeIfPresent(Bool.self, forKey: .dirty) ?? false
+        ahead = try container.decodeIfPresent(Int.self, forKey: .ahead) ?? 0
+        behind = try container.decodeIfPresent(Int.self, forKey: .behind) ?? 0
+        upstream = try container.decodeIfPresent(String.self, forKey: .upstream)
+        rootProjectID = try container.decode(String.self, forKey: .rootProjectID)
+        rootProjectName = try container.decode(String.self, forKey: .rootProjectName)
+        rootProjectPath = try container.decode(String.self, forKey: .rootProjectPath)
+    }
+}
+
 struct DirectoryListRequest: Encodable {
     let path: String
 }
@@ -78,8 +349,10 @@ struct DirectoryEntry: Codable, Hashable, Identifiable {
     let isDir: Bool
     let canOpen: Bool
     let canBrowse: Bool
+    let canPreview: Bool
 
     var id: String { path }
+    var isPreviewable: Bool { canPreview }
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -87,6 +360,26 @@ struct DirectoryEntry: Codable, Hashable, Identifiable {
         case isDir = "is_dir"
         case canOpen = "can_open"
         case canBrowse = "can_browse"
+        case canPreview = "can_preview"
+    }
+
+    init(name: String, path: String, isDir: Bool, canOpen: Bool, canBrowse: Bool, canPreview: Bool = false) {
+        self.name = name
+        self.path = path
+        self.isDir = isDir
+        self.canOpen = canOpen
+        self.canBrowse = canBrowse
+        self.canPreview = canPreview
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        path = try container.decode(String.self, forKey: .path)
+        isDir = try container.decode(Bool.self, forKey: .isDir)
+        canOpen = try container.decode(Bool.self, forKey: .canOpen)
+        canBrowse = try container.decode(Bool.self, forKey: .canBrowse)
+        canPreview = try container.decodeIfPresent(Bool.self, forKey: .canPreview) ?? false
     }
 }
 
@@ -101,6 +394,397 @@ struct DirectoryListResponse: Codable, Hashable {
         case parentPath = "parent_path"
         case entries
         case truncated
+    }
+}
+
+struct FileReadRequest: Encodable {
+    let path: String
+}
+
+struct FileReadResponse: Codable, Hashable {
+    let path: String
+    let name: String
+    let contentType: String
+    let size: Int64
+    let contentBase64: String
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case name
+        case contentType = "content_type"
+        case size
+        case contentBase64 = "content_base64"
+    }
+}
+
+struct CommandActionListRequest: Encodable {
+    let path: String
+}
+
+struct CommandActionRunRequest: Encodable {
+    let path: String
+    let id: String
+}
+
+struct CommandActionListResponse: Codable, Hashable {
+    let path: String
+    let actions: [AgentCommandAction]
+}
+
+struct AgentCommandAction: Codable, Hashable, Identifiable {
+    let id: String
+    let name: String
+    let command: String
+    let args: [String]
+    let workingDir: String
+    let timeoutSeconds: Int
+    let requiresConfirmation: Bool
+
+    var displayCommand: String {
+        ([command] + args).joined(separator: " ")
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case command
+        case args
+        case workingDir = "working_dir"
+        case timeoutSeconds = "timeout_seconds"
+        case requiresConfirmation = "requires_confirmation"
+    }
+
+    init(id: String, name: String, command: String, args: [String] = [], workingDir: String, timeoutSeconds: Int, requiresConfirmation: Bool = false) {
+        self.id = id
+        self.name = name
+        self.command = command
+        self.args = args
+        self.workingDir = workingDir
+        self.timeoutSeconds = timeoutSeconds
+        self.requiresConfirmation = requiresConfirmation
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        command = try container.decode(String.self, forKey: .command)
+        args = try container.decodeIfPresent([String].self, forKey: .args) ?? []
+        workingDir = try container.decode(String.self, forKey: .workingDir)
+        timeoutSeconds = try container.decode(Int.self, forKey: .timeoutSeconds)
+        requiresConfirmation = try container.decodeIfPresent(Bool.self, forKey: .requiresConfirmation) ?? false
+    }
+}
+
+struct CommandActionRunResponse: Codable, Hashable {
+    let id: String
+    let name: String
+    let path: String
+    let workingDir: String
+    let command: String
+    let args: [String]
+    let success: Bool
+    let exitCode: Int
+    let output: String?
+    let truncated: Bool?
+    let timedOut: Bool?
+    let durationMS: Int64
+
+    var displayCommand: String {
+        ([command] + args).joined(separator: " ")
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case path
+        case workingDir = "working_dir"
+        case command
+        case args
+        case success
+        case exitCode = "exit_code"
+        case output
+        case truncated
+        case timedOut = "timed_out"
+        case durationMS = "duration_ms"
+    }
+
+    init(
+        id: String,
+        name: String,
+        path: String,
+        workingDir: String,
+        command: String,
+        args: [String] = [],
+        success: Bool,
+        exitCode: Int,
+        output: String?,
+        truncated: Bool?,
+        timedOut: Bool?,
+        durationMS: Int64
+    ) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.workingDir = workingDir
+        self.command = command
+        self.args = args
+        self.success = success
+        self.exitCode = exitCode
+        self.output = output
+        self.truncated = truncated
+        self.timedOut = timedOut
+        self.durationMS = durationMS
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        path = try container.decode(String.self, forKey: .path)
+        workingDir = try container.decode(String.self, forKey: .workingDir)
+        command = try container.decode(String.self, forKey: .command)
+        args = try container.decodeIfPresent([String].self, forKey: .args) ?? []
+        success = try container.decode(Bool.self, forKey: .success)
+        exitCode = try container.decode(Int.self, forKey: .exitCode)
+        output = try container.decodeIfPresent(String.self, forKey: .output)
+        truncated = try container.decodeIfPresent(Bool.self, forKey: .truncated)
+        timedOut = try container.decodeIfPresent(Bool.self, forKey: .timedOut)
+        durationMS = try container.decode(Int64.self, forKey: .durationMS)
+    }
+}
+
+struct GitStatusRequest: Encodable {
+    let path: String
+}
+
+enum GitActionKind: String, Codable, Hashable {
+    case stage
+    case unstage
+    case revert
+    case stagePatch = "stage_patch"
+    case unstagePatch = "unstage_patch"
+    case revertPatch = "revert_patch"
+}
+
+struct GitActionRequest: Encodable {
+    let path: String
+    let action: GitActionKind
+    let files: [String]
+    let patch: String?
+
+    init(path: String, action: GitActionKind, files: [String] = [], patch: String? = nil) {
+        self.path = path
+        self.action = action
+        self.files = files
+        self.patch = patch
+    }
+}
+
+struct GitCommitRequest: Encodable {
+    let path: String
+    let message: String
+}
+
+struct GitPushRequest: Encodable {
+    let path: String
+    let remote: String?
+}
+
+struct GitPullRequestRequest: Encodable {
+    let path: String
+    let title: String
+    let body: String
+    let draft: Bool
+}
+
+struct GitPullRequestStatusRequest: Encodable {
+    let path: String
+}
+
+struct GitPushResponse: Codable, Hashable {
+    let path: String
+    let remote: String
+    let branch: String
+    let output: String?
+    let status: GitStatusResponse
+}
+
+struct GitPullRequestResponse: Codable, Hashable {
+    let path: String
+    let branch: String
+    let url: String?
+    let output: String?
+}
+
+struct GitPullRequestStatusResponse: Codable, Hashable {
+    let path: String
+    let branch: String
+    let exists: Bool
+    let number: Int?
+    let title: String?
+    let state: String?
+    let url: String?
+    let isDraft: Bool
+    let reviewDecision: String?
+    let mergeStateStatus: String?
+    let headRefName: String?
+    let baseRefName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case branch
+        case exists
+        case number
+        case title
+        case state
+        case url
+        case isDraft = "is_draft"
+        case reviewDecision = "review_decision"
+        case mergeStateStatus = "merge_state_status"
+        case headRefName = "head_ref_name"
+        case baseRefName = "base_ref_name"
+    }
+
+    init(
+        path: String,
+        branch: String,
+        exists: Bool,
+        number: Int? = nil,
+        title: String? = nil,
+        state: String? = nil,
+        url: String? = nil,
+        isDraft: Bool = false,
+        reviewDecision: String? = nil,
+        mergeStateStatus: String? = nil,
+        headRefName: String? = nil,
+        baseRefName: String? = nil
+    ) {
+        self.path = path
+        self.branch = branch
+        self.exists = exists
+        self.number = number
+        self.title = title
+        self.state = state
+        self.url = url
+        self.isDraft = isDraft
+        self.reviewDecision = reviewDecision
+        self.mergeStateStatus = mergeStateStatus
+        self.headRefName = headRefName
+        self.baseRefName = baseRefName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        branch = try container.decode(String.self, forKey: .branch)
+        exists = try container.decode(Bool.self, forKey: .exists)
+        number = try container.decodeIfPresent(Int.self, forKey: .number)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        state = try container.decodeIfPresent(String.self, forKey: .state)
+        url = try container.decodeIfPresent(String.self, forKey: .url)
+        isDraft = try container.decodeIfPresent(Bool.self, forKey: .isDraft) ?? false
+        reviewDecision = try container.decodeIfPresent(String.self, forKey: .reviewDecision)
+        mergeStateStatus = try container.decodeIfPresent(String.self, forKey: .mergeStateStatus)
+        headRefName = try container.decodeIfPresent(String.self, forKey: .headRefName)
+        baseRefName = try container.decodeIfPresent(String.self, forKey: .baseRefName)
+    }
+}
+
+struct GitFileStatus: Codable, Hashable, Identifiable {
+    let path: String
+    let code: String
+    let staged: Bool
+    let unstaged: Bool
+    let untracked: Bool
+
+    var id: String { path }
+
+    var displayCode: String {
+        code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "--" : code
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case code
+        case staged
+        case unstaged
+        case untracked
+    }
+}
+
+struct GitStatusResponse: Codable, Hashable {
+    let path: String
+    let isRepository: Bool
+    let branch: String?
+    let head: String?
+    let statusText: String?
+    let diffStat: String?
+    let unstagedDiff: String?
+    let stagedDiff: String?
+    let files: [GitFileStatus]
+    let truncated: Bool?
+    let truncatedNote: String?
+
+    var hasChanges: Bool {
+        [statusText, diffStat, unstagedDiff, stagedDiff].contains { value in
+            !(value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case isRepository = "is_repository"
+        case branch
+        case head
+        case statusText = "status_text"
+        case diffStat = "diff_stat"
+        case unstagedDiff = "unstaged_diff"
+        case stagedDiff = "staged_diff"
+        case files
+        case truncated
+        case truncatedNote = "truncated_note"
+    }
+
+    init(
+        path: String,
+        isRepository: Bool,
+        branch: String?,
+        head: String?,
+        statusText: String?,
+        diffStat: String?,
+        unstagedDiff: String?,
+        stagedDiff: String?,
+        files: [GitFileStatus] = [],
+        truncated: Bool?,
+        truncatedNote: String?
+    ) {
+        self.path = path
+        self.isRepository = isRepository
+        self.branch = branch
+        self.head = head
+        self.statusText = statusText
+        self.diffStat = diffStat
+        self.unstagedDiff = unstagedDiff
+        self.stagedDiff = stagedDiff
+        self.files = files
+        self.truncated = truncated
+        self.truncatedNote = truncatedNote
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.path = try container.decode(String.self, forKey: .path)
+        self.isRepository = try container.decode(Bool.self, forKey: .isRepository)
+        self.branch = try container.decodeIfPresent(String.self, forKey: .branch)
+        self.head = try container.decodeIfPresent(String.self, forKey: .head)
+        self.statusText = try container.decodeIfPresent(String.self, forKey: .statusText)
+        self.diffStat = try container.decodeIfPresent(String.self, forKey: .diffStat)
+        self.unstagedDiff = try container.decodeIfPresent(String.self, forKey: .unstagedDiff)
+        self.stagedDiff = try container.decodeIfPresent(String.self, forKey: .stagedDiff)
+        self.files = try container.decodeIfPresent([GitFileStatus].self, forKey: .files) ?? []
+        self.truncated = try container.decodeIfPresent(Bool.self, forKey: .truncated)
+        self.truncatedNote = try container.decodeIfPresent(String.self, forKey: .truncatedNote)
     }
 }
 
@@ -310,6 +994,7 @@ struct CreateSessionRequest: Encodable {
     let prompt: String
     let input: [CodexAppServerUserInput]
     let turnOptions: CodexAppServerTurnOptions
+    let initialGoalObjective: String?
     let resumeID: String
     let clientMessageID: ClientMessageID?
 
@@ -321,6 +1006,7 @@ struct CreateSessionRequest: Encodable {
         case prompt
         case input
         case turnOptions = "turn_options"
+        case initialGoalObjective = "initial_goal_objective"
         case resumeID = "resume_id"
         case clientMessageID = "client_message_id"
     }
@@ -333,6 +1019,7 @@ struct CreateSessionRequest: Encodable {
         prompt: String,
         input: [CodexAppServerUserInput]? = nil,
         turnOptions: CodexAppServerTurnOptions = .default,
+        initialGoalObjective: String? = nil,
         resumeID: String,
         clientMessageID: ClientMessageID? = nil
     ) {
@@ -343,6 +1030,7 @@ struct CreateSessionRequest: Encodable {
         self.prompt = prompt
         self.input = input ?? CodexAppServerTurnPayload.defaultInput(for: prompt)
         self.turnOptions = turnOptions
+        self.initialGoalObjective = initialGoalObjective
         self.resumeID = resumeID
         self.clientMessageID = clientMessageID
     }
@@ -585,6 +1273,7 @@ enum CodexAppServerApprovalPolicy: String, Codable, CaseIterable, Hashable, Iden
 enum CodexAppServerSandboxMode: String, Codable, CaseIterable, Hashable, Identifiable {
     case readOnly
     case workspaceWrite
+    case dangerFullAccess
 
     var id: String { rawValue }
 
@@ -594,6 +1283,8 @@ enum CodexAppServerSandboxMode: String, Codable, CaseIterable, Hashable, Identif
             return "只读"
         case .workspaceWrite:
             return "可写"
+        case .dangerFullAccess:
+            return "完全访问"
         }
     }
 }
@@ -659,11 +1350,10 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
 
     func sanitizedForStandardComposer() -> CodexAppServerTurnOptions {
         var sanitized = self
-        // 标准模式只保留用户能从主工具栏明确选择的运行偏好；高级 JSON/指令/权限不应因历史状态残留而被静默发送。
-        sanitized.approvalPolicy = .onRequest
+        // 标准模式只保留用户能从主工具栏明确选择的运行偏好；权限按钮现在是主工具栏的一部分，
+        // 因此保留安全的审批/沙盒预设，但仍清掉高级 JSON、网络访问和其它隐藏运行时字段。
+        sanitized.applyStandardComposerPermissionPreset()
         sanitized.modelProvider = nil
-        sanitized.approvalsReviewer = "user"
-        sanitized.sandboxMode = .workspaceWrite
         sanitized.networkAccess = false
         sanitized.config = nil
         sanitized.baseInstructions = nil
@@ -673,6 +1363,28 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
         sanitized.sessionStartSource = nil
         sanitized.threadSource = nil
         return sanitized
+    }
+
+    private mutating func applyStandardComposerPermissionPreset() {
+        let reviewer = approvalsReviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if sandboxMode == .readOnly {
+            approvalPolicy = .onRequest
+            approvalsReviewer = "user"
+            return
+        }
+        if sandboxMode == .dangerFullAccess {
+            approvalPolicy = .onRequest
+            approvalsReviewer = "user"
+            return
+        }
+        if approvalPolicy == .onFailure, reviewer == "auto_review" {
+            approvalsReviewer = reviewer
+            sandboxMode = .workspaceWrite
+            return
+        }
+        approvalPolicy = .onRequest
+        approvalsReviewer = "user"
+        sandboxMode = .workspaceWrite
     }
 
     func turnParams(projectPath: String) -> [String: CodexAppServerJSONValue?] {
@@ -696,7 +1408,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
             "serviceTier": serviceTier.flatMap(nonEmptyString).map { .string($0) },
             "approvalPolicy": .string(approvalPolicy.rawValue),
             "approvalsReviewer": .string(approvalsReviewer),
-            "sandbox": .string(sandboxMode == .readOnly ? "read-only" : "workspace-write"),
+            "sandbox": .string(threadSandboxValue),
             "personality": personality.map { .string($0.rawValue) },
             "config": config,
             "serviceName": serviceName.flatMap(nonEmptyString).map { .string($0) },
@@ -722,6 +1434,22 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
                 "excludeTmpdirEnvVar": .bool(false),
                 "excludeSlashTmp": .bool(false)
             ])
+        case .dangerFullAccess:
+            return .object([
+                "type": .string("dangerFullAccess"),
+                "networkAccess": .bool(networkAccess)
+            ])
+        }
+    }
+
+    private var threadSandboxValue: String {
+        switch sandboxMode {
+        case .readOnly:
+            return "read-only"
+        case .workspaceWrite:
+            return "workspace-write"
+        case .dangerFullAccess:
+            return "danger-full-access"
         }
     }
 
@@ -1341,10 +2069,61 @@ struct CodexAppServerRequestBuilder {
         return CodexAppServerRequestSpec(method: "thread/resume", params: .object(params.compactMapValues { $0 }))
     }
 
+    func threadFork(threadID: String, cwd: String, options: CodexAppServerTurnOptions = .default) throws -> CodexAppServerRequestSpec {
+        let path = try allowlistedPath(cwd)
+        var params = safeThreadRuntimeParams(cwd: path)
+        params["threadId"] = .string(threadID)
+        options.threadParams(projectPath: path).forEach { key, value in
+            params[key] = value
+        }
+        params["sessionStartSource"] = nil
+        try validateRemoteSafeParams(params, projectPath: path)
+        return CodexAppServerRequestSpec(method: "thread/fork", params: .object(params.compactMapValues { $0 }))
+    }
+
     func threadRead(threadID: String, includeTurns: Bool = true) -> CodexAppServerRequestSpec {
         CodexAppServerRequestSpec(method: "thread/read", params: CodexAppServerJSONValue.objectValue([
             "threadId": .string(threadID),
             "includeTurns": .bool(includeTurns)
+        ]))
+    }
+
+    func threadGoalGet(threadID: String) -> CodexAppServerRequestSpec {
+        CodexAppServerRequestSpec(method: "thread/goal/get", params: CodexAppServerJSONValue.objectValue([
+            "threadId": .string(threadID)
+        ]))
+    }
+
+    func threadGoalSet(
+        threadID: String,
+        objective: String? = nil,
+        status: ThreadGoalStatus? = nil,
+        tokenBudget: Int64? = nil
+    ) -> CodexAppServerRequestSpec {
+        // 目标状态由 app-server 持久化；iPad 端只提交明确变化的字段。
+        CodexAppServerRequestSpec(method: "thread/goal/set", params: CodexAppServerJSONValue.objectValue([
+            "threadId": .string(threadID),
+            "objective": objective.map { .string($0) },
+            "status": status.map { .string($0.rawValue) },
+            "tokenBudget": tokenBudget.map { .int($0) }
+        ]))
+    }
+
+    func threadGoalClear(threadID: String) -> CodexAppServerRequestSpec {
+        CodexAppServerRequestSpec(method: "thread/goal/clear", params: CodexAppServerJSONValue.objectValue([
+            "threadId": .string(threadID)
+        ]))
+    }
+
+    func threadArchive(threadID: String) -> CodexAppServerRequestSpec {
+        CodexAppServerRequestSpec(method: "thread/archive", params: CodexAppServerJSONValue.objectValue([
+            "threadId": .string(threadID)
+        ]))
+    }
+
+    func threadUnarchive(threadID: String) -> CodexAppServerRequestSpec {
+        CodexAppServerRequestSpec(method: "thread/unarchive", params: CodexAppServerJSONValue.objectValue([
+            "threadId": .string(threadID)
         ]))
     }
 
@@ -1453,15 +2232,9 @@ struct CodexAppServerRequestBuilder {
         if normalizedDangerToken(params["approvalPolicy"]??.stringValue) == "never" {
             throw CodexAppServerRequestBuilderError.unsafeParameter("approvalPolicy=never 被禁止")
         }
-        if normalizedDangerToken(params["sandbox"]??.stringValue) == "dangerfullaccess" {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("dangerFullAccess sandbox 被禁止")
-        }
         try validateNoDangerousConfig(params["config"] ?? nil)
         guard let sandbox = params["sandboxPolicy"]??.objectValue else {
             return
-        }
-        if normalizedDangerToken(sandbox["type"]?.stringValue) == "dangerfullaccess" {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("dangerFullAccess sandboxPolicy 被禁止")
         }
         if sandbox["networkAccess"]?.boolValue == true {
             throw CodexAppServerRequestBuilderError.unsafeParameter("远程默认禁止网络访问")

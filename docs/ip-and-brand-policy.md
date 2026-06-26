@@ -9,13 +9,13 @@
 Mimi Remote 的定位是：
 
 - 用户自己 iPad 上的原生控制台。
-- 连接用户自己 Mac 上的 `agentd`。
-- 通过用户本机已安装、已登录的 Codex CLI / app-server 工作。
+- 连接用户自己的本地开发环境中的 `agentd`。
+- 通过用户本机已安装、已登录的本地 agent 工具和 app-server 工作。
 - 不托管用户代码，不保存第三方账号凭证，不提供公网 SaaS。
 
 Mimi Remote 的非目标是：
 
-- 不是 OpenAI 官方客户端。
+- 不是任何平台厂商的官方客户端。
 - 不是任何商业产品的免费替代品。
 - 不是其他产品 UI 或交互的复刻。
 - 不是把开源 CLI 包一层壳后对标原作者商业产品。
@@ -26,18 +26,19 @@ Mimi Remote 的非目标是：
 
 - 用户侧 App 名统一使用 `Mimi Remote`。
 - `mimi-remote` 保留为仓库名、Go module、Homebrew formula 和后端工程名。
-- 文案中可以说明“连接用户自己 Mac 上的 Codex CLI / app-server”，但不要暗示官方授权或官方移动端。
+- 技术文档中可以说明“连接用户自己的本地开发环境和 app-server”，但不要暗示官方授权或官方移动端。
+- App Store 公开元数据不要使用 `Mac`、`OpenAI`、`ChatGPT` 或官方产品名；审核提交文案以 [App Store 审核元数据](app-store-metadata.md) 为准。
 
 ### 文案
 
 推荐写法：
 
 ```text
-Mimi Remote 是一个 iPad 原生客户端，用来连接你自己 Mac 上运行的 agentd。
+Mimi Remote 是一个 iPad 原生客户端，用来连接你自己的本地开发环境。
 ```
 
 ```text
-本项目是独立开发的第三方客户端，不隶属于 OpenAI，也不代表 OpenAI 官方产品。
+本项目是独立开发的第三方客户端，不隶属于任何平台厂商，也不代表官方产品。
 ```
 
 避免写法：
@@ -47,7 +48,7 @@ Mimi Remote 是一个 iPad 原生客户端，用来连接你自己 Mac 上运行
 ```
 
 ```text
-官方 Codex iPad 客户端。
+某官方产品的 iPad 客户端。
 ```
 
 ```text
@@ -72,7 +73,7 @@ Mimi Remote 是一个 iPad 原生客户端，用来连接你自己 Mac 上运行
 
 主要风险：
 
-- App Store 或用户误以为这是官方 OpenAI 产品。
+- App Store 或用户误以为这是官方产品。
 - 对外文案被理解成踩着其他商业产品做免费替代宣传。
 - 新界面为了省事过度贴近某个现有产品。
 - 复制开源代码时遗漏许可证和 NOTICE。

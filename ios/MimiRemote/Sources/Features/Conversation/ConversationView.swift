@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import QuickLook
 
 struct ConversationView: View {
     @EnvironmentObject private var sessionStore: SessionStore
@@ -47,14 +48,19 @@ struct ConversationView: View {
     @ViewBuilder
     private func topStatusStrip(model: ConversationScreenModel, layout: ConversationLayout) -> some View {
         if model.errorMessage != nil || model.foregroundActivity != nil {
-            HStack {
-                Spacer(minLength: 0)
-                foregroundStatus(model: model)
-                Spacer(minLength: 0)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    Spacer(minLength: 0)
+                    foregroundStatus(model: model)
+                    Spacer(minLength: 0)
+                }
+                VStack(spacing: 8) {
+                    foregroundStatus(model: model)
+                }
             }
             .padding(.horizontal, layout.horizontalInset)
             .padding(.top, 10)
-            .padding(.bottom, 4)
+            .padding(.bottom, 6)
         }
     }
 
@@ -539,7 +545,7 @@ struct ConversationTimelineView: View {
             Text("还没有对话")
                 .font(themeStore.uiFont(.headline, weight: .semibold))
                 .foregroundStyle(workbenchPrimaryText)
-            Text("选择历史会话会加载 Codex 上下文；输入任务会启动或继续当前会话。")
+            Text("选择历史会话会加载上下文；输入任务会启动或继续当前会话。")
                 .font(themeStore.uiFont(.callout))
                 .foregroundStyle(workbenchSecondaryText)
                 .multilineTextAlignment(.center)
@@ -753,15 +759,24 @@ private struct MessageRow: View, Equatable {
     }
 
     private var systemRow: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            if message.kind == .message {
-                SystemNotice(text: message.content, layout: layout)
+        Group {
+            if isCenteredSystemNotice {
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    SystemNotice(text: message.content, layout: layout)
+                    Spacer(minLength: 0)
+                }
             } else {
-                RuntimeSummaryCard(message: message, layout: layout)
+                HStack(spacing: 0) {
+                    RuntimeSummaryCard(message: message, layout: layout)
+                    Spacer(minLength: layout.messageSideSpacer)
+                }
             }
-            Spacer(minLength: 0)
         }
+    }
+
+    private var isCenteredSystemNotice: Bool {
+        message.kind == .message
     }
 
     // 状态以气泡下方的小字呈现（贴右），比浮在一旁的图标更直观，也避开了气泡定宽框的定位问题。
@@ -788,16 +803,20 @@ private struct MessageRow: View, Equatable {
         case .assistant:
             return .leading
         case .system:
-            return .center
+            return isCenteredSystemNotice ? .center : .leading
         }
     }
 }
 
 private struct MessageBubble: View {
+    @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     let message: ConversationMessage
     let layout: ConversationLayout
+    @State private var previewURL: URL?
+    @State private var previewingPath: String?
+    @State private var previewError: String?
 
     var body: some View {
         renderContent
@@ -807,6 +826,7 @@ private struct MessageBubble: View {
             .background(background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             .frame(maxWidth: maxBubbleWidth, alignment: bubbleAlignment)
             .opacity(message.sendStatus == .sending ? 0.72 : 1)
+            .quickLookPreview($previewURL)
     }
 
     @ViewBuilder
@@ -820,16 +840,20 @@ private struct MessageBubble: View {
         )
         if shouldRenderMarkdown {
             let plan = MessageRenderPlanCache.shared.plan(for: message)
-            if plan.isSinglePlainParagraph, case let .paragraph(inline) = plan.blocks.first?.kind {
-                Text(inline.plain)
-                    .font(style.bodyFont)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+            let references = fileReferences
+            if references.isEmpty {
+                markdownContent(plan: plan, style: style)
             } else {
                 VStack(alignment: .leading, spacing: style.blockSpacing) {
-                    ForEach(plan.blocks) { block in
-                        MarkdownBlockView(block: block, style: style)
-                    }
+                    markdownContent(plan: plan, style: style)
+                    FileReferencePreviewStrip(
+                        references: references,
+                        previewingPath: previewingPath,
+                        previewError: previewError,
+                        onPreview: { reference in
+                            Task { await preview(reference) }
+                        }
+                    )
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -841,8 +865,60 @@ private struct MessageBubble: View {
         }
     }
 
+    @ViewBuilder
+    private func markdownContent(plan: MessageRenderPlan, style: MarkdownStyle) -> some View {
+        if plan.isSinglePlainParagraph, case let .paragraph(inline) = plan.blocks.first?.kind {
+            Text(inline.plain)
+                .font(style.bodyFont)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: style.blockSpacing) {
+                ForEach(plan.blocks) { block in
+                    MarkdownBlockView(block: block, style: style)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var shouldRenderMarkdown: Bool {
         message.role == .assistant && message.kind == .message
+    }
+
+    private var fileReferences: [ConversationFileReference] {
+        guard shouldRenderMarkdown, message.sendStatus != .sending else {
+            return []
+        }
+        return ConversationFileReferenceDetector.references(in: message.content)
+    }
+
+    private func preview(_ reference: ConversationFileReference) async {
+        previewingPath = reference.path
+        previewError = nil
+        defer {
+            if previewingPath == reference.path {
+                previewingPath = nil
+            }
+        }
+        do {
+            previewURL = try await sessionStore.previewFile(path: reference.path)
+        } catch {
+            previewError = userFacingPreviewError(error)
+        }
+    }
+
+    private func userFacingPreviewError(_ error: Error) -> String {
+        if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
+            return "当前 agentd 版本还不支持文件预览，请升级 agentd。"
+        }
+        if case AgentAPIError.server(let status, _) = error, status == 403 {
+            return "该文件不在授权范围内或不可访问。"
+        }
+        if case AgentAPIError.server(let status, _) = error, status == 413 {
+            return "文件过大，暂不支持预览。"
+        }
+        return error.localizedDescription
     }
 
     private var bubbleAlignment: Alignment {
@@ -865,6 +941,61 @@ private struct MessageBubble: View {
 
     private var foreground: Color {
         themeStore.tokens(for: colorScheme).primaryText
+    }
+}
+
+private struct FileReferencePreviewStrip: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    let references: [ConversationFileReference]
+    let previewingPath: String?
+    let previewError: String?
+    let onPreview: (ConversationFileReference) -> Void
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(references) { reference in
+                Button {
+                    onPreview(reference)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.viewfinder")
+                            .font(themeStore.uiFont(.caption, weight: .semibold))
+                            .foregroundStyle(tokens.accent)
+                            .frame(width: 18, height: 18)
+                        Text(reference.name)
+                            .font(themeStore.uiFont(.caption, weight: .medium))
+                            .foregroundStyle(tokens.primaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if previewingPath == reference.path {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(tokens.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(tokens.border, lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(previewingPath != nil)
+                .accessibilityLabel("预览 \(reference.name)")
+            }
+
+            if let previewError {
+                Text(previewError)
+                    .font(themeStore.uiFont(.caption2))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

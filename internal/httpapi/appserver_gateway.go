@@ -47,7 +47,13 @@ var appServerAllowedMethods = map[string]struct{}{
 	"thread/list":             {},
 	"thread/start":            {},
 	"thread/resume":           {},
+	"thread/fork":             {},
 	"thread/read":             {},
+	"thread/archive":          {},
+	"thread/unarchive":        {},
+	"thread/goal/get":         {},
+	"thread/goal/set":         {},
+	"thread/goal/clear":       {},
 	"turn/start":              {},
 	"turn/interrupt":          {},
 	"model/list":              {},
@@ -131,6 +137,7 @@ type gatewayScope struct {
 	realPath string
 	project  projects.Project
 	browse   bool
+	managed  bool
 }
 
 type appServerGatewayAllowedThread struct {
@@ -506,7 +513,7 @@ func (p *appServerGatewayPolicy) validateThreadCapability(frame *appServerGatewa
 		if err := p.rememberPendingThreadResponse(frame.ID, method, cwd, scope.id); err != nil {
 			return err
 		}
-	case "thread/read":
+	case "thread/fork":
 		threadID, ok := gatewayStringParam(params, "threadId")
 		if !ok {
 			return fmt.Errorf("%s.threadId 不能为空", method)
@@ -514,8 +521,37 @@ func (p *appServerGatewayPolicy) validateThreadCapability(frame *appServerGatewa
 		if _, ok := p.allowedThread(threadID); !ok {
 			return fmt.Errorf("%s.threadId 未由当前 gateway 连接授权", method)
 		}
-		if err := p.rememberPendingThreadResponse(frame.ID, method, "", ""); err != nil {
+		if !scopeOK {
+			return fmt.Errorf("%s.cwd 必须来自已授权工作区", method)
+		}
+		if err := p.rememberPendingThreadResponse(frame.ID, method, cwd, scope.id); err != nil {
 			return err
+		}
+	case "thread/read", "thread/goal/get", "thread/goal/set", "thread/goal/clear":
+		threadID, ok := gatewayStringParam(params, "threadId")
+		if !ok {
+			return fmt.Errorf("%s.threadId 不能为空", method)
+		}
+		if _, ok := p.allowedThread(threadID); !ok {
+			return fmt.Errorf("%s.threadId 未由当前 gateway 连接授权", method)
+		}
+		if method == "thread/read" {
+			if err := p.rememberPendingThreadResponse(frame.ID, method, "", ""); err != nil {
+				return err
+			}
+		}
+		if method == "thread/goal/set" {
+			if err := validateGatewayGoalSetParams(params); err != nil {
+				return err
+			}
+		}
+	case "thread/archive", "thread/unarchive":
+		threadID, ok := gatewayStringParam(params, "threadId")
+		if !ok {
+			return fmt.Errorf("%s.threadId 不能为空", method)
+		}
+		if _, ok := p.allowedThread(threadID); !ok {
+			return fmt.Errorf("%s.threadId 未由当前 gateway 连接授权", method)
 		}
 	case "turn/start":
 		threadID, ok := gatewayStringParam(params, "threadId")
@@ -598,7 +634,13 @@ func rewriteGatewaySafeDefaults(payload []byte, method string, params map[string
 		sanitized = copyGatewayParams(params, "cwd", "limit", "cursor")
 	case "thread/read":
 		sanitized = copyGatewayParams(params, "threadId", "includeTurns")
-	case "thread/start", "thread/resume":
+	case "thread/goal/get", "thread/goal/clear":
+		sanitized = copyGatewayParams(params, "threadId")
+	case "thread/goal/set":
+		sanitized = sanitizedGatewayGoalSetParams(params)
+	case "thread/archive", "thread/unarchive":
+		sanitized = copyGatewayParams(params, "threadId")
+	case "thread/start", "thread/resume", "thread/fork":
 		sanitized = sanitizedGatewayThreadParams(method, params)
 	case "turn/start":
 		sanitized = sanitizedGatewayTurnParams(params, validated.cwd)
@@ -624,6 +666,68 @@ func rewriteGatewaySafeDefaults(payload []byte, method string, params map[string
 	return rewritten, nil
 }
 
+func sanitizedGatewayGoalSetParams(params map[string]any) map[string]any {
+	// 目标本身由 Codex app-server 管理；gateway 只保留协议字段，避免把移动端额外配置透传到运行时。
+	safe := copyGatewayParams(params, "threadId", "objective", "status", "tokenBudget")
+	if _, ok := params["tokenBudget"]; !ok {
+		if value, ok := params["token_budget"]; ok {
+			safe["tokenBudget"] = value
+		}
+	}
+	return safe
+}
+
+func validateGatewayGoalSetParams(params map[string]any) error {
+	if value, ok := params["objective"]; ok {
+		if value != nil {
+			text, ok := value.(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				return fmt.Errorf("thread/goal/set.objective 必须是非空字符串")
+			}
+		}
+	}
+	if value, ok := params["status"]; ok {
+		if value != nil {
+			status, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("thread/goal/set.status 必须是字符串")
+			}
+			switch status {
+			case "active", "paused", "blocked", "usageLimited", "budgetLimited", "complete":
+			default:
+				return fmt.Errorf("thread/goal/set.status 不支持：%s", status)
+			}
+		}
+	}
+	if value, ok := params["tokenBudget"]; ok {
+		if value != nil && !gatewayPositiveJSONNumber(value) {
+			return fmt.Errorf("thread/goal/set.tokenBudget 必须是正数")
+		}
+	}
+	if value, ok := params["token_budget"]; ok {
+		if value != nil && !gatewayPositiveJSONNumber(value) {
+			return fmt.Errorf("thread/goal/set.token_budget 必须是正数")
+		}
+	}
+	return nil
+}
+
+func gatewayPositiveJSONNumber(value any) bool {
+	switch typed := value.(type) {
+	case json.Number:
+		number, err := typed.Int64()
+		return err == nil && number > 0
+	case float64:
+		return typed > 0 && typed == float64(int64(typed))
+	case int:
+		return typed > 0
+	case int64:
+		return typed > 0
+	default:
+		return false
+	}
+}
+
 func sanitizedGatewayInitializeParams(params map[string]any) map[string]any {
 	safe := map[string]any{}
 	if clientInfo, ok := params["clientInfo"].(map[string]any); ok {
@@ -643,12 +747,13 @@ func sanitizedGatewayInitializeParams(params map[string]any) map[string]any {
 
 func sanitizedGatewayThreadParams(method string, params map[string]any) map[string]any {
 	safe := copyGatewayParams(params, "cwd", "model", "modelProvider", "serviceTier", "personality")
-	if method == "thread/resume" {
+	if method == "thread/resume" || method == "thread/fork" {
 		copyGatewayParam(safe, params, "threadId")
+	}
+	if method == "thread/resume" {
 		safe["excludeTurns"] = true
 	}
-	safe["approvalPolicy"] = "on-request"
-	safe["approvalsReviewer"] = "user"
+	safe["approvalPolicy"], safe["approvalsReviewer"] = sanitizedGatewayApproval(params)
 	safe["sandbox"] = sanitizedGatewayThreadSandbox(params)
 	return safe
 }
@@ -657,15 +762,28 @@ func sanitizedGatewayThreadSandbox(params map[string]any) string {
 	if sandbox, ok := gatewayStringParam(params, "sandbox"); ok && normalizePolicyValue(sandbox) == "readonly" {
 		return "read-only"
 	}
+	if sandbox, ok := gatewayStringParam(params, "sandbox"); ok && normalizePolicyValue(sandbox) == "dangerfullaccess" {
+		return "danger-full-access"
+	}
 	return "workspace-write"
 }
 
 func sanitizedGatewayTurnParams(params map[string]any, cwd string) map[string]any {
 	safe := copyGatewayParams(params, "threadId", "cwd", "input", "clientUserMessageId", "model", "serviceTier", "effort", "summary", "personality")
-	safe["approvalPolicy"] = "on-request"
-	safe["approvalsReviewer"] = "user"
+	safe["approvalPolicy"], safe["approvalsReviewer"] = sanitizedGatewayApproval(params)
 	safe["sandboxPolicy"] = sanitizedGatewaySandboxPolicy(params["sandboxPolicy"], cwd)
 	return safe
+}
+
+func sanitizedGatewayApproval(params map[string]any) (string, string) {
+	policy, _ := gatewayStringParam(params, "approvalPolicy")
+	reviewer, _ := gatewayStringParam(params, "approvalsReviewer")
+	// 移动端只放行一个有限自动审批组合：失败时交给 auto_review。
+	// never / networkAccess 仍由 validateGatewayPolicyParams 统一拦截。
+	if normalizePolicyValue(policy) == "onfailure" && reviewer == "auto_review" {
+		return "on-failure", reviewer
+	}
+	return "on-request", "user"
 }
 
 func sanitizedGatewaySandboxPolicy(raw any, cwd string) map[string]any {
@@ -675,6 +793,12 @@ func sanitizedGatewaySandboxPolicy(raw any, cwd string) map[string]any {
 	if normalizedType == "readonly" {
 		return map[string]any{
 			"type":          "readOnly",
+			"networkAccess": false,
+		}
+	}
+	if normalizedType == "dangerfullaccess" {
+		return map[string]any{
+			"type":          "dangerFullAccess",
 			"networkAccess": false,
 		}
 	}
@@ -1011,8 +1135,8 @@ func (r *Router) validateGatewayPolicyParams(method string, params map[string]an
 	if hasApprovalPolicyNever(params) {
 		return validated, fmt.Errorf("approvalPolicy=never 不允许远程使用")
 	}
-	if hasDangerFullAccess(params) {
-		return validated, fmt.Errorf("dangerFullAccess 不允许远程使用")
+	if hasDangerousConfigSandbox(params["config"]) {
+		return validated, fmt.Errorf("dangerFullAccess 不允许通过 config 使用")
 	}
 	if hasNetworkAccessEnabled(params) {
 		return validated, fmt.Errorf("networkAccess=true 不允许远程使用")
@@ -1059,9 +1183,9 @@ func (r *Router) validateGatewayPolicyParams(method string, params map[string]an
 		if _, ok := r.projectForGatewayPath(path); ok {
 			continue
 		}
-		// browse workspace 的结构化输入（图片/mention/skill）允许引用绑定目录内的文件，
+		// browse/worktree workspace 的结构化输入（图片/mention/skill）允许引用绑定目录内的文件，
 		// 但不允许引用允许根下的 sibling 目录，保持和 cwd 一样的精确边界。
-		if validated.cwdScopeOK && validated.cwdScope.browse && gatewayScopeContainsPath(validated.cwdScope, path) {
+		if validated.cwdScopeOK && (validated.cwdScope.browse || validated.cwdScope.managed) && gatewayScopeContainsPath(validated.cwdScope, path) {
 			continue
 		}
 		return validated, fmt.Errorf("turn/start.input path 必须来自 projects allowlist")
@@ -1071,7 +1195,7 @@ func (r *Router) validateGatewayPolicyParams(method string, params map[string]an
 
 func requiresGatewayCWD(method string) bool {
 	switch method {
-	case "thread/list", "thread/start", "thread/resume", "turn/start":
+	case "thread/list", "thread/start", "thread/resume", "thread/fork", "turn/start":
 		return true
 	default:
 		return false
@@ -1166,7 +1290,18 @@ func (r *Router) gatewayScopeForPath(raw string) (gatewayScope, bool) {
 	if project, ok := r.projects.FindByPath(realPath); ok {
 		return gatewayScope{id: project.ID, realPath: realPath, project: project}, true
 	}
+	if worktree, ok := r.managedWorktreeForPath(realPath); ok {
+		return gatewayScope{
+			id:       workspaceIDForRealPath(worktree.Path),
+			realPath: realPath,
+			project:  worktree.RootProject,
+			managed:  true,
+		}, true
+	}
 	if r.realPathInBrowseRoots(realPath) {
+		return gatewayScope{id: workspaceIDForRealPath(realPath), realPath: realPath, browse: true}, true
+	}
+	if r.realPathIsChatWorkspace(realPath) {
 		return gatewayScope{id: workspaceIDForRealPath(realPath), realPath: realPath, browse: true}, true
 	}
 	return gatewayScope{}, false
@@ -1282,37 +1417,6 @@ func hasApprovalPolicyNever(value any) bool {
 	return false
 }
 
-func hasDangerFullAccess(params map[string]any) bool {
-	return hasDangerFullAccessValue(params, "")
-}
-
-func hasDangerFullAccessValue(value any, parentKey string) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, child := range typed {
-			normalizedKey := normalizePolicyValue(key)
-			if normalizedKey == "dangerfullaccess" {
-				return true
-			}
-			if normalizedKey == "sandbox" || normalizedKey == "sandboxmode" || (parentKey == "sandboxpolicy" && normalizedKey == "type") {
-				if text, ok := child.(string); ok && normalizePolicyValue(text) == "dangerfullaccess" {
-					return true
-				}
-			}
-			if hasDangerFullAccessValue(child, normalizedKey) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range typed {
-			if hasDangerFullAccessValue(child, parentKey) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func hasNetworkAccessEnabled(value any) bool {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -1332,6 +1436,37 @@ func hasNetworkAccessEnabled(value any) bool {
 	case []any:
 		for _, child := range typed {
 			if hasNetworkAccessEnabled(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasDangerousConfigSandbox(value any) bool {
+	return hasDangerousConfigSandboxValue(value, "")
+}
+
+func hasDangerousConfigSandboxValue(value any, parentKey string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			normalizedKey := normalizePolicyValue(key)
+			if normalizedKey == "dangerfullaccess" {
+				return true
+			}
+			if normalizedKey == "sandbox" || normalizedKey == "sandboxmode" || (parentKey == "sandboxpolicy" && normalizedKey == "type") {
+				if text, ok := child.(string); ok && normalizePolicyValue(text) == "dangerfullaccess" {
+					return true
+				}
+			}
+			if hasDangerousConfigSandboxValue(child, normalizedKey) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if hasDangerousConfigSandboxValue(child, parentKey) {
 				return true
 			}
 		}

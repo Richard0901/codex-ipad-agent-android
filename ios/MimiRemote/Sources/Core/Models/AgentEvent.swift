@@ -5,6 +5,8 @@ enum AgentEvent {
     case sessionRow(DataFlowSessionRow, AgentEventMetadata)
     case sessionStatus(String?, AgentEventMetadata)
     case sessionContext(SessionContextSnapshot, AgentEventMetadata)
+    case goalUpdated(ThreadGoal, AgentEventMetadata)
+    case goalCleared(AgentEventMetadata)
     case turnStarted(AgentEventMetadata)
     case assistantDelta(AgentDelta, AgentEventMetadata)
     case messageCompleted(AgentMessage, AgentEventMetadata)
@@ -44,6 +46,7 @@ extension AgentEvent: Decodable {
         case createdAt = "created_at"
         case status
         case context
+        case goal
     }
 
     init(from decoder: Decoder) throws {
@@ -69,6 +72,10 @@ extension AgentEvent: Decodable {
             }
         case "session_context":
             self = .sessionContext(try container.decode(SessionContextSnapshot.self, forKey: .context), metadata)
+        case "goal_updated":
+            self = .goalUpdated(try container.decode(ThreadGoal.self, forKey: .goal), metadata)
+        case "goal_cleared":
+            self = .goalCleared(metadata)
         case "turn_started":
             self = .turnStarted(metadata)
         case "assistant_delta":
@@ -137,6 +144,8 @@ enum StructuredAgentEvent: Decodable, Hashable {
     case sessionRow(DataFlowSessionRow, AgentEventMetadata)
     case sessionStatus(String?, AgentEventMetadata)
     case sessionContext(SessionContextSnapshot, AgentEventMetadata)
+    case goalUpdated(ThreadGoal, AgentEventMetadata)
+    case goalCleared(AgentEventMetadata)
     case turnStarted(AgentEventMetadata)
     case assistantDelta(AgentDelta, AgentEventMetadata)
     case messageCompleted(AgentMessage, AgentEventMetadata)
@@ -171,6 +180,7 @@ enum StructuredAgentEvent: Decodable, Hashable {
         case createdAt = "created_at"
         case status
         case context
+        case goal
     }
 
     init(from decoder: Decoder) throws {
@@ -200,6 +210,10 @@ enum StructuredAgentEvent: Decodable, Hashable {
             }
         case "session_context":
             self = .sessionContext(try container.decode(SessionContextSnapshot.self, forKey: .context), metadata)
+        case "goal_updated":
+            self = .goalUpdated(try container.decode(ThreadGoal.self, forKey: .goal), metadata)
+        case "goal_cleared":
+            self = .goalCleared(metadata)
         case "turn_started":
             self = .turnStarted(metadata)
         case "assistant_delta":
@@ -272,6 +286,13 @@ struct CodexAppServerEventProjector {
         let metadata = makeMetadata(from: params)
 
         switch notification.method {
+        case "thread/goal/updated":
+            guard let goal = goal(from: params) else {
+                return nil
+            }
+            return .goalUpdated(goal, metadata)
+        case "thread/goal/cleared":
+            return .goalCleared(metadata)
         case "turn/started":
             return .turnStarted(metadata)
         case "item/agentMessage/delta":
@@ -659,6 +680,13 @@ struct CodexAppServerEventProjector {
         )
     }
 
+    private func goal(from params: [String: CodexAppServerJSONValue]) -> ThreadGoal? {
+        if let object = params["goal"]?.objectValue {
+            return ThreadGoal(object: object)
+        }
+        return ThreadGoal(object: params)
+    }
+
     private func errorPayload(from params: [String: CodexAppServerJSONValue], fallback: String) -> AgentErrorPayload {
         AgentErrorPayload(
             message: firstString(in: params, keys: ["message", "warning", "error"])
@@ -728,16 +756,16 @@ struct CodexAppServerEventProjector {
     private func approvalTitle(kind: String, params: [String: CodexAppServerJSONValue]) -> String {
         switch kind {
         case "file_change":
-            return "Codex 请求修改文件"
+            return "Agent 请求修改文件"
         case "permission":
-            return "Codex 请求提升权限"
+            return "Agent 请求提升权限"
         case "user_input":
-            return "Codex 请求补充输入"
+            return "Agent 请求补充输入"
         default:
             if let command = commandSummary(params: params) {
-                return "Codex 请求执行命令：\(command)"
+                return "Agent 请求执行命令：\(command)"
             }
-            return "Codex 请求执行命令"
+            return "Agent 请求执行命令"
         }
     }
 

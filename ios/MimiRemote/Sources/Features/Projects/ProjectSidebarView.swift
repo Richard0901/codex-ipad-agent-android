@@ -1,10 +1,14 @@
 import SwiftUI
+import QuickLook
 
 struct ProjectSidebarView: View {
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var isPresentingOpenWorkspace = false
+    @State private var isPresentingWorktreeManager = false
+    @State private var worktreeManagerRootProjectID: String?
+    @State private var worktreeCreateProject: AgentProject?
     var showsSessions = true
 
     var body: some View {
@@ -14,7 +18,7 @@ struct ProjectSidebarView: View {
 
         List {
             Section {
-                ForEach(sessionStore.sidebarProjects) { project in
+                ForEach(sessionStore.filteredSidebarProjects) { project in
                     let snapshot = sessionStore.sessionListSnapshot(forProjectID: project.id)
 
                     ProjectRow(
@@ -35,6 +39,13 @@ struct ProjectSidebarView: View {
                         },
                         onNewSession: {
                             Task { await sessionStore.startNewSession(in: project) }
+                        },
+                        onCreateWorktree: {
+                            worktreeCreateProject = project
+                        },
+                        onManageWorktrees: {
+                            worktreeManagerRootProjectID = sessionStore.rootProjectID(forProjectID: project.id)
+                            isPresentingWorktreeManager = true
                         },
                         onRetry: {
                             Task { await sessionStore.retryWorkspace(project) }
@@ -68,6 +79,21 @@ struct ProjectSidebarView: View {
                     }
                     .buttonStyle(.borderless)
                     Button {
+                        Task { await sessionStore.openChatWorkspace() }
+                    } label: {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("打开 Chats")
+                    Button {
+                        worktreeManagerRootProjectID = nil
+                        isPresentingWorktreeManager = true
+                    } label: {
+                        Image(systemName: "square.stack.3d.up")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("管理 Worktree")
+                    Button {
                         isPresentingOpenWorkspace = true
                     } label: {
                         Image(systemName: "folder.badge.plus")
@@ -82,23 +108,45 @@ struct ProjectSidebarView: View {
         .contentMargins(.bottom, 12, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .background(tokens.background)
+        .searchable(text: $sessionStore.sessionSearchQuery, placement: .sidebar, prompt: "搜索会话")
         .sheet(isPresented: $isPresentingOpenWorkspace) {
             OpenWorkspaceSheet()
+        }
+        .sheet(isPresented: $isPresentingWorktreeManager) {
+            WorktreeManagerSheet(rootProjectID: worktreeManagerRootProjectID)
+        }
+        .sheet(item: $worktreeCreateProject) { project in
+            CreateWorktreeSheet(project: project)
         }
         .overlay {
             if sessionStore.sidebarProjects.isEmpty && !sessionStore.isLoading {
                 ContentUnavailableView {
                     Label("没有已打开的工作区", systemImage: "folder.badge.plus")
                 } description: {
-                    Text("选择 Mac 上已授权的工作目录后，这里会保留最近打开的项目。")
+                    Text("选择已授权的工作目录后，这里会保留最近打开的项目。")
                 } actions: {
-                    Button {
-                        isPresentingOpenWorkspace = true
-                    } label: {
-                        Label("打开 Mac 路径", systemImage: "folder.badge.plus")
+                    HStack {
+                        Button {
+                            Task { await sessionStore.openChatWorkspace() }
+                        } label: {
+                            Label("打开 Chats", systemImage: "bubble.left.and.bubble.right")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button {
+                            isPresentingOpenWorkspace = true
+                        } label: {
+                            Label("打开路径", systemImage: "folder.badge.plus")
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
+            } else if sessionStore.filteredSidebarProjects.isEmpty && !sessionStore.isLoading && sessionStore.isSessionSearchActive {
+                ContentUnavailableView(
+                    "没有匹配的会话",
+                    systemImage: "magnifyingglass",
+                    description: Text("换个关键词试试。")
+                )
             }
         }
     }
@@ -119,6 +167,9 @@ private struct OpenWorkspaceSheet: View {
     @State private var browseTruncated = false
     @State private var isBrowsing = false
     @State private var browseError: String?
+    @State private var previewURL: URL?
+    @State private var previewError: String?
+    @State private var previewingPath: String?
     // 快速连点目录时让最后一次请求胜出，避免慢响应把列表回写成旧目录。
     @State private var browseRequestID = 0
 
@@ -151,7 +202,7 @@ private struct OpenWorkspaceSheet: View {
                 } header: {
                     Text("手动输入路径")
                 } footer: {
-                    Text("可直接粘贴 Mac 上的绝对路径；目录需在 Mac 端已授权范围内（默认是用户 Home）。")
+                    Text("可直接粘贴开发环境中的绝对路径；目录需在已授权范围内（默认是用户 Home）。")
                 }
             }
             .navigationTitle("打开工作区")
@@ -169,6 +220,7 @@ private struct OpenWorkspaceSheet: View {
             .onChange(of: path) { _, _ in
                 localError = nil
             }
+            .quickLookPreview($previewURL)
         }
     }
 
@@ -258,15 +310,19 @@ private struct OpenWorkspaceSheet: View {
                     Label("重试", systemImage: "arrow.clockwise")
                 }
             } else if browseEntries.isEmpty {
-                Text("没有可进入的子目录")
+                Text("没有可进入的子目录或可预览文件")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(browseEntries) { entry in
                     Button {
-                        Task { await browse(to: entry.path) }
+                        if entry.isDir {
+                            Task { await browse(to: entry.path) }
+                        } else {
+                            Task { await preview(entry) }
+                        }
                     } label: {
                         HStack(spacing: 10) {
-                            Image(systemName: "folder")
+                            Image(systemName: entry.isDir ? "folder" : "doc.text")
                                 .font(themeStore.uiFont(size: 18, weight: .regular))
                                 .foregroundStyle(tokens.accent)
                                 .frame(width: 26)
@@ -277,23 +333,34 @@ private struct OpenWorkspaceSheet: View {
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 8)
-                            Image(systemName: "chevron.right")
-                                .font(themeStore.uiFont(size: 12, weight: .semibold))
-                                .foregroundStyle(tokens.tertiaryText)
+                            if previewingPath == entry.path {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: entry.isDir ? "chevron.right" : "eye")
+                                    .font(themeStore.uiFont(size: 12, weight: .semibold))
+                                    .foregroundStyle(tokens.tertiaryText)
+                            }
                         }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(!entry.canBrowse || isOpening)
+                    .disabled(isOpening || isBrowsing || previewingPath != nil || (!entry.canBrowse && !entry.isPreviewable))
+                }
+
+                if let previewError {
+                    Text(previewError)
+                        .font(themeStore.uiFont(size: 13))
+                        .foregroundStyle(.red)
                 }
             }
         } header: {
-            Text("子目录")
+            Text("内容")
         } footer: {
             if browseTruncated {
-                Text("目录过大，仅显示前面部分；其余子目录请用下方手动输入路径。")
+                Text("目录过大，仅显示前面部分；其余内容请用下方手动输入路径打开目录。")
             } else {
-                Text("隐藏目录、Library 与常见缓存目录不会显示。")
+                Text("隐藏目录、Library 与常见缓存目录不会显示；文件仅用于预览，不能作为工作区打开。")
             }
         }
     }
@@ -328,6 +395,7 @@ private struct OpenWorkspaceSheet: View {
             browseParentPath = response.parentPath
             browseEntries = response.entries
             browseTruncated = response.truncated ?? false
+            previewError = nil
             isBrowsing = false
         } catch {
             guard requestID == browseRequestID else {
@@ -340,10 +408,42 @@ private struct OpenWorkspaceSheet: View {
 
     private func userFacingBrowseError(_ error: Error) -> String {
         if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
-            return "Mac 端 agentd 版本还不支持目录浏览，请升级 agentd；也可以直接在下方输入路径。"
+            return "当前 agentd 版本还不支持目录浏览，请升级 agentd；也可以直接在下方输入路径。"
         }
         if case AgentAPIError.server(let status, _) = error, status == 403 {
-            return "该目录不在 Mac 端授权范围内或不可访问。"
+            return "该目录不在授权范围内或不可访问。"
+        }
+        return error.localizedDescription
+    }
+
+    private func preview(_ entry: DirectoryEntry) async {
+        guard entry.isPreviewable else {
+            return
+        }
+        let targetPath = entry.path
+        previewingPath = targetPath
+        previewError = nil
+        defer {
+            if previewingPath == targetPath {
+                previewingPath = nil
+            }
+        }
+        do {
+            previewURL = try await sessionStore.previewFile(path: targetPath)
+        } catch {
+            previewError = userFacingPreviewError(error)
+        }
+    }
+
+    private func userFacingPreviewError(_ error: Error) -> String {
+        if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
+            return "当前 agentd 版本还不支持文件预览，请升级 agentd。"
+        }
+        if case AgentAPIError.server(let status, _) = error, status == 403 {
+            return "该文件不在授权范围内或不可访问。"
+        }
+        if case AgentAPIError.server(let status, _) = error, status == 413 {
+            return "文件过大，暂不支持预览。"
         }
         return error.localizedDescription
     }
@@ -351,7 +451,7 @@ private struct OpenWorkspaceSheet: View {
     private func open(path: String) async {
         let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !targetPath.isEmpty else {
-            localError = "请输入 Mac 上的目录路径"
+            localError = "请输入开发环境中的目录路径"
             return
         }
         isOpening = true
@@ -373,7 +473,7 @@ private struct OpenWorkspaceSheet: View {
         if lowercased.contains("allowlist") ||
             message.contains("允许范围") ||
             message.contains("HTTP 403") {
-            return "“\(path)”还不在 Mac 端已授权范围内。默认浏览授权根是用户 Home；如改过配置，请在 Mac 上调整 browse_roots（或 AGENTD_BROWSE_ROOTS）后重试。"
+            return "“\(path)”还不在已授权范围内。默认浏览授权根是用户 Home；如改过配置，请在本地开发环境中调整 browse_roots（或 AGENTD_BROWSE_ROOTS）后重试。"
         }
         return message
     }
@@ -401,13 +501,69 @@ private struct ProjectSessionRows: View {
         }
 
         ForEach(snapshot.visibleSessions) { session in
-            SessionRow(session: session, isSelected: session.id == selectedSessionID)
+            let isPinned = sessionStore.isSessionPinned(session.id)
+            let isArchived = sessionStore.isSessionArchived(session.id)
+            let reminder = sessionStore.sessionReminder(for: session.id)
+            SessionRow(
+                session: session,
+                isSelected: session.id == selectedSessionID,
+                isPinned: isPinned,
+                isArchived: isArchived,
+                reminder: reminder
+            )
                 .equatable()
                 // List 行内的 Button 会被 UICollectionView 的 delaysContentTouches 拖慢高亮，
                 // 改用 contentShape + onTapGesture，让点击在抬手时立即响应。
                 .contentShape(Rectangle())
                 .onTapGesture {
                     Task { await sessionStore.selectSession(session) }
+                }
+                .contextMenu {
+                    Button {
+                        sessionStore.toggleSessionPinned(session)
+                    } label: {
+                        Label(isPinned ? "取消置顶" : "置顶", systemImage: isPinned ? "pin.slash" : "pin")
+                    }
+
+                    Button {
+                        Task { await sessionStore.handoffSessionToWorktree(session) }
+                    } label: {
+                        Label("转到新 Worktree", systemImage: "arrow.triangle.branch")
+                    }
+                    .disabled(session.isRunning || sessionStore.isCreatingWorktree)
+
+                    Menu {
+                        Button {
+                            Task { await sessionStore.scheduleSessionReminder(session, after: 30 * 60) }
+                        } label: {
+                            Label("30 分钟后", systemImage: "timer")
+                        }
+                        Button {
+                            Task { await sessionStore.scheduleSessionReminder(session, after: 2 * 60 * 60) }
+                        } label: {
+                            Label("2 小时后", systemImage: "clock")
+                        }
+                        Button {
+                            Task { await sessionStore.scheduleSessionReminder(session, after: 24 * 60 * 60) }
+                        } label: {
+                            Label("明天", systemImage: "calendar")
+                        }
+                        if reminder != nil {
+                            Button(role: .destructive) {
+                                sessionStore.clearSessionReminder(session)
+                            } label: {
+                                Label("清除提醒", systemImage: "bell.slash")
+                            }
+                        }
+                    } label: {
+                        Label("提醒", systemImage: reminder == nil ? "bell" : "bell.fill")
+                    }
+
+                    Button(role: isArchived ? nil : .destructive) {
+                        Task { await sessionStore.toggleSessionArchivedRemote(session) }
+                    } label: {
+                        Label(isArchived ? "取消归档" : "归档", systemImage: isArchived ? "archivebox.fill" : "archivebox")
+                    }
                 }
                 .padding(.leading, 34)
                 .sidebarListRow()
@@ -459,6 +615,8 @@ private struct ProjectRow: View, Equatable {
     let isUnavailable: Bool
     let onToggle: () -> Void
     let onNewSession: () -> Void
+    let onCreateWorktree: () -> Void
+    let onManageWorktrees: () -> Void
     let onRetry: () -> Void
     let onForget: () -> Void
 
@@ -519,6 +677,13 @@ private struct ProjectRow: View, Equatable {
                         Label("重试", systemImage: "arrow.clockwise")
                     }
                 }
+                Button(action: onCreateWorktree) {
+                    Label("新建 Worktree", systemImage: "square.stack.3d.up")
+                }
+                .disabled(isUnavailable)
+                Button(action: onManageWorktrees) {
+                    Label("管理 Worktree", systemImage: "wrench.and.screwdriver")
+                }
                 Button(role: .destructive, action: onForget) {
                     Label("从当前设备移除", systemImage: "xmark.circle")
                 }
@@ -548,9 +713,16 @@ private struct SessionRow: View, Equatable {
     @Environment(\.colorScheme) private var colorScheme
     let session: AgentSession
     let isSelected: Bool
+    let isPinned: Bool
+    let isArchived: Bool
+    let reminder: SessionReminder?
 
     static func == (lhs: SessionRow, rhs: SessionRow) -> Bool {
-        lhs.session == rhs.session && lhs.isSelected == rhs.isSelected
+        lhs.session == rhs.session
+            && lhs.isSelected == rhs.isSelected
+            && lhs.isPinned == rhs.isPinned
+            && lhs.isArchived == rhs.isArchived
+            && lhs.reminder == rhs.reminder
     }
 
     var body: some View {
@@ -561,6 +733,24 @@ private struct SessionRow: View, Equatable {
                 Circle()
                     .fill(statusDotColor)
                     .frame(width: 7, height: 7)
+                if isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(themeStore.uiFont(size: 11, weight: .semibold))
+                        .foregroundStyle(tokens.accent)
+                        .accessibilityLabel("已置顶")
+                }
+                if isArchived {
+                    Image(systemName: "archivebox.fill")
+                        .font(themeStore.uiFont(size: 11, weight: .semibold))
+                        .foregroundStyle(tokens.tertiaryText)
+                        .accessibilityLabel("已归档")
+                }
+                if reminder != nil {
+                    Image(systemName: "bell.fill")
+                        .font(themeStore.uiFont(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("已设置提醒")
+                }
                 Text(session.title)
                     .font(themeStore.uiFont(size: 15, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? tokens.primaryText : tokens.secondaryText)
@@ -645,6 +835,391 @@ private struct SidebarSelectionBackground: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(tint)
         }
+    }
+}
+
+private struct WorktreeManagerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
+    let rootProjectID: String?
+    @State private var pendingDelete: WorktreeListItem?
+
+    private var worktrees: [WorktreeListItem] {
+        sessionStore.managedWorktrees(rootProjectID: rootProjectID)
+    }
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        NavigationStack {
+            List {
+                if let message = sessionStore.worktreeErrorMessage {
+                    Section {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(themeStore.uiFont(size: 13, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                Section {
+                    ForEach(worktrees) { item in
+                        WorktreeManagerRow(
+                            item: item,
+                            isRunning: sessionStore.hasRunningSession(in: item),
+                            isBusy: sessionStore.isDeletingWorktree,
+                            onOpen: {
+                                Task {
+                                    _ = await sessionStore.openManagedWorktree(item)
+                                    dismiss()
+                                }
+                            },
+                            onDelete: {
+                                pendingDelete = item
+                            }
+                        )
+                    }
+                }
+                Section {
+                    Button {
+                        Task { await sessionStore.pruneMissingManagedWorktrees() }
+                    } label: {
+                        if sessionStore.isPruningWorktrees {
+                            Label("正在清理", systemImage: "hourglass")
+                        } else {
+                            Label("清理丢失登记", systemImage: "checklist.unchecked")
+                        }
+                    }
+                    .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isDeletingWorktree || sessionStore.isPruningWorktrees)
+                } footer: {
+                    Text("只移除已经不存在的 agentd Worktree registry 登记，不删除任何仍存在的 checkout。")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("Worktree")
+            .navigationBarTitleDisplayMode(.inline)
+            .scrollContentBackground(.hidden)
+            .background(tokens.background)
+            .overlay {
+                if worktrees.isEmpty && !sessionStore.isRefreshingWorktrees {
+                    ContentUnavailableView(
+                        "没有 Worktree",
+                        systemImage: "square.stack.3d.up",
+                        description: Text(rootProjectID == nil ? "当前没有 managed Worktree。" : "当前项目没有 managed Worktree。")
+                    )
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await sessionStore.refreshManagedWorktrees() }
+                    } label: {
+                        if sessionStore.isRefreshingWorktrees {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isPruningWorktrees)
+                    .accessibilityLabel("刷新 Worktree")
+                }
+            }
+        }
+        .task {
+            await sessionStore.refreshManagedWorktrees()
+        }
+        .confirmationDialog("删除 Worktree？", isPresented: Binding(
+            get: { pendingDelete != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingDelete = nil
+                }
+            }
+        ), titleVisibility: .visible) {
+            if let item = pendingDelete {
+                Button("删除 \(item.workspace.name)", role: .destructive) {
+                    let target = item
+                    pendingDelete = nil
+                    Task { await sessionStore.deleteManagedWorktree(target, force: false) }
+                }
+                Button("强制删除并丢弃改动", role: .destructive) {
+                    let target = item
+                    pendingDelete = nil
+                    Task { await sessionStore.deleteManagedWorktree(target, force: true) }
+                }
+            }
+            Button("取消", role: .cancel) {
+                pendingDelete = nil
+            }
+        } message: {
+            Text("普通删除会保留 Git 对未提交改动的保护；强制删除会丢弃该 Worktree 内的未提交改动。")
+        }
+    }
+}
+
+private struct CreateWorktreeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
+    let project: AgentProject
+    @State private var name = ""
+    @State private var base = ""
+    @State private var branch = ""
+    @State private var didApplyDefaultBase = false
+
+    private var canCreate: Bool {
+        !sessionStore.isCreatingWorktree
+    }
+
+    private var branchList: WorktreeBranchListResponse? {
+        sessionStore.worktreeBranches(path: project.path)
+    }
+
+    private var baseBranchItems: [WorktreeBranchItem] {
+        branchList?.branches ?? []
+    }
+
+    private var branchErrorMessage: String? {
+        sessionStore.worktreeBranchError(path: project.path)
+    }
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("项目") {
+                        Text(project.name)
+                            .foregroundStyle(tokens.secondaryText)
+                            .lineLimit(1)
+                    }
+                    TextField("名称", text: $name)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    HStack(spacing: 8) {
+                        TextField("Base", text: $base)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        if sessionStore.isRefreshingWorktreeBranches && baseBranchItems.isEmpty {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if !baseBranchItems.isEmpty {
+                            Menu {
+                                ForEach(baseBranchItems) { item in
+                                    Button {
+                                        base = item.name
+                                        didApplyDefaultBase = true
+                                    } label: {
+                                        Label(branchMenuTitle(item), systemImage: branchIconName(item))
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "list.bullet")
+                                    .foregroundStyle(tokens.secondaryText)
+                                    .frame(width: 28, height: 28)
+                            }
+                            .accessibilityLabel("选择 Base")
+                        }
+                    }
+                    TextField("分支", text: $branch)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+
+                if let message = branchErrorMessage, !message.isEmpty {
+                    Section {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(themeStore.uiFont(size: 13, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                if let message = sessionStore.errorMessage, !message.isEmpty {
+                    Section {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(themeStore.uiFont(size: 13, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(tokens.background)
+            .navigationTitle("新建 Worktree")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        Task {
+                            let opened = await sessionStore.createWorktreeAndOpen(
+                                project: project,
+                                name: normalizedOptional(name),
+                                base: normalizedOptional(base),
+                                branch: normalizedOptional(branch)
+                            )
+                            if opened {
+                                dismiss()
+                            }
+                        }
+                    } label: {
+                        if sessionStore.isCreatingWorktree {
+                            ProgressView()
+                        } else {
+                            Text("创建")
+                        }
+                    }
+                    .disabled(!canCreate)
+                }
+            }
+            .task(id: project.path) {
+                await sessionStore.refreshWorktreeBranches(path: project.path)
+                applyDefaultBaseIfNeeded()
+            }
+            .onChange(of: branchList?.defaultBase ?? "") { _, _ in
+                applyDefaultBaseIfNeeded()
+            }
+        }
+    }
+
+    private func normalizedOptional(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func applyDefaultBaseIfNeeded() {
+        guard !didApplyDefaultBase,
+              normalizedOptional(base) == nil,
+              let defaultBase = branchList?.defaultBase,
+              !defaultBase.isEmpty
+        else {
+            return
+        }
+        base = defaultBase
+        didApplyDefaultBase = true
+    }
+
+    private func branchMenuTitle(_ item: WorktreeBranchItem) -> String {
+        if item.isCurrent {
+            return "\(item.name) · 当前"
+        }
+        if item.isDefault {
+            return "\(item.name) · 默认"
+        }
+        return item.name
+    }
+
+    private func branchIconName(_ item: WorktreeBranchItem) -> String {
+        item.kind == "remote" ? "arrow.down.circle" : "point.topleft.down.curvedto.point.bottomright.up"
+    }
+}
+
+private struct WorktreeManagerRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var themeStore: ThemeStore
+    let item: WorktreeListItem
+    let isRunning: Bool
+    let isBusy: Bool
+    let onOpen: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "square.stack.3d.up.fill")
+                    .foregroundStyle(tokens.accent)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.workspace.name)
+                        .font(themeStore.uiFont(size: 15, weight: .semibold))
+                        .foregroundStyle(tokens.primaryText)
+                        .lineLimit(1)
+                    Text(item.worktree.rootProjectName)
+                        .font(themeStore.uiFont(size: 12, weight: .medium))
+                        .foregroundStyle(tokens.secondaryText)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if isRunning {
+                    Text("运行中")
+                        .font(themeStore.uiFont(size: 11, weight: .semibold))
+                        .foregroundStyle(.green)
+                }
+            }
+
+            Text(item.workspace.path)
+                .font(themeStore.uiFont(size: 12, weight: .regular))
+                .foregroundStyle(tokens.tertiaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(item.worktree.branch ?? item.worktree.base, systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                        .font(themeStore.uiFont(size: 11, weight: .medium))
+                        .foregroundStyle(tokens.secondaryText)
+                        .lineLimit(1)
+                    Label("base \(item.worktree.base)", systemImage: "arrow.triangle.branch")
+                        .font(themeStore.uiFont(size: 11, weight: .regular))
+                        .foregroundStyle(tokens.tertiaryText)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button(action: onOpen) {
+                    Label("打开", systemImage: "arrow.up.forward.square")
+                }
+                .buttonStyle(.borderless)
+                Button(role: .destructive, action: onDelete) {
+                    Label("删除", systemImage: "trash")
+                }
+                .buttonStyle(.borderless)
+                .disabled(isRunning || isBusy)
+            }
+
+            if !worktreeStatusItems.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(worktreeStatusItems, id: \.self) { item in
+                        Text(item)
+                            .font(themeStore.uiFont(size: 10, weight: .semibold))
+                            .foregroundStyle(tokens.secondaryText)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(tokens.surface, in: Capsule())
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var worktreeStatusItems: [String] {
+        var items: [String] = []
+        if item.worktree.dirty {
+            items.append("未提交")
+        }
+        if item.worktree.ahead > 0 {
+            items.append("领先 \(item.worktree.ahead)")
+        }
+        if item.worktree.behind > 0 {
+            items.append("落后 \(item.worktree.behind)")
+        }
+        if let upstream = item.worktree.upstream?.trimmingCharacters(in: .whitespacesAndNewlines), !upstream.isEmpty {
+            items.append(upstream)
+        }
+        return items
     }
 }
 

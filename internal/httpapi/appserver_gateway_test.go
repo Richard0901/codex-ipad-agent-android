@@ -60,6 +60,19 @@ func TestAppServerConfigRequiresAuthAndReturnsSanitizedMetadata(t *testing.T) {
 	if project["id"] != "demo" || project["path"] == "" {
 		t.Fatalf("projects 应只返回安全字段：%v", project)
 	}
+	policy, ok := body["policy"].(map[string]any)
+	if !ok {
+		t.Fatalf("policy metadata 异常：%v", body)
+	}
+	allowedMethods, ok := policy["allowed_methods"].([]any)
+	if !ok {
+		t.Fatalf("allowed_methods metadata 异常：%v", policy)
+	}
+	for _, method := range []string{"thread/goal/get", "thread/goal/set", "thread/goal/clear"} {
+		if !containsAnyString(allowedMethods, method) {
+			t.Fatalf("allowed_methods 应包含 %s：%v", method, allowedMethods)
+		}
+	}
 }
 
 func TestAppServerGatewayRejectsMissingBearerTokenBeforeUpstreamDial(t *testing.T) {
@@ -192,6 +205,31 @@ func TestAppServerGatewayRejectsUnauthorizedThreadIDWithoutForwarding(t *testing
 			want:    "threadId 未由当前 gateway 连接授权",
 		},
 		{
+			name:    "thread archive",
+			payload: `{"id":111,"method":"thread/archive","params":{"threadId":"thread-outside"}}`,
+			want:    "threadId 未由当前 gateway 连接授权",
+		},
+		{
+			name:    "thread unarchive",
+			payload: `{"id":112,"method":"thread/unarchive","params":{"threadId":"thread-outside"}}`,
+			want:    "threadId 未由当前 gateway 连接授权",
+		},
+		{
+			name:    "thread goal get",
+			payload: `{"id":113,"method":"thread/goal/get","params":{"threadId":"thread-outside"}}`,
+			want:    "threadId 未由当前 gateway 连接授权",
+		},
+		{
+			name:    "thread goal set",
+			payload: `{"id":114,"method":"thread/goal/set","params":{"threadId":"thread-outside","objective":"ship","status":"active"}}`,
+			want:    "threadId 未由当前 gateway 连接授权",
+		},
+		{
+			name:    "thread goal clear",
+			payload: `{"id":115,"method":"thread/goal/clear","params":{"threadId":"thread-outside"}}`,
+			want:    "threadId 未由当前 gateway 连接授权",
+		},
+		{
 			name: "turn start",
 			payload: fmt.Sprintf(
 				`{"id":12,"method":"turn/start","params":{"threadId":"thread-outside","cwd":%q,"input":[{"type":"text","text":"hi"}],"approvalPolicy":"on-request","approvalsReviewer":"user","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[%q],"networkAccess":false}}}`,
@@ -204,6 +242,14 @@ func TestAppServerGatewayRejectsUnauthorizedThreadIDWithoutForwarding(t *testing
 			name: "thread resume",
 			payload: fmt.Sprintf(
 				`{"id":13,"method":"thread/resume","params":{"threadId":"thread-outside","cwd":%q,"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"workspace-write"}}`,
+				projectDir,
+			),
+			want: "threadId 未由当前 gateway 连接授权",
+		},
+		{
+			name: "thread fork",
+			payload: fmt.Sprintf(
+				`{"id":131,"method":"thread/fork","params":{"threadId":"thread-outside","cwd":%q,"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"workspace-write"}}`,
 				projectDir,
 			),
 			want: "threadId 未由当前 gateway 连接授权",
@@ -535,23 +581,6 @@ func TestAppServerGatewayRejectsUnsafeCWDAndSandbox(t *testing.T) {
 			want: "cwd",
 		},
 		{
-			name: "danger full access",
-			payload: map[string]any{
-				"id":     3,
-				"method": "turn/start",
-				"params": map[string]any{
-					"threadId":       "thread-1",
-					"cwd":            projectDir,
-					"approvalPolicy": "on-request",
-					"sandboxPolicy": map[string]any{
-						"type":          "dangerFullAccess",
-						"writableRoots": []string{projectDir},
-					},
-				},
-			},
-			want: "dangerFullAccess",
-		},
-		{
 			name: "approval policy never",
 			payload: map[string]any{
 				"id":     4,
@@ -749,6 +778,47 @@ func TestAppServerGatewayRejectsUnsafeCWDAndSandbox(t *testing.T) {
 	assertNoUpstreamFrame(t, received)
 }
 
+func TestAppServerGatewayAllowsExplicitFullAccessSandbox(t *testing.T) {
+	var projectDir string
+	upstreamURL, received, _ := fakeAppServerUpstream(t, func(conn *websocket.Conn, messageType int, payload []byte) {
+		respondToThreadListAuthorization(t, conn, payload, projectDir, "thread-full-access")
+	})
+	handler, dir := appServerGatewayRouterFixture(t, upstreamURL)
+	projectDir = dir
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGateway(t, server.URL)
+	defer conn.Close()
+
+	authorizeGatewayThread(t, conn, received, projectDir, "thread-full-access")
+
+	request := []byte(fmt.Sprintf(
+		`{"id":10,"method":"turn/start","params":{"threadId":"thread-full-access","cwd":%q,"input":[{"type":"text","text":"需要完整访问"}],"approvalPolicy":"on-request","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess","networkAccess":false}}}`,
+		projectDir,
+	))
+	if err := conn.WriteMessage(websocket.TextMessage, request); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-received:
+		params := decodeGatewayParamsForTest(t, got)
+		sandbox, ok := params["sandboxPolicy"].(map[string]any)
+		if !ok {
+			t.Fatalf("turn/start 应保留 sandboxPolicy：%s", got)
+		}
+		if sandbox["type"] != "dangerFullAccess" || sandbox["networkAccess"] != false {
+			t.Fatalf("sandboxPolicy 应允许完全访问但禁用网络：%v", sandbox)
+		}
+		if params["approvalPolicy"] != "on-request" || params["approvalsReviewer"] != "user" {
+			t.Fatalf("完全访问仍应走用户审批：%v", params)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake upstream 未收到合法 full access 帧")
+	}
+}
+
 func TestAppServerGatewayDoesNotScanPromptTextForDangerFullAccess(t *testing.T) {
 	var projectDir string
 	upstreamURL, received, _ := fakeAppServerUpstream(t, func(conn *websocket.Conn, messageType int, payload []byte) {
@@ -821,11 +891,11 @@ func TestAppServerGatewayRewritesMissingSafeDefaults(t *testing.T) {
 	}
 	gotTurnStart := readUpstreamFrame(t, received)
 	turnParams := decodeGatewayParamsForTest(t, gotTurnStart)
-	if turnParams["approvalPolicy"] != "on-request" {
-		t.Fatalf("turn/start 应强制 approvalPolicy=on-request：%s", gotTurnStart)
+	if turnParams["approvalPolicy"] != "on-failure" {
+		t.Fatalf("turn/start 应保留安全自动审批 approvalPolicy=on-failure：%s", gotTurnStart)
 	}
-	if turnParams["approvalsReviewer"] != "user" {
-		t.Fatalf("turn/start 应强制 approvalsReviewer=user：%s", gotTurnStart)
+	if turnParams["approvalsReviewer"] != "auto_review" {
+		t.Fatalf("turn/start 应保留安全自动审批 approvalsReviewer=auto_review：%s", gotTurnStart)
 	}
 	assertGatewayParamAbsent(t, turnParams, "permissions", "runtimeWorkspaceRoots", "dynamicTools", "environments", "config", "outputSchema")
 	sandbox, ok := turnParams["sandboxPolicy"].(map[string]any)
@@ -838,6 +908,57 @@ func TestAppServerGatewayRewritesMissingSafeDefaults(t *testing.T) {
 	roots, ok := sandbox["writableRoots"].([]any)
 	if !ok || len(roots) != 1 || roots[0] != projectDir {
 		t.Fatalf("sandboxPolicy.writableRoots 应限制为当前 cwd：%v", sandbox)
+	}
+}
+
+func TestSanitizedGatewayApprovalAllowsOnlySafeAutoReview(t *testing.T) {
+	tests := []struct {
+		name         string
+		params       map[string]any
+		wantPolicy   string
+		wantReviewer string
+	}{
+		{
+			name:         "default",
+			params:       map[string]any{},
+			wantPolicy:   "on-request",
+			wantReviewer: "user",
+		},
+		{
+			name: "safe auto review",
+			params: map[string]any{
+				"approvalPolicy":    "on-failure",
+				"approvalsReviewer": "auto_review",
+			},
+			wantPolicy:   "on-failure",
+			wantReviewer: "auto_review",
+		},
+		{
+			name: "reviewer alone is not enough",
+			params: map[string]any{
+				"approvalsReviewer": "auto_review",
+			},
+			wantPolicy:   "on-request",
+			wantReviewer: "user",
+		},
+		{
+			name: "unknown reviewer falls back",
+			params: map[string]any{
+				"approvalPolicy":    "on-failure",
+				"approvalsReviewer": "somebody_else",
+			},
+			wantPolicy:   "on-request",
+			wantReviewer: "user",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPolicy, gotReviewer := sanitizedGatewayApproval(tt.params)
+			if gotPolicy != tt.wantPolicy || gotReviewer != tt.wantReviewer {
+				t.Fatalf("got %s/%s, want %s/%s", gotPolicy, gotReviewer, tt.wantPolicy, tt.wantReviewer)
+			}
+		})
 	}
 }
 
@@ -928,6 +1049,24 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatalf("thread/resume 合法参数和安全默认值异常：%v", threadResumeParams)
 	}
 
+	threadFork := []byte(fmt.Sprintf(
+		`{"id":6401,"method":"thread/fork","params":{"threadId":"thread-sanitize","cwd":%q,"sandbox":"custom","ephemeral":true,%s}}`,
+		projectDir,
+		dangerousTail,
+	))
+	if err := conn.WriteMessage(websocket.TextMessage, threadFork); err != nil {
+		t.Fatal(err)
+	}
+	threadForkParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
+	assertGatewayParamsOnly(t, threadForkParams, "cwd", "threadId", "approvalPolicy", "approvalsReviewer", "sandbox")
+	if threadForkParams["threadId"] != "thread-sanitize" ||
+		threadForkParams["cwd"] != projectDir ||
+		threadForkParams["approvalPolicy"] != "on-request" ||
+		threadForkParams["approvalsReviewer"] != "user" ||
+		threadForkParams["sandbox"] != "workspace-write" {
+		t.Fatalf("thread/fork 合法参数和安全默认值异常：%v", threadForkParams)
+	}
+
 	threadRead := []byte(`{"id":65,"method":"thread/read","params":{"threadId":"thread-sanitize","includeTurns":true,` + dangerousTail + `}}`)
 	if err := conn.WriteMessage(websocket.TextMessage, threadRead); err != nil {
 		t.Fatal(err)
@@ -936,6 +1075,59 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 	assertGatewayParamsOnly(t, threadReadParams, "threadId", "includeTurns")
 	if threadReadParams["threadId"] != "thread-sanitize" || threadReadParams["includeTurns"] != true {
 		t.Fatalf("thread/read 合法参数应保留：%v", threadReadParams)
+	}
+
+	goalGet := []byte(`{"id":651,"method":"thread/goal/get","params":{"threadId":"thread-sanitize",` + dangerousTail + `}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, goalGet); err != nil {
+		t.Fatal(err)
+	}
+	goalGetParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
+	assertGatewayParamsOnly(t, goalGetParams, "threadId")
+	if goalGetParams["threadId"] != "thread-sanitize" {
+		t.Fatalf("thread/goal/get 合法参数应保留：%v", goalGetParams)
+	}
+
+	goalSet := []byte(`{"id":652,"method":"thread/goal/set","params":{"threadId":"thread-sanitize","objective":"ship ipad goals","status":"active","token_budget":5000,` + dangerousTail + `}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, goalSet); err != nil {
+		t.Fatal(err)
+	}
+	goalSetParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
+	assertGatewayParamsOnly(t, goalSetParams, "threadId", "objective", "status", "tokenBudget")
+	if goalSetParams["threadId"] != "thread-sanitize" ||
+		goalSetParams["objective"] != "ship ipad goals" ||
+		goalSetParams["status"] != "active" ||
+		goalSetParams["tokenBudget"] != float64(5000) {
+		t.Fatalf("thread/goal/set 合法参数应保留并归一化：%v", goalSetParams)
+	}
+
+	goalClear := []byte(`{"id":653,"method":"thread/goal/clear","params":{"threadId":"thread-sanitize",` + dangerousTail + `}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, goalClear); err != nil {
+		t.Fatal(err)
+	}
+	goalClearParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
+	assertGatewayParamsOnly(t, goalClearParams, "threadId")
+	if goalClearParams["threadId"] != "thread-sanitize" {
+		t.Fatalf("thread/goal/clear 合法参数应保留：%v", goalClearParams)
+	}
+
+	archive := []byte(`{"id":6501,"method":"thread/archive","params":{"threadId":"thread-sanitize",` + dangerousTail + `}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, archive); err != nil {
+		t.Fatal(err)
+	}
+	archiveParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
+	assertGatewayParamsOnly(t, archiveParams, "threadId")
+	if archiveParams["threadId"] != "thread-sanitize" {
+		t.Fatalf("thread/archive 合法参数应保留：%v", archiveParams)
+	}
+
+	unarchive := []byte(`{"id":6502,"method":"thread/unarchive","params":{"threadId":"thread-sanitize",` + dangerousTail + `}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, unarchive); err != nil {
+		t.Fatal(err)
+	}
+	unarchiveParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
+	assertGatewayParamsOnly(t, unarchiveParams, "threadId")
+	if unarchiveParams["threadId"] != "thread-sanitize" {
+		t.Fatalf("thread/unarchive 合法参数应保留：%v", unarchiveParams)
 	}
 
 	interrupt := []byte(`{"id":66,"method":"turn/interrupt","params":{"threadId":"thread-sanitize","turnId":"turn-1",` + dangerousTail + `}}`)
@@ -947,6 +1139,67 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 	if interruptParams["threadId"] != "thread-sanitize" || interruptParams["turnId"] != "turn-1" {
 		t.Fatalf("turn/interrupt 合法参数应保留：%v", interruptParams)
 	}
+}
+
+func TestAppServerGatewayRejectsInvalidGoalSetParams(t *testing.T) {
+	var projectDir string
+	upstreamURL, received, _ := fakeAppServerUpstream(t, func(conn *websocket.Conn, messageType int, payload []byte) {
+		respondToThreadListAuthorization(t, conn, payload, projectDir, "thread-goal")
+	})
+	handler, dir := appServerGatewayRouterFixture(t, upstreamURL)
+	projectDir = dir
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGateway(t, server.URL)
+	defer conn.Close()
+
+	authorizeGatewayThread(t, conn, received, projectDir, "thread-goal")
+
+	cases := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "empty objective",
+			payload: `{"id":81,"method":"thread/goal/set","params":{"threadId":"thread-goal","objective":"   ","status":"active"}}`,
+			want:    "objective 必须是非空字符串",
+		},
+		{
+			name:    "unknown status",
+			payload: `{"id":82,"method":"thread/goal/set","params":{"threadId":"thread-goal","objective":"ship","status":"sleeping"}}`,
+			want:    "status 不支持",
+		},
+		{
+			name:    "zero budget",
+			payload: `{"id":83,"method":"thread/goal/set","params":{"threadId":"thread-goal","objective":"ship","tokenBudget":0}}`,
+			want:    "tokenBudget 必须是正数",
+		},
+		{
+			name:    "float budget",
+			payload: `{"id":84,"method":"thread/goal/set","params":{"threadId":"thread-goal","objective":"ship","tokenBudget":12.5}}`,
+			want:    "tokenBudget 必须是正数",
+		},
+		{
+			name:    "null fields still validate budget",
+			payload: `{"id":85,"method":"thread/goal/set","params":{"threadId":"thread-goal","objective":null,"status":null,"tokenBudget":12.5}}`,
+			want:    "tokenBudget 必须是正数",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(tc.payload)); err != nil {
+				t.Fatal(err)
+			}
+			errFrame := readGatewayError(t, conn)
+			if !strings.Contains(errFrame.message, tc.want) {
+				t.Fatalf("invalid goal error 应包含 %q，got=%+v", tc.want, errFrame)
+			}
+		})
+	}
+	assertNoUpstreamFrame(t, received)
 }
 
 func TestAppServerGatewayRewritesPermissionsApprovalResponse(t *testing.T) {
@@ -1529,6 +1782,15 @@ func decodeGatewayResultForTest(t *testing.T, payload []byte) map[string]any {
 		t.Fatalf("gateway frame 缺少 result：%s", payload)
 	}
 	return frame.Result
+}
+
+func containsAnyString(values []any, want string) bool {
+	for _, value := range values {
+		if got, ok := value.(string); ok && got == want {
+			return true
+		}
+	}
+	return false
 }
 
 func assertGatewayParamAbsent(t *testing.T, params map[string]any, keys ...string) {

@@ -25,15 +25,16 @@ type directoryListResponse struct {
 }
 
 type directoryEntry struct {
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	IsDir     bool   `json:"is_dir"`
-	CanOpen   bool   `json:"can_open"`
-	CanBrowse bool   `json:"can_browse"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	IsDir      bool   `json:"is_dir"`
+	CanOpen    bool   `json:"can_open"`
+	CanBrowse  bool   `json:"can_browse"`
+	CanPreview bool   `json:"can_preview,omitempty"`
 }
 
-// directoryListHandler 只服务于“选择工作区”的目录浏览：仅列目录、不递归、
-// 复用 projects allowlist 作为边界，不开放成通用文件管理接口。
+// directoryListHandler 只服务于“选择工作区/预览文件”的轻量浏览：仅列一级内容、不递归，
+// 复用 projects/browse/worktree allowlist 作为边界，不开放成通用文件管理接口。
 func (r *Router) directoryListHandler(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -86,23 +87,33 @@ func (r *Router) directoryListHandler(w http.ResponseWriter, req *http.Request) 
 			continue
 		}
 		childPath := filepath.Join(realPath, name)
+		isDir := false
+		isRegularFile := false
 		switch {
 		case entry.IsDir():
 			// realPath 已经过 EvalSymlinks，真实子目录必然仍在允许根内。
+			isDir = true
 		case entry.Type()&fs.ModeSymlink != 0:
 			resolved, err := filepath.EvalSymlinks(childPath)
 			if err != nil {
 				continue
 			}
 			resolvedStat, err := os.Stat(resolved)
-			if err != nil || !resolvedStat.IsDir() {
+			if err != nil {
 				continue
 			}
 			if !r.allowedRealPath(resolved) {
-				// symlink 跳出允许根：不展示，避免目录浏览变成边界绕过入口。
+				// symlink 跳出允许根：不展示，避免目录浏览/预览变成边界绕过入口。
 				continue
 			}
+			isDir = resolvedStat.IsDir()
+			isRegularFile = resolvedStat.Mode().IsRegular()
+		case entry.Type().IsRegular():
+			isRegularFile = true
 		default:
+			continue
+		}
+		if !isDir && !isRegularFile {
 			continue
 		}
 		if len(entries) >= maxDirectoryListEntries {
@@ -110,14 +121,18 @@ func (r *Router) directoryListHandler(w http.ResponseWriter, req *http.Request) 
 			break
 		}
 		entries = append(entries, directoryEntry{
-			Name:      name,
-			Path:      childPath,
-			IsDir:     true,
-			CanOpen:   true,
-			CanBrowse: true,
+			Name:       name,
+			Path:       childPath,
+			IsDir:      isDir,
+			CanOpen:    isDir,
+			CanBrowse:  isDir,
+			CanPreview: isRegularFile,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir != entries[j].IsDir {
+			return entries[i].IsDir
+		}
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
 

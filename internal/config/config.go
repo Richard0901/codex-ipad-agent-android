@@ -15,17 +15,20 @@ import (
 const AppName = "mimi-remote"
 
 type Config struct {
-	Listen      string          `json:"listen"`
-	Auth        AuthConfig      `json:"auth"`
-	Runtime     RuntimeConfig   `json:"runtime"`
-	AppServer   AppServerConfig `json:"app_server"`
-	Codex       CodexConfig     `json:"codex"`
-	Session     SessionConfig   `json:"session"`
-	Debug       DebugConfig     `json:"debug"`
-	Projects    []ProjectConfig `json:"projects"`
-	ScanRoots   []string        `json:"scan_roots"`
-	BrowseRoots []string        `json:"browse_roots"`
-	DevInsecure bool            `json:"dev_insecure"`
+	Listen        string          `json:"listen"`
+	Auth          AuthConfig      `json:"auth"`
+	Runtime       RuntimeConfig   `json:"runtime"`
+	AppServer     AppServerConfig `json:"app_server"`
+	Voice         VoiceConfig     `json:"voice"`
+	Codex         CodexConfig     `json:"codex"`
+	Session       SessionConfig   `json:"session"`
+	Debug         DebugConfig     `json:"debug"`
+	Projects      []ProjectConfig `json:"projects"`
+	ScanRoots     []string        `json:"scan_roots"`
+	BrowseRoots   []string        `json:"browse_roots"`
+	WorktreesRoot string          `json:"worktrees_root"`
+	Actions       []ActionConfig  `json:"actions"`
+	DevInsecure   bool            `json:"dev_insecure"`
 }
 
 type AuthConfig struct {
@@ -50,6 +53,15 @@ type AppServerConfig struct {
 	WSTokenFile string `json:"ws_token_file,omitempty"`
 }
 
+type VoiceConfig struct {
+	TranscriptionProvider     string `json:"transcription_provider,omitempty"`
+	TranscriptionModel        string `json:"transcription_model"`
+	TranscriptionBaseURL      string `json:"transcription_base_url,omitempty"`
+	TranscriptionAPIKey       string `json:"transcription_api_key,omitempty"`
+	CodexTranscriptionBaseURL string `json:"codex_transcription_base_url,omitempty"`
+	CodexAuthFile             string `json:"codex_auth_file,omitempty"`
+}
+
 type SessionConfig struct {
 	OutputBufferBytes int `json:"output_buffer_bytes"`
 }
@@ -62,6 +74,16 @@ type ProjectConfig struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Path string `json:"path"`
+}
+
+type ActionConfig struct {
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	Command              string   `json:"command"`
+	Args                 []string `json:"args,omitempty"`
+	WorkingDir           string   `json:"working_dir,omitempty"`
+	TimeoutSeconds       int      `json:"timeout_seconds,omitempty"`
+	RequiresConfirmation bool     `json:"requires_confirmation,omitempty"`
 }
 
 func DefaultPath() string {
@@ -152,6 +174,12 @@ func defaults() Config {
 			Managed:   true,
 			Listen:    defaultAppServerListen,
 		},
+		Voice: VoiceConfig{
+			TranscriptionProvider:     "auto",
+			TranscriptionModel:        "gpt-4o-mini-transcribe",
+			TranscriptionBaseURL:      "https://api.openai.com/v1",
+			CodexTranscriptionBaseURL: "https://chatgpt.com/backend-api",
+		},
 		Codex: CodexConfig{
 			Bin:         "codex",
 			DefaultArgs: []string{"--no-alt-screen"},
@@ -205,6 +233,28 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("AGENTD_APP_SERVER_MANAGED"); v != "" {
 		cfg.AppServer.Managed = truthy(v)
 	}
+	if v := os.Getenv("AGENTD_TRANSCRIPTION_MODEL"); v != "" {
+		cfg.Voice.TranscriptionModel = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("AGENTD_TRANSCRIPTION_PROVIDER"); v != "" {
+		cfg.Voice.TranscriptionProvider = strings.TrimSpace(strings.ToLower(v))
+	}
+	if v := os.Getenv("AGENTD_TRANSCRIPTION_BASE_URL"); v != "" {
+		cfg.Voice.TranscriptionBaseURL = strings.TrimRight(strings.TrimSpace(v), "/")
+	}
+	if v := os.Getenv("AGENTD_CODEX_TRANSCRIPTION_BASE_URL"); v != "" {
+		cfg.Voice.CodexTranscriptionBaseURL = strings.TrimRight(strings.TrimSpace(v), "/")
+	} else if v := os.Getenv("CODEX_API_BASE_URL"); v != "" {
+		cfg.Voice.CodexTranscriptionBaseURL = strings.TrimRight(strings.TrimSpace(v), "/")
+	}
+	if v := os.Getenv("AGENTD_CODEX_AUTH_FILE"); v != "" {
+		cfg.Voice.CodexAuthFile = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("AGENTD_TRANSCRIPTION_API_KEY"); v != "" {
+		cfg.Voice.TranscriptionAPIKey = strings.TrimSpace(v)
+	} else if v := os.Getenv("OPENAI_API_KEY"); v != "" {
+		cfg.Voice.TranscriptionAPIKey = strings.TrimSpace(v)
+	}
 	if v := os.Getenv("AGENTD_DEV_INSECURE"); v == "1" || strings.EqualFold(v, "true") {
 		cfg.DevInsecure = true
 	}
@@ -224,6 +274,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("AGENTD_BROWSE_ROOTS"); v != "" {
 		cfg.BrowseRoots = splitCSV(v)
+	}
+	if v := os.Getenv("AGENTD_WORKTREES_ROOT"); v != "" {
+		cfg.WorktreesRoot = strings.TrimSpace(v)
 	}
 }
 
@@ -421,10 +474,81 @@ func (c Config) Validate() error {
 	if c.Session.OutputBufferBytes <= 0 {
 		return fmt.Errorf("session.output_buffer_bytes 必须大于 0")
 	}
+	switch strings.ToLower(strings.TrimSpace(c.Voice.TranscriptionProvider)) {
+	case "", "auto", "codex", "openai":
+	default:
+		return fmt.Errorf("voice.transcription_provider 只支持 auto、codex 或 openai")
+	}
 	if len(c.Projects) == 0 {
 		return fmt.Errorf("projects 不能为空；可在 config.json 配置，或设置 AGENTD_PROJECTS=/path/a,/path/b 或 AGENTD_SCAN_ROOTS=/workspace")
 	}
+	if err := validateActions(c.Actions); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateActions(actions []ActionConfig) error {
+	if len(actions) > 50 {
+		return fmt.Errorf("actions 最多配置 50 个")
+	}
+	seen := map[string]bool{}
+	for index, action := range actions {
+		prefix := fmt.Sprintf("actions[%d]", index)
+		id := strings.TrimSpace(action.ID)
+		if id == "" {
+			return fmt.Errorf("%s.id 不能为空", prefix)
+		}
+		if !isSafeConfigID(id) {
+			return fmt.Errorf("%s.id 只能包含字母、数字、下划线和短横线", prefix)
+		}
+		if seen[id] {
+			return fmt.Errorf("actions.id 重复：%s", id)
+		}
+		seen[id] = true
+		if strings.TrimSpace(action.Name) == "" {
+			return fmt.Errorf("%s.name 不能为空", prefix)
+		}
+		command := strings.TrimSpace(action.Command)
+		if command == "" {
+			return fmt.Errorf("%s.command 不能为空", prefix)
+		}
+		if strings.ContainsRune(command, '\x00') || strings.ContainsAny(command, " \t\r\n") {
+			return fmt.Errorf("%s.command 必须是单个可执行文件路径或 PATH 命令名，参数请放到 args", prefix)
+		}
+		if strings.ContainsRune(action.WorkingDir, '\x00') {
+			return fmt.Errorf("%s.working_dir 不能包含非法字符", prefix)
+		}
+		if action.TimeoutSeconds < 0 || action.TimeoutSeconds > 120 {
+			return fmt.Errorf("%s.timeout_seconds 必须在 0 到 120 秒之间", prefix)
+		}
+		if len(action.Args) > 64 {
+			return fmt.Errorf("%s.args 最多 64 项", prefix)
+		}
+		for argIndex, arg := range action.Args {
+			if strings.ContainsRune(arg, '\x00') {
+				return fmt.Errorf("%s.args[%d] 不能包含非法字符", prefix, argIndex)
+			}
+			if len([]rune(arg)) > 1024 {
+				return fmt.Errorf("%s.args[%d] 最多 1024 个字符", prefix, argIndex)
+			}
+		}
+	}
+	return nil
+}
+
+func isSafeConfigID(raw string) bool {
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func isLoopbackListen(raw string) bool {

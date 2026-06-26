@@ -23,6 +23,14 @@ struct SessionListView: View {
                         SessionListRow(session: session, isSelected: session.id == sessionStore.selectedSessionID)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        Button {
+                            Task { await sessionStore.handoffSessionToWorktree(session) }
+                        } label: {
+                            Label("转到新 Worktree", systemImage: "arrow.triangle.branch")
+                        }
+                        .disabled(session.isRunning || sessionStore.isCreatingWorktree)
+                    }
                 }
             } header: {
                 HStack {
@@ -46,7 +54,7 @@ struct SessionListView: View {
                 ContentUnavailableView(
                     "没有历史会话",
                     systemImage: "clock.arrow.circlepath",
-                    description: Text("该项目暂无可继续的 Codex 历史。")
+                    description: Text("该项目暂无可继续的会话历史。")
                 )
             }
         }
@@ -151,7 +159,7 @@ private struct SessionListRow: View {
         case "local":
             return "本地回显"
         default:
-            return session.isRunning ? "Codex app-server" : "Codex 历史"
+            return session.isRunning ? "app-server" : "会话历史"
         }
     }
 
@@ -163,6 +171,9 @@ private struct SessionListRow: View {
         if let approval = session.pendingApproval {
             chips.append(("审批 \(approval.title)", "checkmark.seal", .orange))
         }
+        if let goal = session.goal {
+            chips.append(("目标 \(goal.status.displayText)", "target", goalTint(for: goal.status)))
+        }
         if let usage = session.usage?.compactText {
             chips.append((usage, "gauge.with.dots.needle.33percent", .secondary))
         }
@@ -170,5 +181,18 @@ private struct SessionListRow: View {
             chips.append((rateLimit, "speedometer", .secondary))
         }
         return chips
+    }
+
+    private func goalTint(for status: ThreadGoalStatus) -> Color {
+        switch status {
+        case .active:
+            return .green
+        case .blocked, .usageLimited, .budgetLimited:
+            return .orange
+        case .complete:
+            return .blue
+        case .paused:
+            return .secondary
+        }
     }
 }

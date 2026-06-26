@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct RootView: View {
     @EnvironmentObject private var appStore: AppStore
@@ -10,6 +11,7 @@ struct RootView: View {
     @State private var showingSettings = false
     @State private var showingLogInspector = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    @AppStorage("runtime.keepAwakeWhileRunning") private var keepAwakeWhileRunning = false
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -25,11 +27,16 @@ struct RootView: View {
         .task {
             await sessionStore.bootstrap()
         }
+        .onAppear(perform: applyIdleTimerPolicy)
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         .sheet(isPresented: $showingSettings) {
             SettingsView(isInitialSetup: false)
                 .environment(\.themeSystemColorScheme, colorScheme)
         }
         .onChange(of: scenePhase) { _, phase in
+            applyIdleTimerPolicy()
             guard phase == .active else {
                 return
             }
@@ -37,10 +44,29 @@ struct RootView: View {
                 await sessionStore.resumeFromForeground()
             }
         }
+        .onChange(of: keepAwakeWhileRunning) { _, _ in
+            applyIdleTimerPolicy()
+        }
+        .onChange(of: sessionStore.selectedSessionID) { _, _ in
+            applyIdleTimerPolicy()
+        }
+        .onChange(of: sessionStore.selectedSession?.status) { _, _ in
+            applyIdleTimerPolicy()
+        }
+        .onChange(of: sessionStore.webSocketStatus) { _, _ in
+            applyIdleTimerPolicy()
+        }
         .environment(\.themeSystemColorScheme, colorScheme)
         .preferredColorScheme(themeStore.preferredColorScheme)
         .tint(tokens.accent)
         .background(tokens.background.ignoresSafeArea())
+    }
+
+    private func applyIdleTimerPolicy() {
+        // 只在前台且用户明确开启时保持常亮；离开运行会话后立即恢复系统默认，避免静默耗电。
+        UIApplication.shared.isIdleTimerDisabled = keepAwakeWhileRunning
+            && scenePhase == .active
+            && sessionStore.selectedSession?.isRunning == true
     }
 
     private var mainLayout: some View {
@@ -72,7 +98,7 @@ struct RootView: View {
                     ProgressView()
                         .controlSize(.large)
                         .tint(tokens.accent)
-                    Text("正在连接 Mac 上的 agentd")
+                    Text("正在连接本地开发环境中的 agentd")
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
                     Text("如果刚启动 Tailscale 或 agentd，这里会自动重试。")
@@ -86,7 +112,7 @@ struct RootView: View {
                     Text("无法连接 agentd")
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
-                    Text(sessionStore.errorMessage ?? "请检查 Mac 端 agentd 和网络连接。")
+                    Text(sessionStore.errorMessage ?? "请检查 agentd 和网络连接。")
                         .font(themeStore.uiFont(.callout))
                         .foregroundStyle(tokens.secondaryText)
                         .multilineTextAlignment(.center)
@@ -113,7 +139,7 @@ struct RootView: View {
     private func compactLayout(layout: WorkbenchLayout) -> some View {
         NavigationStack {
             ProjectSidebarView(showsSessions: true)
-                .navigationTitle("Codex")
+                .navigationTitle("咪咪")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -464,9 +490,9 @@ private struct AgentWorkbenchTitle: View {
 
     private var primaryText: String {
         if let session = sessionStore.selectedSession {
-            return session.project.isEmpty ? "Codex" : session.project
+            return session.project.isEmpty ? "工作区" : session.project
         }
-        return sessionStore.selectedProject?.name ?? "Codex"
+        return sessionStore.selectedProject?.name ?? "工作区"
     }
 
     private var secondaryText: String {

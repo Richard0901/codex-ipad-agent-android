@@ -40,6 +40,11 @@ struct AgentAPIClient {
         try await request(path: "/api/app-server/config", method: "GET", body: Optional<Data>.none)
     }
 
+    func capabilities(path: String?) async throws -> CapabilityListResponse {
+        let body = try JSONEncoder().encode(CapabilityListRequest(path: path))
+        return try await request(path: "/api/capabilities/list", method: "POST", body: body)
+    }
+
     func projects() async throws -> [AgentProject] {
         let response: ProjectsResponse = try await request(path: "/api/projects", method: "GET", body: Optional<Data>.none)
         return response.projects
@@ -51,12 +56,115 @@ struct AgentAPIClient {
         return response.workspace
     }
 
+    func chatWorkspace() async throws -> AgentWorkspace {
+        let response: WorkspaceResolveResponse = try await request(path: "/api/workspaces/chat", method: "GET", body: Optional<Data>.none)
+        return response.workspace
+    }
+
+    func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse {
+        let body = try JSONEncoder().encode(WorktreeCreateRequest(path: path, name: name, base: base, branch: branch))
+        return try await request(path: "/api/worktrees/create", method: "POST", body: body)
+    }
+
+    func worktreeBranches(path: String) async throws -> WorktreeBranchListResponse {
+        let body = try JSONEncoder().encode(WorktreeBranchListRequest(path: path))
+        return try await request(path: "/api/worktrees/branches", method: "POST", body: body)
+    }
+
+    func listWorktrees() async throws -> [WorktreeListItem] {
+        let response: WorktreeListResponse = try await request(path: "/api/worktrees/list", method: "GET", body: Optional<Data>.none)
+        return response.worktrees
+    }
+
+    func deleteWorktree(path: String, force: Bool = false) async throws -> WorktreeDeleteResponse {
+        let body = try JSONEncoder().encode(WorktreeDeleteRequest(path: path, force: force))
+        return try await request(path: "/api/worktrees/delete", method: "POST", body: body)
+    }
+
+    func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
+        try await request(path: "/api/worktrees/prune", method: "POST", body: Optional<Data>.none)
+    }
+
     func listDirectories(path: String) async throws -> DirectoryListResponse {
         let body = try JSONEncoder().encode(DirectoryListRequest(path: path))
         return try await request(path: "/api/directories/list", method: "POST", body: body)
     }
 
-    private func request<T: Decodable>(path: String, method: String, requiresAuth: Bool = true, body: Data?) async throws -> T {
+    func readFile(path: String) async throws -> FileReadResponse {
+        let body = try JSONEncoder().encode(FileReadRequest(path: path))
+        return try await request(path: "/api/files/read", method: "POST", body: body)
+    }
+
+    func commandActions(path: String) async throws -> [AgentCommandAction] {
+        let body = try JSONEncoder().encode(CommandActionListRequest(path: path))
+        let response: CommandActionListResponse = try await request(path: "/api/actions/list", method: "POST", body: body)
+        return response.actions
+    }
+
+    func runCommandAction(path: String, id: String) async throws -> CommandActionRunResponse {
+        let body = try JSONEncoder().encode(CommandActionRunRequest(path: path, id: id))
+        return try await request(path: "/api/actions/run", method: "POST", body: body)
+    }
+
+    func gitStatus(path: String) async throws -> GitStatusResponse {
+        let body = try JSONEncoder().encode(GitStatusRequest(path: path))
+        return try await request(path: "/api/git/status", method: "POST", body: body)
+    }
+
+    func gitAction(path: String, action: GitActionKind, files: [String]) async throws -> GitStatusResponse {
+        let body = try JSONEncoder().encode(GitActionRequest(path: path, action: action, files: files))
+        return try await request(path: "/api/git/action", method: "POST", body: body)
+    }
+
+    func gitPatchAction(path: String, action: GitActionKind, patch: String) async throws -> GitStatusResponse {
+        let body = try JSONEncoder().encode(GitActionRequest(path: path, action: action, patch: patch))
+        return try await request(path: "/api/git/action", method: "POST", body: body)
+    }
+
+    func gitCommit(path: String, message: String) async throws -> GitStatusResponse {
+        let body = try JSONEncoder().encode(GitCommitRequest(path: path, message: message))
+        return try await request(path: "/api/git/commit", method: "POST", body: body)
+    }
+
+    func gitPush(path: String, remote: String?) async throws -> GitPushResponse {
+        let body = try JSONEncoder().encode(GitPushRequest(path: path, remote: remote))
+        return try await request(path: "/api/git/push", method: "POST", body: body)
+    }
+
+    func gitCreatePullRequest(path: String, title: String, body prBody: String, draft: Bool) async throws -> GitPullRequestResponse {
+        let body = try JSONEncoder().encode(GitPullRequestRequest(path: path, title: title, body: prBody, draft: draft))
+        return try await request(path: "/api/git/pull-request", method: "POST", body: body)
+    }
+
+    func gitPullRequestStatus(path: String) async throws -> GitPullRequestStatusResponse {
+        let body = try JSONEncoder().encode(GitPullRequestStatusRequest(path: path))
+        return try await request(path: "/api/git/pull-request/status", method: "POST", body: body)
+    }
+
+    func transcribeVoice(
+        filename: String,
+        contentType: String,
+        audioData: Data,
+        language: String?,
+        prompt: String?
+    ) async throws -> VoiceTranscriptionResponse {
+        let body = try JSONEncoder().encode(VoiceTranscriptionRequest(
+            filename: filename,
+            contentType: contentType,
+            audioBase64: audioData.base64EncodedString(),
+            language: language,
+            prompt: prompt
+        ))
+        return try await request(path: "/api/voice/transcribe", method: "POST", body: body, timeout: 60)
+    }
+
+    private func request<T: Decodable>(
+        path: String,
+        method: String,
+        requiresAuth: Bool = true,
+        body: Data?,
+        timeout: TimeInterval = 20
+    ) async throws -> T {
         guard let baseURL else {
             throw AgentAPIError.invalidEndpoint
         }
@@ -65,7 +173,7 @@ struct AgentAPIClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = 20
+        request.timeoutInterval = timeout
         if requiresAuth {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

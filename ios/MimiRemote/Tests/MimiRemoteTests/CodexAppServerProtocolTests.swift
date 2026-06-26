@@ -101,6 +101,27 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(sandbox["networkAccess"]?.boolValue, false)
     }
 
+    func testRequestBuilderForwardsFullAccessSandbox() throws {
+        let project = AgentProject(id: "repo", name: "Repo", path: "/Users/me/repo")
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: [project])
+        var options = CodexAppServerTurnOptions.default
+        options.sandboxMode = .dangerFullAccess
+
+        let threadStart = try builder.threadStart(projectID: project.id, options: options)
+        let threadParams = try XCTUnwrap(threadStart.params?.objectValue)
+        XCTAssertEqual(threadParams["approvalPolicy"]?.stringValue, "on-request")
+        XCTAssertEqual(threadParams["approvalsReviewer"]?.stringValue, "user")
+        XCTAssertEqual(threadParams["sandbox"]?.stringValue, "danger-full-access")
+
+        let payload = CodexAppServerTurnPayload(prompt: "hi", options: options)
+        let turnStart = try builder.turnStart(threadID: "thread-1", projectID: project.id, payload: payload, clientMessageID: nil)
+        let turnParams = try XCTUnwrap(turnStart.params?.objectValue)
+        let sandbox = try XCTUnwrap(turnParams["sandboxPolicy"]?.objectValue)
+        XCTAssertEqual(sandbox["type"]?.stringValue, "dangerFullAccess")
+        XCTAssertEqual(sandbox["networkAccess"]?.boolValue, false)
+        XCTAssertNil(sandbox["writableRoots"])
+    }
+
     func testModelListBuilderAndFlexibleParser() throws {
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: [])
         let request = builder.modelList()
@@ -132,6 +153,31 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(parsed.first?.title, "GPT-5.1 Codex")
         XCTAssertEqual(parsed.first?.provider, "openai")
         XCTAssertEqual(parsed.first?.isDefault, true)
+    }
+
+    func testRequestBuilderBuildsThreadGoalRequests() throws {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: [])
+
+        let get = builder.threadGoalGet(threadID: "thread-1")
+        XCTAssertEqual(get.method, "thread/goal/get")
+        XCTAssertEqual(get.params?.objectValue?["threadId"]?.stringValue, "thread-1")
+
+        let set = builder.threadGoalSet(
+            threadID: "thread-1",
+            objective: "ship ipad goal",
+            status: .active,
+            tokenBudget: 50_000
+        )
+        let setParams = try XCTUnwrap(set.params?.objectValue)
+        XCTAssertEqual(set.method, "thread/goal/set")
+        XCTAssertEqual(setParams["threadId"]?.stringValue, "thread-1")
+        XCTAssertEqual(setParams["objective"]?.stringValue, "ship ipad goal")
+        XCTAssertEqual(setParams["status"]?.stringValue, "active")
+        XCTAssertEqual(setParams["tokenBudget"]?.intValue, 50_000)
+
+        let clear = builder.threadGoalClear(threadID: "thread-1")
+        XCTAssertEqual(clear.method, "thread/goal/clear")
+        XCTAssertEqual(clear.params?.objectValue?["threadId"]?.stringValue, "thread-1")
     }
 
     func testRequestBuilderRejectsUnsafeStructuredInputAndOptions() throws {
@@ -228,5 +274,39 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(approval.kind, "command")
         XCTAssertTrue(approval.title.contains("go test"))
         XCTAssertTrue(approval.body?.contains("验证改动") == true)
+    }
+
+    func testProjectorMapsThreadGoalNotifications() throws {
+        var projector = CodexAppServerEventProjector()
+        let updated = CodexAppServerNotification(method: "thread/goal/updated", params: .object([
+            "threadId": .string("thread-1"),
+            "goal": .object([
+                "threadId": .string("thread-1"),
+                "objective": .string("完成 iPad 目标功能"),
+                "status": .string("active"),
+                "tokenBudget": .int(80_000),
+                "tokensUsed": .int(12_000),
+                "timeUsedSeconds": .int(360)
+            ])
+        ]))
+
+        guard case .goalUpdated(let goal, let metadata) = projector.project(updated) else {
+            return XCTFail("expected goal updated")
+        }
+        XCTAssertEqual(metadata.sessionID, "thread-1")
+        XCTAssertEqual(goal.threadID, "thread-1")
+        XCTAssertEqual(goal.objective, "完成 iPad 目标功能")
+        XCTAssertEqual(goal.status, .active)
+        XCTAssertEqual(goal.tokenBudget, 80_000)
+        XCTAssertEqual(goal.tokensUsed, 12_000)
+        XCTAssertEqual(goal.timeUsedSeconds, 360)
+
+        let cleared = CodexAppServerNotification(method: "thread/goal/cleared", params: .object([
+            "threadId": .string("thread-1")
+        ]))
+        guard case .goalCleared(let clearMetadata) = projector.project(cleared) else {
+            return XCTFail("expected goal cleared")
+        }
+        XCTAssertEqual(clearMetadata.sessionID, "thread-1")
     }
 }
