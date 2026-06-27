@@ -1301,9 +1301,6 @@ func (r *Router) gatewayScopeForPath(raw string) (gatewayScope, bool) {
 	if r.realPathInBrowseRoots(realPath) {
 		return gatewayScope{id: workspaceIDForRealPath(realPath), realPath: realPath, browse: true}, true
 	}
-	if r.realPathIsChatWorkspace(realPath) {
-		return gatewayScope{id: workspaceIDForRealPath(realPath), realPath: realPath, browse: true}, true
-	}
 	return gatewayScope{}, false
 }
 

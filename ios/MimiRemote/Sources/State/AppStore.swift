@@ -4,15 +4,18 @@ enum PairingLinkError: LocalizedError, Equatable {
     case unsupportedURL
     case missingEndpoint
     case missingToken
+    case expired
 
     var errorDescription: String? {
         switch self {
         case .unsupportedURL:
             return "连接链接无效"
         case .missingEndpoint:
-            return "连接链接缺少 Endpoint"
+            return "连接链接缺少地址"
         case .missingToken:
-            return "连接链接缺少 Token"
+            return "连接链接缺少访问码"
+        case .expired:
+            return "配对二维码已过期"
         }
     }
 }
@@ -91,7 +94,7 @@ final class AppStore: ObservableObject {
 
     func validatePairingURL(_ url: URL) async throws -> PairingCredentials {
         let credentials = try Self.pairingCredentials(from: url)
-        // 扫码只先测试外侧 agentd 连接，不立刻写入 Keychain；用户确认“保存并加载”后才持久化。
+        // 手动调用时只测试外侧 agentd 连接；首次扫码路径会直接保存，减少一次确认。
         let normalized = try await validateConnection(endpoint: credentials.endpoint, token: credentials.token)
         return PairingCredentials(endpoint: normalized, token: credentials.token)
     }
@@ -150,7 +153,26 @@ final class AppStore: ObservableObject {
         guard !token.isEmpty else {
             throw PairingLinkError.missingToken
         }
+        let expiresAt = components?.queryItems?.first(where: { $0.name == "expires_at" })?.value?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !expiresAt.isEmpty {
+            guard let expiryDate = pairingDate(from: expiresAt) else {
+                throw PairingLinkError.unsupportedURL
+            }
+            if expiryDate <= Date() {
+                throw PairingLinkError.expired
+            }
+        }
         return PairingCredentials(endpoint: try validatedEndpoint(endpoint), token: token)
+    }
+
+    private static func pairingDate(from raw: String) -> Date? {
+        if let seconds = TimeInterval(raw) {
+            return Date(timeIntervalSince1970: seconds)
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: raw)
     }
 
     static func validatedEndpoint(_ raw: String) throws -> String {

@@ -21,6 +21,22 @@ final class PairingLinkTests: XCTestCase {
         XCTAssertEqual(credentials.token, "0123456789abcdef0123456789abcdef")
     }
 
+    func testParsesUnexpiredPairingURL() throws {
+        let url = try XCTUnwrap(URL(string: "mimiremote://connect?endpoint=http%3A%2F%2F100.64.0.1%3A8787&token=0123456789abcdef0123456789abcdef&expires_at=4102444800"))
+
+        let credentials = try AppStore.pairingCredentials(from: url)
+
+        XCTAssertEqual(credentials.endpoint, "http://100.64.0.1:8787")
+    }
+
+    func testRejectsExpiredPairingURL() throws {
+        let url = try XCTUnwrap(URL(string: "mimiremote://connect?endpoint=http%3A%2F%2F100.64.0.1%3A8787&token=0123456789abcdef0123456789abcdef&expires_at=1"))
+
+        XCTAssertThrowsError(try AppStore.pairingCredentials(from: url)) { error in
+            XCTAssertEqual(error as? PairingLinkError, .expired)
+        }
+    }
+
     func testParsesSingleSlashPairingURL() throws {
         let url = try XCTUnwrap(URL(string: "mimiremote:/pair?endpoint=100.64.0.1:8787&token=0123456789abcdef0123456789abcdef"))
 

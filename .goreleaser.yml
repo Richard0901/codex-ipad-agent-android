@@ -75,9 +75,10 @@ brews:
       首次使用：
         codex --version
         codex app-server --help
-        agentd setup
-        agentd doctor --check-port
-        agentd start
-        agentd doctor
+        agentd up
 
-      Mimi Remote App 优先扫描 agentd start 输出的二维码；扫码不可用时再使用 Endpoint/Token。
+      Mimi Remote App 优先扫描 agentd up 输出的二维码；二维码过期后运行 agentd pair 刷新。
+      排障：
+        agentd status
+        agentd doctor --fix
+        agentd logs

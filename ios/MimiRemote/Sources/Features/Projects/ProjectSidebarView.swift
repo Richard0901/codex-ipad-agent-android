@@ -7,7 +7,7 @@ struct ProjectSidebarView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var isPresentingOpenWorkspace = false
     @State private var isPresentingWorktreeManager = false
-    @State private var worktreeManagerRootProjectID: String?
+    @State private var worktreeManagerRootProjectID = ""
     @State private var worktreeCreateProject: AgentProject?
     var showsSessions = true
 
@@ -79,21 +79,6 @@ struct ProjectSidebarView: View {
                     }
                     .buttonStyle(.borderless)
                     Button {
-                        Task { await sessionStore.openChatWorkspace() }
-                    } label: {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("打开 Chats")
-                    Button {
-                        worktreeManagerRootProjectID = nil
-                        isPresentingWorktreeManager = true
-                    } label: {
-                        Image(systemName: "square.stack.3d.up")
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("管理 Worktree")
-                    Button {
                         isPresentingOpenWorkspace = true
                     } label: {
                         Image(systemName: "folder.badge.plus")
@@ -125,21 +110,12 @@ struct ProjectSidebarView: View {
                 } description: {
                     Text("选择已授权的工作目录后，这里会保留最近打开的项目。")
                 } actions: {
-                    HStack {
-                        Button {
-                            Task { await sessionStore.openChatWorkspace() }
-                        } label: {
-                            Label("打开 Chats", systemImage: "bubble.left.and.bubble.right")
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button {
-                            isPresentingOpenWorkspace = true
-                        } label: {
-                            Label("打开路径", systemImage: "folder.badge.plus")
-                        }
-                        .buttonStyle(.bordered)
+                    Button {
+                        isPresentingOpenWorkspace = true
+                    } label: {
+                        Label("打开路径", systemImage: "folder.badge.plus")
                     }
+                    .buttonStyle(.borderedProminent)
                 }
             } else if sessionStore.filteredSidebarProjects.isEmpty && !sessionStore.isLoading && sessionStore.isSessionSearchActive {
                 ContentUnavailableView(
@@ -528,7 +504,7 @@ private struct ProjectSessionRows: View {
                     Button {
                         Task { await sessionStore.handoffSessionToWorktree(session) }
                     } label: {
-                        Label("转到新 Worktree", systemImage: "arrow.triangle.branch")
+                        Label("转到新 Git Worktree", systemImage: "arrow.triangle.branch")
                     }
                     .disabled(session.isRunning || sessionStore.isCreatingWorktree)
 
@@ -678,11 +654,11 @@ private struct ProjectRow: View, Equatable {
                     }
                 }
                 Button(action: onCreateWorktree) {
-                    Label("新建 Worktree", systemImage: "square.stack.3d.up")
+                    Label("新建 Git Worktree", systemImage: "square.stack.3d.up")
                 }
                 .disabled(isUnavailable)
                 Button(action: onManageWorktrees) {
-                    Label("管理 Worktree", systemImage: "wrench.and.screwdriver")
+                    Label("管理 Git Worktree", systemImage: "wrench.and.screwdriver")
                 }
                 Button(role: .destructive, action: onForget) {
                     Label("从当前设备移除", systemImage: "xmark.circle")
@@ -843,7 +819,7 @@ private struct WorktreeManagerSheet: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var themeStore: ThemeStore
-    let rootProjectID: String?
+    let rootProjectID: String
     @State private var pendingDelete: WorktreeListItem?
 
     private var worktrees: [WorktreeListItem] {
@@ -897,16 +873,16 @@ private struct WorktreeManagerSheet: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Worktree")
+            .navigationTitle("Git Worktree")
             .navigationBarTitleDisplayMode(.inline)
             .scrollContentBackground(.hidden)
             .background(tokens.background)
             .overlay {
                 if worktrees.isEmpty && !sessionStore.isRefreshingWorktrees {
                     ContentUnavailableView(
-                        "没有 Worktree",
+                        "没有 Git Worktree",
                         systemImage: "square.stack.3d.up",
-                        description: Text(rootProjectID == nil ? "当前没有 managed Worktree。" : "当前项目没有 managed Worktree。")
+                        description: Text("当前项目没有已管理的 Git Worktree。")
                     )
                 }
             }
@@ -927,14 +903,14 @@ private struct WorktreeManagerSheet: View {
                         }
                     }
                     .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isPruningWorktrees)
-                    .accessibilityLabel("刷新 Worktree")
+                    .accessibilityLabel("刷新 Git Worktree")
                 }
             }
         }
         .task {
             await sessionStore.refreshManagedWorktrees()
         }
-        .confirmationDialog("删除 Worktree？", isPresented: Binding(
+        .confirmationDialog("删除 Git Worktree？", isPresented: Binding(
             get: { pendingDelete != nil },
             set: { isPresented in
                 if !isPresented {
@@ -958,7 +934,7 @@ private struct WorktreeManagerSheet: View {
                 pendingDelete = nil
             }
         } message: {
-            Text("普通删除会保留 Git 对未提交改动的保护；强制删除会丢弃该 Worktree 内的未提交改动。")
+            Text("普通删除会保留 Git 对未提交改动的保护；强制删除会丢弃该 Git Worktree 内的未提交改动。")
         }
     }
 }
@@ -1052,7 +1028,7 @@ private struct CreateWorktreeSheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(tokens.background)
-            .navigationTitle("新建 Worktree")
+            .navigationTitle("新建 Git Worktree")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

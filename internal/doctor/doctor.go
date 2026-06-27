@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -215,17 +214,25 @@ func Print(w io.Writer, results Results) {
 	fmt.Fprintf(w, "agentd doctor [%s]\n\n", status)
 	fmt.Fprintf(w, "Version: %s\n", results.Version)
 	fmt.Fprintf(w, "Listen:  %s\n\n", results.Listen)
+	fmt.Fprintln(w, "检查结果：")
 	for _, check := range results.Checks {
 		marker := "OK"
 		if !check.OK {
-			marker = "FAIL"
+			marker = "!"
 		}
-		fmt.Fprintf(w, "[%s] %s: %s\n", marker, check.Name, check.Message)
-		if !check.OK && check.Fix != "" {
-			fmt.Fprintf(w, "      Fix: %s\n", check.Fix)
-		}
+		fmt.Fprintf(w, "  %s %s：%s\n", marker, check.Name, check.Message)
 	}
-	if b, err := json.MarshalIndent(results, "", "  "); err == nil {
-		fmt.Fprintf(w, "\nJSON:\n%s\n", string(b))
+
+	if !results.OK {
+		fmt.Fprintln(w, "\n需要处理：")
+		for _, check := range results.Checks {
+			if check.OK {
+				continue
+			}
+			fmt.Fprintf(w, "  ! %s：%s\n", check.Name, check.Message)
+			if strings.TrimSpace(check.Fix) != "" {
+				fmt.Fprintf(w, "    处理：%s\n", check.Fix)
+			}
+		}
 	}
 }

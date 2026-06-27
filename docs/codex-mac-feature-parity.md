@@ -38,7 +38,7 @@
 | Artifact 预览 | 本轮补齐 MVP。打开工作区面板现在会展示授权目录下的普通文件，iPad 可通过 `/api/files/read` 读取 20MB 内文件并用系统 QuickLook 预览；assistant 回复里的常见文件路径也会显示为可点预览按钮。后端只允许读取 projects / browse_roots / managed worktree 边界内的普通文件。 | 仍缺内嵌富预览、超大文件流式下载和 artifact 运行时。 | 下一步按需做图片/PDF 的内嵌轻预览；复杂 artifact 运行时后置。 |
 | IDE sync / Auto context | 未支持。 | 需要编辑器扩展和桌面 app 同步协议。 | P3 暂不做。 |
 | Browser / Computer Use / Appshots | 未支持。 | 依赖桌面 UI 权限和浏览器插件。 | P3 通过远端 Codex 执行，不在 iPad 原生端复刻。 |
-| Chats | 本轮补齐真实 Chats 工作区入口。agentd 提供 `/api/workspaces/chat`，确保 `~/.codex/threads` 存在并作为自指 workspace 返回；iPad 侧栏可直接打开 Chats，随后继续走现有 workspace/session/thread/start 安全链路。 | 仍不是 Cloud Chats；只覆盖本机 app-server 可见的无项目 cwd。 | 保持真实 cwd，不做 UI 假入口；后续若 app-server 暴露专用 projectless thread API，再从 `~/.codex/threads` 迁移。 |
+| Chats | 不在 iPad 端提供独立入口。当前产品主路径是打开明确授权的项目/工作区，再在该上下文中启动或继续会话。 | 无项目 Cloud Chats / projectless thread 仍未支持。 | 等 app-server 暴露稳定 projectless thread API 后再评估，不再用 `~/.codex/threads` 伪装成工作区。 |
 | Memories | 未支持 UI。 | 没有记忆读写或状态展示。 | P3 等 app-server 稳定暴露后再做。 |
 | 通知 / 防睡眠 | 本轮补齐提醒型和运行态本地通知。设置会话提醒时会请求/使用系统本地通知；未授权时仍保留侧栏提醒状态；当 iPad 正连接会话并收到审批等待、turn 完成或失败事件时，会调度一次本地通知并按事件 ID 去重；设置页新增“运行中保持屏幕常亮”，仅在前台选中会话处于运行或等待审批状态时禁用系统自动锁屏，离开运行会话后恢复默认。 | 还缺后台 push、离线通知和通知点击深链。 | 后台 push 需要远端事件订阅和设备 token 策略；通知深链等远端协议稳定后再接。 |
 

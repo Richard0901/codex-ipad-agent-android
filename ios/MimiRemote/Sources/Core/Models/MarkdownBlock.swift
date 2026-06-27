@@ -8,6 +8,16 @@ struct MarkdownInlineText: Hashable {
     static let empty = MarkdownInlineText(attributed: AttributedString(""), plain: "", hasFormatting: false)
 }
 
+struct MarkdownImageReference: Hashable {
+    let source: String
+    let altText: String?
+    let title: String?
+
+    var displayText: String {
+        altText?.nilIfBlank ?? title?.nilIfBlank ?? source
+    }
+}
+
 enum MarkdownColumnAlignment: Hashable {
     case leading
     case center
@@ -53,6 +63,7 @@ struct MarkdownBlock: Identifiable, Hashable {
         case taskList(items: [MarkdownTaskListItem])
         case blockquote(blocks: [MarkdownBlock])
         case codeBlock(language: String?, code: String)
+        case image(MarkdownImageReference)
         case table(header: [MarkdownInlineText], rows: [[MarkdownInlineText]], alignments: [MarkdownColumnAlignment])
         case thematicBreak
     }
@@ -67,6 +78,13 @@ struct MarkdownBlock: Identifiable, Hashable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(kind)
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

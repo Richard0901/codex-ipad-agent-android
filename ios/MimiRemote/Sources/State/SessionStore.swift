@@ -6,7 +6,6 @@ protocol SessionStoreAPIClient {
     func modelOptions() async throws -> [CodexAppServerModelOption]
     func capabilities(path: String?) async throws -> CapabilityListResponse
     func resolveWorkspace(path: String) async throws -> AgentWorkspace
-    func chatWorkspace() async throws -> AgentWorkspace
     func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse
     func worktreeBranches(path: String) async throws -> WorktreeBranchListResponse
     func listWorktrees() async throws -> [WorktreeListItem]
@@ -74,11 +73,6 @@ extension SessionStoreAPIClient {
 
     func resolveWorkspace(path: String) async throws -> AgentWorkspace {
         // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/workspaces/resolve。
-        throw AgentAPIError.invalidResponse
-    }
-
-    func chatWorkspace() async throws -> AgentWorkspace {
-        // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/workspaces/chat。
         throw AgentAPIError.invalidResponse
     }
 
@@ -1119,25 +1113,6 @@ final class SessionStore: ObservableObject {
     }
 
     @discardableResult
-    func openChatWorkspace() async -> Bool {
-        do {
-            let workspace = try await clientFactory().chatWorkspace()
-            rememberWorkspace(workspace)
-            clearWorkspaceUnavailable(workspace.id)
-            setSelectedProjectID(workspace.id)
-            setSelectedSessionID(nil)
-            insertExpandedProjectID(workspace.id)
-            setErrorMessage(nil)
-            disconnectWebSocket()
-            await refreshSessions(forProjectID: workspace.id)
-            return true
-        } catch {
-            setErrorMessage(error.localizedDescription)
-            return false
-        }
-    }
-
-    @discardableResult
     func createWorktreeAndOpen(project: AgentProject, name: String? = nil, base: String? = nil, branch: String? = nil) async -> Bool {
         isCreatingWorktree = true
         defer { isCreatingWorktree = false }
@@ -1238,7 +1213,7 @@ final class SessionStore: ObservableObject {
                 clientMessageID: UUID().uuidString
             )
             if started {
-                setStatusMessage("已转到新 Worktree")
+                setStatusMessage("已转到新 Git Worktree")
             }
             return started
         } catch {
@@ -1351,10 +1326,10 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    func managedWorktrees(rootProjectID: String? = nil) -> [WorktreeListItem] {
-        let root = rootProjectID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let root, !root.isEmpty else {
-            return managedWorktrees
+    func managedWorktrees(rootProjectID: String) -> [WorktreeListItem] {
+        let root = rootProjectID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !root.isEmpty else {
+            return []
         }
         return managedWorktrees.filter { $0.worktree.rootProjectID == root }
     }
@@ -1413,7 +1388,7 @@ final class SessionStore: ObservableObject {
             pullRequestStatusByPath.removeValue(forKey: workspace.path)
             pullRequestStatusErrorByPath.removeValue(forKey: workspace.path)
             worktreeErrorMessage = nil
-            setStatusMessage("已删除 Worktree \(workspace.name)")
+            setStatusMessage("已删除 Git Worktree \(workspace.name)")
             return true
         } catch {
             worktreeErrorMessage = error.localizedDescription

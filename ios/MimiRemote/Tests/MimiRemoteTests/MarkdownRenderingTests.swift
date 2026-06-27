@@ -67,6 +67,49 @@ final class MarkdownRenderingTests: XCTestCase {
         XCTAssertFalse(inline.attributed.runs.contains { $0.link?.scheme == "javascript" })
     }
 
+    func testStandaloneImageKeepsRenderableReference() {
+        let result = MarkdownParser.shared.parse("![架构图](/Users/me/project/diagram.png \"当前方案\")")
+        let image = result.blocks.compactMap { block -> MarkdownImageReference? in
+            if case let .image(reference) = block.kind {
+                return reference
+            }
+            return nil
+        }.first
+
+        let reference = try! XCTUnwrap(image)
+        XCTAssertEqual(reference.source, "/Users/me/project/diagram.png")
+        XCTAssertEqual(reference.altText, "架构图")
+        XCTAssertEqual(reference.title, "当前方案")
+        XCTAssertEqual(reference.displayText, "架构图")
+    }
+
+    func testInlineImageFallsBackToText() {
+        let result = MarkdownParser.shared.parse("参考 ![](/tmp/screen.png) 继续分析")
+        let paragraph = result.blocks.compactMap { block -> MarkdownInlineText? in
+            if case let .paragraph(inline) = block.kind {
+                return inline
+            }
+            return nil
+        }.first
+
+        let inline = try! XCTUnwrap(paragraph)
+        XCTAssertEqual(inline.plain, "参考 /tmp/screen.png 继续分析")
+    }
+
+    func testImageReferenceDetectorOnlyReturnsImagePaths() {
+        let references = ConversationFileReferenceDetector.imageReferences(in: """
+        看 /repo/screen.png 和 /repo/report.pdf，再对比 file:///repo/nested/photo.webp。
+        ## photo one.jpeg: /Users/me/Pictures/Photos Library.photoslibrary/resources/derivatives/2/photo one.jpeg
+        """)
+
+        XCTAssertEqual(references.map(\.path), [
+            "/repo/screen.png",
+            "/repo/nested/photo.webp",
+            "/Users/me/Pictures/Photos Library.photoslibrary/resources/derivatives/2/photo one.jpeg"
+        ])
+        XCTAssertEqual(references.map(\.name), ["screen.png", "photo.webp", "photo one.jpeg"])
+    }
+
     func testMixedAndOrderedTaskItemsKeepCheckboxState() {
         let result = MarkdownParser.shared.parse("""
         - [x] 已完成
@@ -249,6 +292,8 @@ private extension MarkdownBlock {
             return blocks.map(\.plainTextForTesting).joined(separator: "\n")
         case let .codeBlock(_, code):
             return code
+        case let .image(reference):
+            return reference.displayText
         case let .table(header, rows, _):
             return (header.map(\.plain) + rows.flatMap { $0.map(\.plain) }).joined(separator: "\n")
         case .thematicBreak:

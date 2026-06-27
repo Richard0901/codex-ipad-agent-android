@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -31,7 +33,8 @@ var version = "0.1.0"
 
 func main() {
 	if err := run(os.Args); err != nil {
-		log.Fatalf("agentd: %v", err)
+		fmt.Fprintf(os.Stderr, "错误：%v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -48,8 +51,16 @@ func run(args []string) error {
 		return nil
 	case "setup":
 		return runSetup(args)
+	case "up":
+		return runUp(args)
 	case "start":
 		return runStart(args)
+	case "restart":
+		return runRestart(args)
+	case "status":
+		return runStatus(args)
+	case "logs":
+		return runLogs(args)
 	case "pair":
 		return runPair(args)
 	case "doctor":
@@ -61,7 +72,7 @@ func run(args []string) error {
 		}
 		return serve(cfg, registry, checker)
 	default:
-		return fmt.Errorf("未知命令 %q，可用命令：setup、start、pair、serve、doctor、version", cmd)
+		return fmt.Errorf("未知命令 %q，可用命令：up、setup、start、restart、status、logs、pair、serve、doctor、version", cmd)
 	}
 }
 
@@ -95,28 +106,99 @@ func runSetup(args []string) error {
 	return nil
 }
 
+func runUp(args []string) error {
+	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "配置文件路径")
+	scanRoot := fs.String("scan-root", "", "项目扫描根目录，默认优先使用 ~/code，其次使用当前目录")
+	browseRoot := fs.String("browse-root", "", "iPad 目录浏览/打开 workspace 的授权根目录，默认使用用户 Home")
+	listen := fs.String("listen", "", "agentd 监听地址，默认优先绑定 Tailscale IP")
+	appServerListen := fs.String("app-server-listen", "", "本机 Codex app-server WebSocket 地址")
+	waitTimeout := fs.Duration("wait", 10*time.Second, "等待后台服务健康检查时间，设置 0 可跳过")
+	asJSON := fs.Bool("json", false, "输出 JSON")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	if !*asJSON {
+		fmt.Fprintln(os.Stdout, "正在准备 Mimi Mac 助手...")
+	}
+	result, err := agentsetup.Run(context.Background(), agentsetup.Options{
+		ConfigPath:      *configPath,
+		ScanRoot:        *scanRoot,
+		BrowseRoot:      *browseRoot,
+		Listen:          *listen,
+		AppServerListen: *appServerListen,
+	})
+	if err != nil {
+		return err
+	}
+	if err := ensureCodexCLIAvailable(result.ConfigPath); err != nil {
+		return err
+	}
+
+	serviceStdout := io.Writer(os.Stdout)
+	serviceStderr := io.Writer(os.Stderr)
+	if *asJSON {
+		serviceStdout = io.Discard
+		serviceStderr = io.Discard
+	}
+	if err := runBrewService("start", serviceStdout, serviceStderr); err != nil {
+		return fmt.Errorf("%w\n\n安装 Homebrew 后请重新运行：agentd up\n排查环境可以运行：agentd doctor --fix", err)
+	}
+
+	serviceOK := true
+	serviceError := ""
+	if err := waitForServiceHealth(context.Background(), result.Endpoint, *waitTimeout); err != nil {
+		serviceOK = false
+		serviceError = err.Error()
+		if *asJSON {
+			return printJSON(map[string]any{
+				"result":        result,
+				"service_ok":    serviceOK,
+				"service_error": serviceError,
+			})
+		}
+		return fmt.Errorf("Mimi Mac 助手还没有启动成功，暂时不要扫码。\n\n原因：%v\n下一步：\n  agentd doctor --fix\n  agentd logs", err)
+	} else if *waitTimeout > 0 {
+		if *asJSON {
+			return printJSON(map[string]any{
+				"result":     result,
+				"service_ok": serviceOK,
+			})
+		}
+		fmt.Fprintln(os.Stdout, "Mimi Mac 助手已准备好")
+	}
+	if *asJSON {
+		return printJSON(map[string]any{
+			"result":     result,
+			"service_ok": serviceOK,
+		})
+	}
+
+	printServeConnection(os.Stdout, result)
+	fmt.Fprintln(os.Stdout, "常用命令：")
+	fmt.Fprintln(os.Stdout, "  agentd status       查看当前连接状态")
+	fmt.Fprintln(os.Stdout, "  agentd pair         刷新配对二维码")
+	fmt.Fprintln(os.Stdout, "  agentd doctor --fix 自动检查并修复常见问题")
+	return nil
+}
+
 func runStart(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "配置文件路径")
 	waitTimeout := fs.Duration("wait", 8*time.Second, "等待后台服务健康检查时间，设置 0 可跳过")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 
-	result, err := agentsetup.Pair(context.Background(), config.DefaultPath())
+	result, err := agentsetup.Pair(context.Background(), *configPath)
 	if err != nil {
 		return fmt.Errorf("读取连接信息失败，请先执行 agentd setup：%w", err)
 	}
-	brew, err := exec.LookPath("brew")
-	if err != nil {
-		return fmt.Errorf("未找到 brew；Homebrew 安装场景请先安装 Homebrew，源码调试请用 agentd serve")
-	}
 
 	fmt.Fprintln(os.Stdout, "正在启动 Homebrew 后台服务...")
-	cmd := exec.Command(brew, "services", "start", config.AppName)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("启动 Homebrew 服务失败：%w", err)
+	if err := runBrewService("start", os.Stdout, os.Stderr); err != nil {
+		return err
 	}
 
 	if err := waitForServiceHealth(context.Background(), result.Endpoint, *waitTimeout); err != nil {
@@ -125,6 +207,118 @@ func runStart(args []string) error {
 		fmt.Fprintln(os.Stdout, "agentd 后台服务已启动")
 	}
 	printServeConnection(os.Stdout, result)
+	return nil
+}
+
+func runRestart(args []string) error {
+	fs := flag.NewFlagSet("restart", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "配置文件路径")
+	waitTimeout := fs.Duration("wait", 8*time.Second, "等待后台服务健康检查时间，设置 0 可跳过")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	result, err := agentsetup.Pair(context.Background(), *configPath)
+	if err != nil {
+		return fmt.Errorf("读取连接信息失败，请先执行 agentd up：%w", err)
+	}
+	fmt.Fprintln(os.Stdout, "正在重启 Mimi Mac 助手...")
+	if err := runBrewService("restart", os.Stdout, os.Stderr); err != nil {
+		return err
+	}
+	if err := waitForServiceHealth(context.Background(), result.Endpoint, *waitTimeout); err != nil {
+		fmt.Fprintf(os.Stdout, "警告：后台服务已重启，但健康检查未通过：%v\n", err)
+	} else if *waitTimeout > 0 {
+		fmt.Fprintln(os.Stdout, "Mimi Mac 助手已重新连接")
+	}
+	printServeConnection(os.Stdout, result)
+	return nil
+}
+
+func runStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "配置文件路径")
+	asJSON := fs.Bool("json", false, "输出 JSON")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	cfg, registry, checker, err := loadRuntimeConfigFromPath(*configPath, true)
+	if err != nil {
+		return err
+	}
+	result := agentsetup.ResultFromConfig(context.Background(), *configPath, cfg)
+	healthErr := waitForServiceHealth(context.Background(), result.Endpoint, time.Second)
+	doctorResults := checker.Run(context.Background(), false)
+	status := map[string]any{
+		"version":      version,
+		"endpoint":     result.Endpoint,
+		"config_path":  result.ConfigPath,
+		"projects":     len(registry.List()),
+		"service_ok":   healthErr == nil,
+		"doctor_ok":    doctorResults.OK,
+		"doctor":       doctorResults,
+		"pair_expires": result.PairExpiresAt,
+	}
+	if healthErr != nil {
+		status["service_error"] = healthErr.Error()
+	}
+	if *asJSON {
+		return printJSON(status)
+	}
+
+	fmt.Fprintln(os.Stdout, "Mimi Mac 助手状态")
+	fmt.Fprintf(os.Stdout, "\n版本：%s\n", version)
+	fmt.Fprintf(os.Stdout, "配置：%s\n", result.ConfigPath)
+	fmt.Fprintf(os.Stdout, "Endpoint：%s\n", result.Endpoint)
+	fmt.Fprintf(os.Stdout, "项目数：%d\n", len(registry.List()))
+	if healthErr == nil {
+		fmt.Fprintln(os.Stdout, "服务：可连接")
+	} else {
+		fmt.Fprintf(os.Stdout, "服务：暂时不可连接（%v）\n", healthErr)
+	}
+	if doctorResults.OK {
+		fmt.Fprintln(os.Stdout, "环境：检查通过")
+	} else {
+		fmt.Fprintln(os.Stdout, "环境：需要处理")
+		printDoctorActions(os.Stdout, doctorResults)
+	}
+	fmt.Fprintln(os.Stdout, "\n下一步：")
+	fmt.Fprintln(os.Stdout, "  agentd pair         刷新配对二维码")
+	fmt.Fprintln(os.Stdout, "  agentd doctor --fix 自动检查并修复常见问题")
+	fmt.Fprintln(os.Stdout, "  agentd logs         查看最近日志")
+	return nil
+}
+
+func runLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	lineCount := fs.Int("n", 120, "显示最近日志行数")
+	follow := fs.Bool("f", false, "跟随日志输出")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	path, err := homebrewLogPath()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "日志文件：%s\n\n", path)
+	if *follow {
+		tail, err := exec.LookPath("tail")
+		if err != nil {
+			return fmt.Errorf("未找到 tail 命令，无法跟随日志：%w", err)
+		}
+		cmd := exec.Command(tail, "-n", fmt.Sprint(*lineCount), "-f", path)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+	lines, err := tailLines(path, *lineCount)
+	if err != nil {
+		return err
+	}
+	for _, line := range lines {
+		fmt.Fprintln(os.Stdout, line)
+	}
 	return nil
 }
 
@@ -149,20 +343,69 @@ func runPair(args []string) error {
 func runDoctor(args []string) error {
 	checkPort := false
 	asJSON := false
-	_, _, checker, err := loadRuntimeConfig(args, true, func(fs *flag.FlagSet) {
-		fs.BoolVar(&checkPort, "check-port", false, "检查当前配置端口是否可监听")
-		fs.BoolVar(&asJSON, "json", false, "只输出 JSON")
-	})
-	if err != nil {
+	fix := false
+	configPath := config.DefaultPath()
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs.StringVar(&configPath, "config", config.DefaultPath(), "配置文件路径")
+	fs.BoolVar(&checkPort, "check-port", false, "检查当前配置端口是否可监听")
+	fs.BoolVar(&asJSON, "json", false, "只输出 JSON")
+	fs.BoolVar(&fix, "fix", false, "自动修复安全的常见问题")
+	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
+	_, _, checker, err := loadRuntimeConfigFromPath(configPath, true)
+	if err != nil {
+		if !fix {
+			return err
+		}
+		fixes, repairedChecker, repairedResults, repairErr := rebuildDoctorConfig(context.Background(), configPath, checkPort)
+		if repairErr != nil {
+			return fmt.Errorf("%v；自动修复也失败：%w", err, repairErr)
+		}
+		if asJSON {
+			return printJSON(map[string]any{"fixes": fixes, "results": repairedResults})
+		}
+		fmt.Fprintf(os.Stdout, "配置加载失败，已尝试自动修复：%v\n\n", err)
+		if len(fixes) > 0 {
+			fmt.Fprintln(os.Stdout, "已修复：")
+			for _, item := range fixes {
+				fmt.Fprintf(os.Stdout, "  OK %s\n", item)
+			}
+			fmt.Fprintln(os.Stdout)
+		}
+		doctor.Print(os.Stdout, repairedResults)
+		_ = repairedChecker
+		if !repairedResults.OK {
+			return fmt.Errorf("doctor 检查未通过")
+		}
+		return nil
+	}
 	results := checker.Run(context.Background(), checkPort)
+	fixes := []string{}
+	if fix {
+		fixes, checker, results, err = runDoctorFix(context.Background(), configPath, checkPort, results)
+		if err != nil {
+			return err
+		}
+	}
 	if asJSON {
-		if err := printJSON(results); err != nil {
+		payload := any(results)
+		if fix {
+			payload = map[string]any{"fixes": fixes, "results": results}
+		}
+		if err := printJSON(payload); err != nil {
 			return err
 		}
 	} else {
+		if fix && len(fixes) > 0 {
+			fmt.Fprintln(os.Stdout, "已修复：")
+			for _, item := range fixes {
+				fmt.Fprintf(os.Stdout, "  OK %s\n", item)
+			}
+			fmt.Fprintln(os.Stdout)
+		}
 		doctor.Print(os.Stdout, results)
+		_ = checker
 	}
 	if !results.OK {
 		return fmt.Errorf("doctor 检查未通过")
@@ -197,6 +440,83 @@ func loadRuntimeConfig(args []string, forDoctor bool, configure ...func(*flag.Fl
 	}
 	checker := doctor.NewChecker(version, cfg, registry)
 	return cfg, registry, checker, nil
+}
+
+func loadRuntimeConfigFromPath(configPath string, forDoctor bool) (config.Config, *projects.Registry, *doctor.Checker, error) {
+	var (
+		cfg config.Config
+		err error
+	)
+	if forDoctor {
+		cfg, err = config.LoadForDoctor(configPath)
+	} else {
+		cfg, err = config.Load(configPath)
+	}
+	if err != nil {
+		return config.Config{}, nil, nil, err
+	}
+	registry, err := projects.NewRegistry(cfg.Projects)
+	if err != nil {
+		return config.Config{}, nil, nil, err
+	}
+	checker := doctor.NewChecker(version, cfg, registry)
+	return cfg, registry, checker, nil
+}
+
+func runDoctorFix(ctx context.Context, configPath string, checkPort bool, current doctor.Results) ([]string, *doctor.Checker, doctor.Results, error) {
+	fixes := []string{}
+	needsSetup := false
+	if _, err := os.Stat(configPath); err != nil {
+		if os.IsNotExist(err) {
+			needsSetup = true
+		} else {
+			return nil, nil, current, fmt.Errorf("读取配置状态失败：%w", err)
+		}
+	}
+	if hasFailedCheck(current, "token") || hasFailedCheck(current, "projects") {
+		needsSetup = true
+	}
+	if needsSetup {
+		setupFixes, err := forceSetupWithBackup(ctx, configPath)
+		if err != nil {
+			return nil, nil, current, err
+		}
+		fixes = append(fixes, setupFixes...)
+	}
+	_, registry, checker, err := loadRuntimeConfigFromPath(configPath, true)
+	if err != nil {
+		return nil, nil, current, err
+	}
+	_ = registry
+	return fixes, checker, checker.Run(ctx, checkPort), nil
+}
+
+func rebuildDoctorConfig(ctx context.Context, configPath string, checkPort bool) ([]string, *doctor.Checker, doctor.Results, error) {
+	fixes, err := forceSetupWithBackup(ctx, configPath)
+	if err != nil {
+		return nil, nil, doctor.Results{}, err
+	}
+	_, _, checker, err := loadRuntimeConfigFromPath(configPath, true)
+	if err != nil {
+		return nil, nil, doctor.Results{}, err
+	}
+	return fixes, checker, checker.Run(ctx, checkPort), nil
+}
+
+func forceSetupWithBackup(ctx context.Context, configPath string) ([]string, error) {
+	fixes := []string{}
+	if fileExists(configPath) {
+		backup, err := backupFile(configPath)
+		if err != nil {
+			return nil, err
+		}
+		fixes = append(fixes, "已备份旧配置："+backup)
+	}
+	if _, err := agentsetup.Run(ctx, agentsetup.Options{ConfigPath: configPath, Force: true}); err != nil {
+		return nil, fmt.Errorf("自动生成配置失败：%w", err)
+	}
+	fixes = append(fixes, "已生成可配对的默认配置")
+	return fixes, nil
 }
 
 func serve(cfg config.Config, registry *projects.Registry, checker *doctor.Checker) error {
@@ -284,10 +604,133 @@ func startManagedAppServerWebSocket(cfg config.Config) (*appserver.ManagedWebSoc
 	})
 }
 
+func runBrewService(action string, stdout, stderr io.Writer) error {
+	brew, err := exec.LookPath("brew")
+	if err != nil {
+		return fmt.Errorf("未找到 Homebrew；请先在 Mac 安装 Homebrew：https://brew.sh")
+	}
+	cmd := exec.Command(brew, "services", action, config.AppName)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("执行 brew services %s %s 失败：%w", action, config.AppName, err)
+	}
+	return nil
+}
+
+func printDoctorActions(w io.Writer, results doctor.Results) {
+	printedHeader := false
+	for _, check := range results.Checks {
+		if check.OK {
+			continue
+		}
+		if !printedHeader {
+			fmt.Fprintln(w, "\n需要处理：")
+			printedHeader = true
+		}
+		fmt.Fprintf(w, "  ! %s：%s\n", check.Name, check.Message)
+		if strings.TrimSpace(check.Fix) != "" {
+			fmt.Fprintf(w, "    处理：%s\n", check.Fix)
+		}
+	}
+}
+
+func homebrewLogPath() (string, error) {
+	candidates := []string{}
+	if brew, err := exec.LookPath("brew"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, brew, "--prefix").Output(); err == nil {
+			prefix := strings.TrimSpace(string(out))
+			if prefix != "" {
+				candidates = append(candidates, filepath.Join(prefix, "var", "log", config.AppName+".log"))
+			}
+		}
+	}
+	candidates = append(candidates,
+		filepath.Join("/opt/homebrew/var/log", config.AppName+".log"),
+		filepath.Join("/usr/local/var/log", config.AppName+".log"),
+	)
+	for _, path := range candidates {
+		if stat, err := os.Stat(path); err == nil && !stat.IsDir() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("未找到 Mimi Mac 助手日志文件；请先运行 agentd up，或用 agentd serve 前台调试")
+}
+
+func tailLines(path string, count int) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开日志文件失败：%w", err)
+	}
+	defer file.Close()
+
+	if count <= 0 {
+		count = 120
+	}
+	lines := make([]string, 0, count)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	for scanner.Scan() {
+		if len(lines) == count {
+			copy(lines, lines[1:])
+			lines[count-1] = scanner.Text()
+			continue
+		}
+		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取日志文件失败：%w", err)
+	}
+	return lines, nil
+}
+
+func hasFailedCheck(results doctor.Results, name string) bool {
+	for _, check := range results.Checks {
+		if check.Name == name && !check.OK {
+			return true
+		}
+	}
+	return false
+}
+
+func backupFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("备份配置前读取失败：%w", err)
+	}
+	backup := fmt.Sprintf("%s.bak-%s", path, time.Now().Format("20060102150405"))
+	if err := os.WriteFile(backup, raw, 0o600); err != nil {
+		return "", fmt.Errorf("写入配置备份失败：%w", err)
+	}
+	return backup, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func printJSON(value any) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
+}
+
+func ensureCodexCLIAvailable(configPath string) error {
+	cfg, err := config.LoadForDoctor(configPath)
+	if err != nil {
+		return fmt.Errorf("读取 Codex 配置失败：%w", err)
+	}
+	bin := strings.TrimSpace(cfg.Codex.Bin)
+	if bin == "" {
+		bin = "codex"
+	}
+	if _, err := exec.LookPath(bin); err != nil {
+		return fmt.Errorf("未找到 Codex CLI，Mimi Mac 助手还不能启动。\n\n请先在这台 Mac 安装并登录 Codex，然后重新运行：\n  agentd up")
+	}
+	return nil
 }
 
 func printSetupResult(w io.Writer, result agentsetup.Result) {
@@ -305,6 +748,9 @@ func printSetupResult(w io.Writer, result agentsetup.Result) {
 	fmt.Fprintf(w, "Token：%s\n", result.Token)
 	fmt.Fprintf(w, "连接链接：%s\n", result.ConnectURL)
 	fmt.Fprintf(w, "配对链接：%s\n", result.PairURL)
+	if result.PairExpiresAt != "" {
+		fmt.Fprintf(w, "二维码有效期至：%s\n", result.PairExpiresAt)
+	}
 	if result.AppServerListen != "" {
 		fmt.Fprintf(w, "app-server upstream：%s\n", result.AppServerListen)
 	}
@@ -325,16 +771,23 @@ func printPairResult(w io.Writer, result agentsetup.Result) {
 	fmt.Fprintf(w, "Token：%s\n", result.Token)
 	fmt.Fprintf(w, "连接链接：%s\n", result.ConnectURL)
 	fmt.Fprintf(w, "配对链接：%s\n", result.PairURL)
+	if result.PairExpiresAt != "" {
+		fmt.Fprintf(w, "二维码有效期至：%s\n", result.PairExpiresAt)
+	}
 	printConnectionQRCode(w, result.ConnectURL)
 	printWarnings(w, result.Warnings)
 }
 
 func printServeConnection(w io.Writer, result agentsetup.Result) {
-	fmt.Fprintln(w, "\n扫码连接 iPad / iPhone：")
-	printConnectionQRCode(w, result.ConnectURL)
-	fmt.Fprintf(w, "连接链接：%s\n", result.ConnectURL)
-	fmt.Fprintf(w, "手动备用：Endpoint=%s Token=%s\n", result.Endpoint, result.Token)
 	printWarnings(w, result.Warnings)
+	fmt.Fprintln(w, "\n用 iPad 扫这个二维码连接这台 Mac：")
+	printConnectionQRCode(w, result.ConnectURL)
+	if result.PairExpiresAt != "" {
+		fmt.Fprintf(w, "二维码 10 分钟内有效，有效期至：%s\n", result.PairExpiresAt)
+	}
+	fmt.Fprintln(w, "扫不了时，在 iPad 的“高级手动连接”里填写：")
+	fmt.Fprintf(w, "  地址：%s\n", result.Endpoint)
+	fmt.Fprintf(w, "  访问码：%s\n", result.Token)
 	fmt.Fprintln(w)
 }
 

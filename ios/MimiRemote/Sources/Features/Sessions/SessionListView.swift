@@ -27,7 +27,7 @@ struct SessionListView: View {
                         Button {
                             Task { await sessionStore.handoffSessionToWorktree(session) }
                         } label: {
-                            Label("转到新 Worktree", systemImage: "arrow.triangle.branch")
+                            Label("转到新 Git Worktree", systemImage: "arrow.triangle.branch")
                         }
                         .disabled(session.isRunning || sessionStore.isCreatingWorktree)
                     }

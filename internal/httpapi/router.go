@@ -75,7 +75,6 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 		mux.HandleFunc("/api/debug/codex-history", r.codexHistoryDebugDisabledHandler)
 	}
 	mux.Handle("/api/projects", r.auth.Middleware(http.HandlerFunc(r.projectsHandler)))
-	mux.Handle("/api/workspaces/chat", r.auth.Middleware(http.HandlerFunc(r.chatWorkspaceHandler)))
 	mux.Handle("/api/workspaces/resolve", r.auth.Middleware(http.HandlerFunc(r.workspaceResolveHandler)))
 	mux.Handle("/api/directories/list", r.auth.Middleware(http.HandlerFunc(r.directoryListHandler)))
 	mux.Handle("/api/files/read", r.auth.Middleware(http.HandlerFunc(r.fileReadHandler)))

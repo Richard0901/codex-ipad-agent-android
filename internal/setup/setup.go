@@ -18,6 +18,7 @@ import (
 )
 
 const defaultAgentDPort = "8787"
+const defaultPairingURLTTL = 10 * time.Minute
 
 type Options struct {
 	ConfigPath      string
@@ -35,6 +36,8 @@ type Result struct {
 	Token              string   `json:"token"`
 	ConnectURL         string   `json:"connect_url"`
 	PairURL            string   `json:"pair_url"`
+	PairIssuedAt       string   `json:"pair_issued_at"`
+	PairExpiresAt      string   `json:"pair_expires_at"`
 	ScanRoot           string   `json:"scan_root"`
 	BrowseRoot         string   `json:"browse_root"`
 	AppServerListen    string   `json:"app_server_listen"`
@@ -166,12 +169,16 @@ func ResultFromConfig(ctx context.Context, configPath string, cfg config.Config)
 	if len(cfg.BrowseRoots) > 0 {
 		browseRoot = cfg.BrowseRoots[0]
 	}
+	now := time.Now().UTC()
+	expiresAt := now.Add(defaultPairingURLTTL)
 	return Result{
 		ConfigPath:         configPath,
 		Endpoint:           endpoint,
 		Token:              token,
-		ConnectURL:         ConnectURL(endpoint, token),
-		PairURL:            PairURL(endpoint, token),
+		ConnectURL:         connectionURL("connect", endpoint, token, now, expiresAt),
+		PairURL:            connectionURL("pair", endpoint, token, now, expiresAt),
+		PairIssuedAt:       now.Format(time.RFC3339),
+		PairExpiresAt:      expiresAt.Format(time.RFC3339),
 		ScanRoot:           scanRoot,
 		BrowseRoot:         browseRoot,
 		AppServerListen:    cfg.AppServer.Listen,
@@ -181,17 +188,25 @@ func ResultFromConfig(ctx context.Context, configPath string, cfg config.Config)
 }
 
 func ConnectURL(endpoint, token string) string {
-	return connectionURL("connect", endpoint, token)
+	now := time.Now().UTC()
+	return connectionURL("connect", endpoint, token, now, now.Add(defaultPairingURLTTL))
 }
 
 func PairURL(endpoint, token string) string {
-	return connectionURL("pair", endpoint, token)
+	now := time.Now().UTC()
+	return connectionURL("pair", endpoint, token, now, now.Add(defaultPairingURLTTL))
 }
 
-func connectionURL(route, endpoint, token string) string {
+func connectionURL(route, endpoint, token string, issuedAt, expiresAt time.Time) string {
 	values := url.Values{}
 	values.Set("endpoint", endpoint)
 	values.Set("token", token)
+	if !issuedAt.IsZero() {
+		values.Set("issued_at", issuedAt.UTC().Format(time.RFC3339))
+	}
+	if !expiresAt.IsZero() {
+		values.Set("expires_at", expiresAt.UTC().Format(time.RFC3339))
+	}
 	return "mimiremote://" + route + "?" + values.Encode()
 }
 
@@ -276,7 +291,7 @@ func endpointForListen(ctx context.Context, listen string) (string, []string) {
 		}
 	}
 	if isLoopbackHost(host) {
-		warnings = append(warnings, "当前 Endpoint 是本机地址，只适合 Mac 本机或模拟器；iPad 真机建议安装并登录 Tailscale 后重新执行 agentd setup --force")
+		warnings = append(warnings, "当前 Endpoint 是本机地址，只适合 Mac 本机或模拟器；iPad 真机建议先安装并登录 Tailscale，再重新运行 agentd up")
 	}
 	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, port)}).String(), warnings
 }

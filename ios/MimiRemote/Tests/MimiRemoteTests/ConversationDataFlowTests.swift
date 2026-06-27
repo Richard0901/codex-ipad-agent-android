@@ -2110,49 +2110,6 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertNil(store.errorMessage)
     }
 
-    func testSessionStoreOpensChatWorkspaceThroughRealWorkspaceFlow() async {
-        let workspace = AgentWorkspace(
-            id: "ws_chats",
-            name: "Chats",
-            path: "/Users/me/.codex/threads",
-            rootProjectID: "ws_chats",
-            rootProjectName: "Chats",
-            rootProjectPath: "/Users/me/.codex/threads"
-        )
-        let chatSession = makeSession(
-            id: "codex_chat",
-            projectID: workspace.id,
-            title: "无项目会话",
-            status: "history",
-            source: "codex",
-            resumeID: "chat"
-        )
-        let client = MockSessionStoreClient(
-            projects: [],
-            sessions: [],
-            workspacePages: [
-                workspace.id: SessionsPage(sessions: [chatSession])
-            ],
-            chatWorkspaceResult: .success(workspace)
-        )
-        let store = SessionStore(
-            appStore: AppStore(),
-            conversationStore: ConversationStore(),
-            logStore: LogStore(),
-            clientFactory: { client }
-        )
-
-        let opened = await store.openChatWorkspace()
-
-        XCTAssertTrue(opened)
-        XCTAssertEqual(client.chatWorkspaceCallCount, 1)
-        XCTAssertEqual(client.requestedWorkspaceIDs, [workspace.id])
-        XCTAssertEqual(store.selectedProjectID, workspace.id)
-        XCTAssertEqual(store.sidebarProjects.map(\.id), [workspace.id])
-        XCTAssertEqual(store.sessions(forProjectID: workspace.id).map(\.id), [chatSession.id])
-        XCTAssertNil(store.errorMessage)
-    }
-
     func testDirectoryListResponseDecodesAgentdPayload() throws {
         let json = """
         {
@@ -4925,7 +4882,7 @@ final class ConversationDataFlowTests: XCTestCase {
         let accepted = await sendTask.value
         XCTAssertTrue(accepted)
         let message = try XCTUnwrap(conversationStore.messages(for: created.id).first)
-        XCTAssertFalse(payloadContainsInlineImage(message.turnPayload))
+        XCTAssertTrue(payloadContainsInlineImage(message.turnPayload))
         XCTAssertTrue(payloadContainsSkill(message.turnPayload, name: "review"))
         XCTAssertEqual(message.turnPayload?.options, options)
     }
@@ -5233,9 +5190,9 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(sent.payload, payload)
     }
 
-    func testRunningSendCompactsInlineImagePayloadOnlyAfterAccepted() async throws {
-        let project = makeProject(id: "proj_compact_payload")
-        let running = makeSession(id: "sess_compact_payload", projectID: project.id, title: "Compact Payload", status: "running", source: "codex")
+    func testRunningSendKeepsInlineImagePayloadAfterAcceptedForPreview() async throws {
+        let project = makeProject(id: "proj_keep_payload")
+        let running = makeSession(id: "sess_keep_payload", projectID: project.id, title: "Keep Payload", status: "running", source: "codex")
         let appStore = AppStore()
         appStore.token = "test-token"
         let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
@@ -5274,16 +5231,17 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(localEcho.turnPayload, payload)
 
         sockets[0].onSendAccepted?(clientMessageID)
-        let compactedMessages = try await waitForConversationMessages(in: conversationStore, sessionID: running.id) { messages in
+        let acceptedMessages = try await waitForConversationMessages(in: conversationStore, sessionID: running.id) { messages in
             guard let message = messages.first(where: { $0.clientMessageID == clientMessageID }) else {
                 return false
             }
-            return !payloadContainsInlineImage(message.turnPayload)
+            return message.sendStatus == .sent
         }
-        let compacted = try XCTUnwrap(compactedMessages.first { $0.clientMessageID == clientMessageID })
-        XCTAssertTrue(payloadContainsImageURL(compacted.turnPayload, url: "https://example.test/diagram.png"))
-        XCTAssertTrue(payloadContainsMention(compacted.turnPayload, name: "README"))
-        XCTAssertEqual(compacted.turnPayload?.textPrompt, "看下这张图")
+        let accepted = try XCTUnwrap(acceptedMessages.first { $0.clientMessageID == clientMessageID })
+        XCTAssertTrue(payloadContainsInlineImage(accepted.turnPayload))
+        XCTAssertTrue(payloadContainsImageURL(accepted.turnPayload, url: "https://example.test/diagram.png"))
+        XCTAssertTrue(payloadContainsMention(accepted.turnPayload, name: "README"))
+        XCTAssertEqual(accepted.turnPayload?.textPrompt, "看下这张图")
     }
 
     func testWebSocketFailureMarksSendingUserMessagesFailedAndIgnoresStaleAccepted() async throws {
@@ -6222,7 +6180,6 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     let workspaceSessionsError: [String: Error]
     let capabilityResults: [String: Result<CapabilityListResponse, Error>]
     let resolveResults: [String: Result<AgentWorkspace, Error>]
-    let chatWorkspaceResult: Result<AgentWorkspace, Error>?
     let worktreeCreateResults: [String: Result<WorktreeCreateResponse, Error>]
     let worktreeBranchResults: [String: Result<WorktreeBranchListResponse, Error>]
     let worktreeListResult: Result<[WorktreeListItem], Error>?
@@ -6245,7 +6202,6 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     var requestedWorkspaceIDs: [String] = []
     var requestedCapabilityPaths: [String?] = []
     var requestedResolvePaths: [String] = []
-    private(set) var chatWorkspaceCallCount = 0
     var requestedWorktreeCreates: [RequestedWorktreeCreate] = []
     var requestedWorktreeBranchPaths: [String] = []
     var requestedWorktreeDeletes: [RequestedWorktreeDelete] = []
@@ -6291,7 +6247,6 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         workspaceSessionsError: [String: Error] = [:],
         capabilityResults: [String: Result<CapabilityListResponse, Error>] = [:],
         resolveResults: [String: Result<AgentWorkspace, Error>] = [:],
-        chatWorkspaceResult: Result<AgentWorkspace, Error>? = nil,
         worktreeCreateResults: [String: Result<WorktreeCreateResponse, Error>] = [:],
         worktreeBranchResults: [String: Result<WorktreeBranchListResponse, Error>] = [:],
         worktreeListResult: Result<[WorktreeListItem], Error>? = nil,
@@ -6332,7 +6287,6 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         self.workspaceSessionsError = workspaceSessionsError
         self.capabilityResults = capabilityResults
         self.resolveResults = resolveResults
-        self.chatWorkspaceResult = chatWorkspaceResult
         self.worktreeCreateResults = worktreeCreateResults
         self.worktreeBranchResults = worktreeBranchResults
         self.worktreeListResult = worktreeListResult
@@ -6378,18 +6332,6 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     func resolveWorkspace(path: String) async throws -> AgentWorkspace {
         requestedResolvePaths.append(path)
         switch resolveResults[path] {
-        case .success(let workspace):
-            return workspace
-        case .failure(let error):
-            throw error
-        case .none:
-            throw MockError.unimplemented
-        }
-    }
-
-    func chatWorkspace() async throws -> AgentWorkspace {
-        chatWorkspaceCallCount += 1
-        switch chatWorkspaceResult {
         case .success(let workspace):
             return workspace
         case .failure(let error):

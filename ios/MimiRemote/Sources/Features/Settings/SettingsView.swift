@@ -56,7 +56,7 @@ struct SettingsView: View {
                     Text("开启后会在对话输入区显示高级运行选项。普通远程使用不需要开启。")
                 }
             }
-            .navigationTitle(isInitialSetup ? "连接 agentd" : "设置")
+            .navigationTitle(isInitialSetup ? "连接你的 Mac" : "设置")
             .toolbar {
                 if !isInitialSetup {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -87,35 +87,60 @@ private struct ConnectionSettingsSections: View {
     @State private var isShowingConnectionSuccess = false
     @State private var connectionSuccessMessage = ""
     @State private var isSavingConnection = false
+    @State private var isShowingAdvancedManualConnection = false
     @State private var localError: String?
 
     var body: some View {
         Group {
+            if isInitialSetup {
+                Section {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("在 Mac 上准备 Mimi Mac 助手", systemImage: "desktopcomputer")
+                            .font(themeStore.uiFont(.headline, weight: .semibold))
+                        Text("Mimi 需要和你的 Mac 配对一次，之后会自动连接本机 Codex 和项目目录。")
+                            .font(themeStore.uiFont(.callout))
+                            .foregroundStyle(.secondary)
+                        Text("先确认 Mac 已安装并登录 Codex CLI，然后在终端运行：")
+                            .font(themeStore.uiFont(.callout, weight: .semibold))
+                        Text("brew install gaixianggeng/tap/mimi-remote\nagentd up")
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 4)
+                } footer: {
+                    Text("Mac 上出现二维码后，回到 iPad 扫码连接。二维码过期时，在 Mac 运行 agentd pair 刷新。你的代码和 Codex 凭证仍留在自己的 Mac 上。")
+                }
+            }
+
             Section {
                 Button {
                     isShowingQRCodeScanner = true
                 } label: {
-                    Label("扫码连接", systemImage: "qrcode.viewfinder")
+                    Label("扫描 Mac 上的二维码", systemImage: "qrcode.viewfinder")
                 }
                 .disabled(isSavingConnection)
             } header: {
-                Text("连接")
+                Text("在 iPad 上配对")
             } footer: {
-                Text("扫描 agentd 启动时输出的二维码后会自动测试连接；测试成功后点击“保存并加载”。")
+                Text("扫描 Mimi Mac 助手显示的二维码后会自动测试连接；成功后直接进入工作台。")
             }
 
             Section {
-                TextField("http://100.x.x.x:8787", text: $endpoint)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
-                SecureField("agentd Token", text: $token)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                DisclosureGroup(isExpanded: $isShowingAdvancedManualConnection) {
+                    TextField("http://100.x.x.x:8787", text: $endpoint)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                    SecureField("访问 Token", text: $token)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                } label: {
+                    Label("高级手动连接", systemImage: "slider.horizontal.3")
+                }
             } header: {
-                Text("手动备用")
+                Text("备用")
             } footer: {
-                Text("二维码不可用时再输入 Endpoint 和 Token。MVP 只建议在本机或 Tailscale 网络中使用。")
+                Text("只有二维码不可用时才需要手动输入地址和访问码。Mimi 只建议在本机、局域网或 Tailscale 中使用。")
             }
 
             Section {
@@ -129,7 +154,7 @@ private struct ConnectionSettingsSections: View {
                 Button {
                     Task { await save() }
                 } label: {
-                    Label("保存并加载", systemImage: "checkmark.circle")
+                    Label("保存并进入工作台", systemImage: "checkmark.circle")
                 }
                 .disabled(!canSubmit)
             }
@@ -141,7 +166,7 @@ private struct ConnectionSettingsSections: View {
                     Text(appStore.connectionStatus.title)
                         .foregroundStyle(statusColor)
                 }
-                if let message = appStore.lastError ?? localError {
+                if let message = displayErrorMessage {
                     Text(message)
                         .foregroundStyle(.red)
                         .font(themeStore.uiFont(size: 13))
@@ -154,7 +179,7 @@ private struct ConnectionSettingsSections: View {
                 Button(role: .destructive) {
                     clearPairing()
                 } label: {
-                    Label("清除配对", systemImage: "trash")
+                    Label("忘记这台 Mac", systemImage: "trash")
                 }
                 .disabled(isSavingConnection || !appStore.isConfigured)
             }
@@ -166,7 +191,7 @@ private struct ConnectionSettingsSections: View {
                 Task { await applyScannedConnection(rawValue) }
             }
         }
-        .alert("测试连接成功", isPresented: $isShowingConnectionSuccess) {
+        .alert("已找到这台 Mac", isPresented: $isShowingConnectionSuccess) {
             Button("好", role: .cancel) {}
         } message: {
             Text(connectionSuccessMessage)
@@ -190,6 +215,30 @@ private struct ConnectionSettingsSections: View {
         case .idle:
             return .secondary
         }
+    }
+
+    private var displayErrorMessage: String? {
+        guard let raw = appStore.lastError ?? localError else {
+            return nil
+        }
+        return friendlyConnectionMessage(raw)
+    }
+
+    private func friendlyConnectionMessage(_ raw: String) -> String {
+        let lowercased = raw.lowercased()
+        if lowercased.contains("expired") || raw.contains("过期") {
+            return "配对二维码已过期，请在 Mac 上重新运行 agentd pair 后扫码。"
+        }
+        if lowercased.contains("unauthorized") || lowercased.contains("401") {
+            return "这台 iPad 没有通过 Mac 助手验证，请重新扫码连接。"
+        }
+        if lowercased.contains("timed out") || lowercased.contains("cannot connect") || raw.contains("无法连接") {
+            return "iPad 暂时找不到这台 Mac。请确认 Mimi Mac 助手正在运行，并且 iPad 和 Mac 在同一网络或 Tailscale 中。"
+        }
+        if raw.contains("Endpoint") || raw.contains("连接链接") {
+            return raw
+        }
+        return "连接没有完成。请确认 Mac 助手正在运行，或重新扫描 Mac 上的配对二维码。"
     }
 
     private func loadInitialConnectionIfNeeded() {
@@ -230,11 +279,18 @@ private struct ConnectionSettingsSections: View {
             guard let url = URL(string: raw) else {
                 throw PairingLinkError.unsupportedURL
             }
-            let credentials = try await appStore.validatePairingURL(url)
-            endpoint = credentials.endpoint
-            token = credentials.token
-            connectionSuccessMessage = "\(credentials.endpoint) 可以连接，现在可以保存并加载。"
-            isShowingConnectionSuccess = true
+            try await appStore.validateAndSavePairingURL(url)
+            endpoint = appStore.endpoint
+            token = appStore.token
+            sessionStore.resetConnectionForSettingsChange(clearData: true)
+            connectionSuccessMessage = "已连接这台 Mac，正在进入工作台。"
+            localError = nil
+            await sessionStore.refreshAll(autoAttach: true)
+            if !isInitialSetup {
+                dismiss()
+            } else {
+                isShowingConnectionSuccess = true
+            }
             localError = nil
         } catch {
             appStore.connectionStatus = .failed(error.localizedDescription)

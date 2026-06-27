@@ -700,6 +700,7 @@ private struct MessageRow: View, Equatable {
             && lhs.message.sendStatus == rhs.message.sendStatus
             && lhs.message.revision == rhs.message.revision
             && lhs.message.renderFingerprint == rhs.message.renderFingerprint
+            && lhs.message.turnPayload == rhs.message.turnPayload
             && lhs.themeVersion == rhs.themeVersion
             && lhs.layout == rhs.layout
     }
@@ -838,7 +839,9 @@ private struct MessageBubble: View {
             fontScale: themeStore.fontScale,
             tokens: tokens
         )
-        if shouldRenderMarkdown {
+        if shouldRenderUserImages {
+            userImageContent(style: style)
+        } else if shouldRenderMarkdown {
             let plan = MessageRenderPlanCache.shared.plan(for: message)
             let references = fileReferences
             if references.isEmpty {
@@ -865,6 +868,52 @@ private struct MessageBubble: View {
         }
     }
 
+    private func userImageContent(style: MarkdownStyle) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            let text = userImageText
+            if !text.isEmpty {
+                Text(text)
+                    .font(style.bodyFont)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ForEach(payloadImageItems) { item in
+                if let source = ConversationImageSource.input(item) {
+                    ConversationImagePreview(
+                        source: source,
+                        title: nil,
+                        style: style,
+                        maxHeight: 240,
+                        showsCaption: false
+                    )
+                }
+            }
+
+            if payloadImageItems.isEmpty {
+                ForEach(contentImageReferences) { reference in
+                    ConversationImagePreview(
+                        source: .localPath(reference.path),
+                        title: nil,
+                        style: style,
+                        maxHeight: 240,
+                        showsCaption: false
+                    )
+                }
+            }
+
+            let accessoryText = payloadAccessoryText
+            if !accessoryText.isEmpty {
+                Text(accessoryText)
+                    .font(style.captionFont)
+                    .foregroundStyle(style.secondaryColor)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     @ViewBuilder
     private func markdownContent(plan: MessageRenderPlan, style: MarkdownStyle) -> some View {
         if plan.isSinglePlainParagraph, case let .paragraph(inline) = plan.blocks.first?.kind {
@@ -884,6 +933,94 @@ private struct MessageBubble: View {
 
     private var shouldRenderMarkdown: Bool {
         message.role == .assistant && message.kind == .message
+    }
+
+    private var shouldRenderUserImages: Bool {
+        message.role == .user
+            && message.kind == .message
+            && (!payloadImageItems.isEmpty || !contentImageReferences.isEmpty)
+    }
+
+    private var payloadImageItems: [CodexAppServerUserInput] {
+        guard let payload = message.turnPayload else {
+            return []
+        }
+        return payload.input.filter { ConversationImageSource.input($0) != nil }
+    }
+
+    private var contentImageReferences: [ConversationFileReference] {
+        guard message.turnPayload == nil || payloadImageItems.isEmpty else {
+            return []
+        }
+        return ConversationFileReferenceDetector.imageReferences(in: message.content)
+    }
+
+    private var userImageText: String {
+        if !payloadImageItems.isEmpty {
+            return payloadText
+        }
+        return contentTextWithoutImagePaths
+    }
+
+    private var payloadText: String {
+        guard let payload = message.turnPayload else {
+            return ""
+        }
+        return payload.input.compactMap { item in
+            if case .text(let text, _) = item {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return nil
+        }
+        .filter { !$0.isEmpty }
+        .joined(separator: "\n")
+    }
+
+    private var contentTextWithoutImagePaths: String {
+        var text = message.content
+        for reference in contentImageReferences {
+            let fileURL = URL(fileURLWithPath: reference.path).absoluteString
+            let variants = [
+                reference.path,
+                reference.path.replacingOccurrences(of: " ", with: "\\ "),
+                fileURL,
+                fileURL.removingPercentEncoding ?? fileURL,
+                "[图片 \(reference.name)]",
+                "[图片]"
+            ]
+            for variant in variants where !variant.isEmpty {
+                text = text.replacingOccurrences(of: variant, with: "")
+            }
+        }
+        text = strippedUserFileMentionPrompt(from: text)
+        return text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "：:，,。.；;"))
+    }
+
+    private func strippedUserFileMentionPrompt(from text: String) -> String {
+        for marker in ["## My request for Codex:", "## My request for Codex："] {
+            if let range = text.range(of: marker, options: [.caseInsensitive]) {
+                return String(text[range.upperBound...])
+            }
+        }
+        return text
+    }
+
+    private var payloadAccessoryText: String {
+        guard let payload = message.turnPayload else {
+            return ""
+        }
+        return payload.input.compactMap { item in
+            switch item {
+            case .skill, .mention:
+                return item.previewText
+            case .text, .image, .localImage:
+                return nil
+            }
+        }
+        .joined(separator: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var fileReferences: [ConversationFileReference] {

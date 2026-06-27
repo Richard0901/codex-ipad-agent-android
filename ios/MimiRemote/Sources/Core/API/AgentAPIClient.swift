@@ -56,11 +56,6 @@ struct AgentAPIClient {
         return response.workspace
     }
 
-    func chatWorkspace() async throws -> AgentWorkspace {
-        let response: WorkspaceResolveResponse = try await request(path: "/api/workspaces/chat", method: "GET", body: Optional<Data>.none)
-        return response.workspace
-    }
-
     func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse {
         let body = try JSONEncoder().encode(WorktreeCreateRequest(path: path, name: name, base: base, branch: branch))
         return try await request(path: "/api/worktrees/create", method: "POST", body: body)

@@ -13,6 +13,19 @@ private struct ComposerChipItem: Identifiable {
     let tint: Color
 }
 
+private extension Color {
+    // 录音状态统一用这支紫色（类似 Slack 的茄紫/靛紫系）：用于麦克风按钮、输入框描边、胶囊等
+    // 单色场景，和下面波形的渐变同源，整组语音 UI 看起来协调。
+    static let voiceRecording = Color(red: 0.45, green: 0.37, blue: 0.92)
+
+    // 波形从左到右的渐变：左端靛紫、中段紫、右端紫粉，参考豆包语音输入法那种明亮的横向渐变。
+    static let voiceWaveformGradient: [Color] = [
+        Color(red: 0.36, green: 0.40, blue: 0.95),
+        Color(red: 0.55, green: 0.36, blue: 0.96),
+        Color(red: 0.80, green: 0.43, blue: 0.97)
+    ]
+}
+
 enum VoiceInputLanguage: String, CaseIterable, Identifiable {
     case automatic
     case chineseSimplified
@@ -108,6 +121,7 @@ struct ComposerView: View {
     @State private var attachmentErrorMessage: String?
     @State private var isVoicePressActive = false
     @State private var isVoiceTranscribing = false
+    @State private var retryableVoiceTranscription: RetryableVoiceTranscription?
     @State private var measuredComposerTextHeight: CGFloat = 0
     @AppStorage("agentd.developerMode") private var developerModeEnabled = false
     @AppStorage(VoiceInputLanguage.storageKey) private var selectedVoiceLanguageID = VoiceInputLanguage.automatic.rawValue
@@ -120,17 +134,21 @@ struct ComposerView: View {
         // 外层不再画大方框：ConversationView 的底部 dock 已经提供了表面色和顶部分隔线，
         // 这里只保留一个真正的输入卡片，避免“框中框”的视觉堆叠。
         VStack(alignment: .leading, spacing: 10) {
-            composerStatusArea
+            foregroundActivityRow
             activeGoalStatusBar
             pendingApprovalAction
             voiceErrorMessage
             voiceNoticeMessage
             attachmentErrorNotice
             attachmentStrip
-            selectedTurnOptionsStrip
+            composerStatusRow
             composerCard(tokens: tokens)
             voiceKeyboardShortcutButton
         }
+        .animation(.easeInOut(duration: 0.18), value: voiceInput.isRecording)
+        .animation(.easeInOut(duration: 0.18), value: voiceInput.isPreparing)
+        .animation(.easeInOut(duration: 0.18), value: isVoicePressActive)
+        .animation(.easeInOut(duration: 0.18), value: isVoiceTranscribing)
         .sheet(isPresented: $showsManualInputSheet) {
             ManualUserInputSheet(kind: manualInputKind) { input in
                 composerState.addAttachment(input)
@@ -173,7 +191,14 @@ struct ComposerView: View {
             composerState.turnOptions = composerState.turnOptions.sanitizedForStandardComposer()
             showsAdvancedOptionsSheet = false
         }
+        .onChange(of: selectedVoiceLanguageID) { _, _ in
+            clearVoiceTransientStatus()
+        }
+        .task(id: voiceInput.errorMessage) {
+            await autoDismissVoiceErrorIfNeeded(voiceInput.errorMessage)
+        }
         .task {
+            voiceInput.prewarm()
             await sessionStore.refreshAppServerModelOptions()
         }
         .onDisappear {
@@ -193,6 +218,7 @@ struct ComposerView: View {
         guard let submitted = composerState.takeDraftForSubmit(isLoading: sessionStore.isLoading, turnOptionsOverride: options) else {
             return false
         }
+        clearVoiceTransientStatus()
         Task {
             let accepted = await sessionStore.sendTurn(submitted.payload)
             if !accepted {
@@ -218,6 +244,7 @@ struct ComposerView: View {
             composerState.restore(submitted)
             return false
         }
+        clearVoiceTransientStatus()
         Task {
             let accepted = await sessionStore.startGoalTurn(payload: submitted.payload, objective: objective)
             if !accepted {
@@ -248,43 +275,79 @@ struct ComposerView: View {
         horizontalSizeClass == .compact
     }
 
+    // 当前活动（“正在执行…”带 spinner 的标题）可能较长，单独占一行，不并入下面的状态行。
     @ViewBuilder
-    private var composerStatusArea: some View {
+    private var foregroundActivityRow: some View {
         if let activity = sessionStore.selectedForegroundActivity {
             composerActivity(activity)
         }
-        if !runtimeChipItems.isEmpty || sessionStore.selectedSession?.isRunning == true {
-            HStack(spacing: 10) {
-                if runtimeChipItems.isEmpty {
-                    Spacer(minLength: 0)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 7) {
-                            ForEach(runtimeChipItems, id: \.text) { item in
-                                runtimeChip(item)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+    }
 
-                // Ctrl-C / 停止 只在 turn 运行时才有意义，跟随“active turn”状态出现，
-                // 不再常驻在输入操作行里占位、徒增灰色禁用按钮。
-                if sessionStore.selectedSession?.isRunning == true {
+    // 输入框上方收敛成一行：左＝常驻只读信息（模型/权限 + seq/usage 等），中＝录音波形，
+    // 右＝会话运行时的 Ctrl-C / 停止。三者各就各位，不再各自独占一整行往上堆。
+    @ViewBuilder
+    private var composerStatusRow: some View {
+        let chips = displayChipItems
+        let showWave = isVoiceActive
+        let showControls = sessionStore.selectedSession?.isRunning == true
+        if !chips.isEmpty || showWave || showControls {
+            HStack(spacing: 10) {
+                if !chips.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(chips) { statusChip($0) }
+                        }
+                        .padding(.vertical, 1)
+                    }
+                    .layoutPriority(0)
+                }
+                // 两侧都留弹性间距：波形固定在视觉中段，控制被推到最右，无论 chips 多长。
+                Spacer(minLength: 8)
+                if showWave {
+                    voiceWaveformContent
+                        .layoutPriority(1)
+                }
+                Spacer(minLength: 8)
+                if showControls {
                     runningControls
+                        .layoutPriority(1)
                 }
             }
         }
     }
 
-    private func runtimeChip(_ item: (text: String, symbol: String, tint: Color)) -> some View {
-        Label(item.text, systemImage: item.symbol)
-            .font(themeStore.uiFont(.caption, weight: .medium))
-            .lineLimit(1)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(item.tint.opacity(0.12), in: Capsule())
-            .foregroundStyle(item.tint)
+    private var isVoiceActive: Bool {
+        voiceInput.isRecording || voiceInput.isPreparing || isVoicePressActive || isVoiceTranscribing
+    }
+
+    // 常驻的只读状态标签：刻意做成扁平、中性底、小字，和底部那排“可点的” bordered 选项按钮
+    // 拉开差距 —— 让用户一眼看出这只是信息展示，点不动。颜色只保留在图标上做轻提示
+    // （比如“完全访问”权限的红色），文字走次要色。
+    private func statusChip(_ item: ComposerChipItem) -> some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+        return HStack(spacing: 4) {
+            Image(systemName: item.symbol)
+                .font(themeStore.uiFont(.caption2, weight: .semibold))
+                .foregroundStyle(item.tint)
+            Text(item.text)
+                .font(themeStore.uiFont(.caption2, weight: .medium))
+                .foregroundStyle(tokens.secondaryText)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(tokens.surface, in: Capsule())
+        .accessibilityElement(children: .combine)
+    }
+
+    // 模型/权限等运行选项 + seq/usage 等运行时指标，都是只读展示，合并进同一组标签，
+    // 顺序上让常驻的运行选项在前（最左），实时指标在后。
+    private var displayChipItems: [ComposerChipItem] {
+        var items = turnOptionChipItems
+        for item in runtimeChipItems {
+            items.append(ComposerChipItem(id: "runtime-\(item.text)", text: item.text, symbol: item.symbol, tint: item.tint))
+        }
+        return items
     }
 
     private var runningControls: some View {
@@ -353,7 +416,6 @@ struct ComposerView: View {
     private func composerCard(tokens: ThemeTokens) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             composerTextArea(tokens: tokens)
-            inlineVoiceRecordingStatus
             voiceReviewNotice
             composerToolbar(tokens: tokens)
         }
@@ -369,7 +431,7 @@ struct ComposerView: View {
     private func composerTextArea(tokens: ThemeTokens) -> some View {
         ZStack(alignment: .topLeading) {
             ComposerTextView(
-                text: $composerState.draft,
+                text: composerDraftBinding,
                 font: composerUIFont,
                 textColor: UIColor(tokens.primaryText),
                 tintColor: UIColor(tokens.accent),
@@ -402,15 +464,30 @@ struct ComposerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var composerDraftBinding: Binding<String> {
+        Binding(
+            get: { composerState.draft },
+            set: { newValue in
+                guard newValue != composerState.draft else {
+                    return
+                }
+                composerState.draft = newValue
+                clearVoiceTransientStatus()
+            }
+        )
+    }
+
     private func composerCardBorderColor(_ tokens: ThemeTokens) -> Color {
         if voiceInput.isRecording {
-            return Color.red.opacity(0.78)
+            // 录音时只给输入框一圈很淡的玫瑰红描边作为氛围提示，真正“正在录音”的强调交给
+            // 上方那条带波形的胶囊；不再用浓红粗框把整个输入框圈起来。
+            return Color.voiceRecording.opacity(0.4)
         }
         if voiceInput.isPreparing || isVoicePressActive {
-            return tokens.accent.opacity(0.62)
+            return tokens.accent.opacity(0.55)
         }
         if isVoiceTranscribing {
-            return tokens.accent.opacity(0.55)
+            return tokens.accent.opacity(0.5)
         }
         return tokens.border
     }
@@ -426,7 +503,11 @@ struct ComposerView: View {
     }
 
     private var composerCardBorderWidth: CGFloat {
-        voiceInput.isRecording || voiceInput.isPreparing || isVoicePressActive ? 1.5 : 1
+        // 录音时不再加粗描边，靠颜色而非粗细提示，避免“大红框”观感；准备阶段仍略加粗。
+        if voiceInput.isPreparing || isVoicePressActive {
+            return 1.5
+        }
+        return voiceInput.isRecording ? 1.25 : 1
     }
 
     private func composerToolbar(tokens: ThemeTokens) -> some View {
@@ -511,6 +592,7 @@ struct ComposerView: View {
                 },
                 onShortcut: { shortcut in
                     composerState.insertShortcut(shortcut)
+                    clearVoiceTransientStatus()
                     showsAddContentPanel = false
                 }
             )
@@ -687,85 +769,66 @@ struct ComposerView: View {
         .accessibilityValue(permissionTitle)
     }
 
+    // 录音/准备/转写的实时状态，作为状态行中段的胶囊。波形单独订阅 levelMeter，
+    // 不会带动整条 ComposerView 重绘。紧凑布局（iPhone）下只留波形、隐去文案，避免一行挤不下。
     @ViewBuilder
-    private var inlineVoiceRecordingStatus: some View {
+    private var voiceWaveformContent: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
         if isVoiceTranscribing {
-            HStack(spacing: 8) {
+            voiceActivityCapsule(tint: tokens.accent) {
                 ProgressView()
                     .controlSize(.small)
-                Text("模型转写中 · \(selectedVoiceLanguage.title)")
-                    .lineLimit(1)
-            }
-            .font(themeStore.uiFont(.caption, weight: .medium))
-            .foregroundStyle(themeStore.tokens(for: colorScheme).secondaryText)
-            .padding(.horizontal, 8)
-            .frame(height: 30)
-            .background(themeStore.tokens(for: colorScheme).elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(themeStore.tokens(for: colorScheme).border)
+                    .tint(tokens.accent)
+                if !isCompactComposer {
+                    Text("模型转写中 · \(selectedVoiceLanguage.title)")
+                        .lineLimit(1)
+                }
             }
         } else if voiceInput.isRecording {
-            HStack(spacing: 8) {
-                VoiceWaveformView(meter: voiceInput.levelMeter, isActive: true, tint: .red)
-                    .frame(width: isCompactComposer ? 88 : 124, height: 30)
-                Text("现在说话，松手转写 · \(selectedVoiceLanguage.title)")
-                    .lineLimit(1)
+            voiceActivityCapsule(tint: .voiceRecording, emphasized: true) {
+                VoiceWaveformView(meter: voiceInput.levelMeter, isActive: true)
+                    .frame(width: isCompactComposer ? 110 : 168, height: 28)
+                if !isCompactComposer {
+                    Text("正在听，松手转写 · \(selectedVoiceLanguage.title)")
+                        .lineLimit(1)
+                }
             }
-            .font(themeStore.uiFont(.caption, weight: .medium))
-            .foregroundStyle(.red)
-            .padding(.horizontal, 10)
-            .frame(height: 40)
-            .background(Color.red.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.red.opacity(0.58))
-            }
-            .shadow(color: Color.red.opacity(0.12), radius: 10, y: 3)
         } else if voiceInput.isPreparing || isVoicePressActive {
-            HStack(spacing: 8) {
+            voiceActivityCapsule(tint: tokens.accent) {
                 ProgressView()
                     .controlSize(.small)
-                    .tint(themeStore.tokens(for: colorScheme).accent)
-                Text("正在准备麦克风，出现红色波形后再说 · \(selectedVoiceLanguage.title)")
-                    .lineLimit(1)
-            }
-            .font(themeStore.uiFont(.caption, weight: .medium))
-            .foregroundStyle(themeStore.tokens(for: colorScheme).accent)
-            .padding(.horizontal, 10)
-            .frame(height: 36)
-            .background(themeStore.tokens(for: colorScheme).accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(themeStore.tokens(for: colorScheme).accent.opacity(0.40))
+                    .tint(tokens.accent)
+                if !isCompactComposer {
+                    Text("正在准备…")
+                        .lineLimit(1)
+                }
             }
         }
+    }
+
+    private func voiceActivityCapsule<Content: View>(
+        tint: Color,
+        emphasized: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 8) {
+            content()
+        }
+        .font(themeStore.uiFont(.caption, weight: .medium))
+        .foregroundStyle(tint)
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .background(tint.opacity(emphasized ? 0.12 : 0.1), in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(tint.opacity(emphasized ? 0.4 : 0.32))
+        }
+        .shadow(color: emphasized ? tint.opacity(0.12) : .clear, radius: 8, y: 2)
+        .fixedSize(horizontal: true, vertical: false)
+        .transition(.scale(scale: 0.9).combined(with: .opacity))
     }
 
     private var modelOptionsForMenu: [CodexAppServerModelOption] {
         sessionStore.appServerModelOptions.isEmpty ? CodexAppServerModelOption.builtInFallback : sessionStore.appServerModelOptions
-    }
-
-    @ViewBuilder
-    private var selectedTurnOptionsStrip: some View {
-        let items = turnOptionChipItems
-        if !items.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 7) {
-                    ForEach(items) { item in
-                        Label(item.text, systemImage: item.symbol)
-                            .font(themeStore.uiFont(.caption, weight: .medium))
-                            .lineLimit(1)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .foregroundStyle(item.tint)
-                            .background(item.tint.opacity(0.12), in: Capsule())
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel("当前运行选项")
-        }
     }
 
     private var turnOptionChipItems: [ComposerChipItem] {
@@ -889,11 +952,42 @@ struct ComposerView: View {
         if let errorMessage = voiceInput.errorMessage {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
                 Text(errorMessage)
                     .lineLimit(2)
+                    .layoutPriority(1)
+                    .foregroundStyle(.red)
+                Spacer(minLength: 0)
+                if retryableVoiceTranscription != nil {
+                    Button {
+                        retryVoiceTranscription()
+                    } label: {
+                        if isVoiceTranscribing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("重试转写", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .font(themeStore.uiFont(.caption, weight: .semibold))
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(isVoiceTranscribing)
+                    .accessibilityLabel("重试语音转写")
+                    .help("重新提交刚才的录音")
+                }
+                Button {
+                    clearVoiceTransientStatus()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .imageScale(.medium)
+                        .foregroundStyle(.red.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭语音转写错误提示")
+                .help("关闭提示")
             }
             .font(themeStore.uiFont(.caption))
-            .foregroundStyle(.red)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -1074,6 +1168,7 @@ struct ComposerView: View {
         guard !isVoicePressActive && !voiceInput.isPreparing && !voiceInput.isRecording && !isVoiceTranscribing else {
             return
         }
+        clearVoiceTransientStatus()
         isVoicePressActive = true
         composerState.beginVoiceInput()
         let language = selectedVoiceLanguage
@@ -1113,9 +1208,42 @@ struct ComposerView: View {
     }
 
     @MainActor
+    private func clearVoiceTransientStatus() {
+        retryableVoiceTranscription = nil
+        voiceInput.setErrorMessage(nil)
+        voiceInput.setNoticeMessage(nil)
+    }
+
+    @MainActor
+    private func autoDismissVoiceErrorIfNeeded(_ message: String?) async {
+        guard let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        let delay = voiceErrorAutoDismissDelaySeconds(for: message)
+        try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+        guard !Task.isCancelled,
+              voiceInput.errorMessage == message,
+              !isVoiceTranscribing else {
+            return
+        }
+        clearVoiceTransientStatus()
+    }
+
+    private func voiceErrorAutoDismissDelaySeconds(for message: String) -> UInt64 {
+        if let retryAfter = Self.retryAfterSeconds(from: message) {
+            // 429/临时不可用会给出 retry-after；提示至少保留到可重试窗口之后，
+            // 但也设上限，避免底部红条永久占位。
+            return UInt64(min(max(retryAfter + 5, 12), 45))
+        }
+        return 12
+    }
+
+    @MainActor
     private func transcribeVoiceRecording(_ recording: VoiceRecordingResult, language: VoiceInputLanguage) async {
         isVoiceTranscribing = true
+        retryableVoiceTranscription = nil
         voiceInput.setErrorMessage(nil)
+        var retryCandidate: RetryableVoiceTranscription?
         defer {
             isVoiceTranscribing = false
             composerState.endVoiceInput()
@@ -1131,6 +1259,14 @@ struct ComposerView: View {
                 voiceInput.setErrorMessage(shortVoiceRecordingMessage(recording: recording, usableDuration: usableDuration))
                 return
             }
+            retryCandidate = RetryableVoiceTranscription(
+                filename: recording.fileURL.lastPathComponent,
+                contentType: "audio/mp4",
+                audioData: data,
+                language: language,
+                recordedDuration: usableDuration,
+                pressDuration: recording.pressDuration
+            )
             let response = try await sessionStore.transcribeVoice(
                 filename: recording.fileURL.lastPathComponent,
                 contentType: "audio/mp4",
@@ -1139,8 +1275,57 @@ struct ComposerView: View {
                 prompt: language.transcriptionPrompt
             )
             composerState.applyVoiceTranscript(response.text)
+            retryableVoiceTranscription = nil
         } catch {
             voiceInput.setErrorMessage(userFacingVoiceTranscriptionError(error, recording: recording))
+            if let retryCandidate, Self.isRetryableVoiceTranscriptionError(error) {
+                // 临时上游错误时保留这次录音的内存副本，用户点一次即可重发；
+                // 成功、录音过短、权限错误等场景不保留，避免错误按钮误导用户。
+                retryableVoiceTranscription = retryCandidate
+            } else {
+                retryableVoiceTranscription = nil
+            }
+        }
+    }
+
+    private func retryVoiceTranscription() {
+        guard let retryableVoiceTranscription, !isVoiceTranscribing else {
+            return
+        }
+        Task {
+            await transcribeCachedVoiceRecording(retryableVoiceTranscription)
+        }
+    }
+
+    @MainActor
+    private func transcribeCachedVoiceRecording(_ cached: RetryableVoiceTranscription) async {
+        isVoiceTranscribing = true
+        composerState.beginVoiceInput()
+        voiceInput.setErrorMessage(nil)
+        defer {
+            isVoiceTranscribing = false
+            composerState.endVoiceInput()
+        }
+        do {
+            let response = try await sessionStore.transcribeVoice(
+                filename: cached.filename,
+                contentType: cached.contentType,
+                audioData: cached.audioData,
+                language: cached.language.transcriptionLanguageCode,
+                prompt: cached.language.transcriptionPrompt
+            )
+            composerState.applyVoiceTranscript(response.text)
+            if retryableVoiceTranscription?.id == cached.id {
+                retryableVoiceTranscription = nil
+            }
+            voiceInput.setNoticeMessage("语音已重新转写，请确认草稿后发送")
+        } catch {
+            voiceInput.setErrorMessage(userFacingVoiceTranscriptionError(error))
+            if Self.isRetryableVoiceTranscriptionError(error) {
+                retryableVoiceTranscription = cached
+            } else if retryableVoiceTranscription?.id == cached.id {
+                retryableVoiceTranscription = nil
+            }
         }
     }
 
@@ -1182,7 +1367,94 @@ struct ComposerView: View {
             }
             return "没有识别到清晰语音，请按住说完整句后再松手"
         }
+        if Self.isTemporaryUnavailableVoiceErrorMessage(message) {
+            if let seconds = Self.retryAfterSeconds(from: message) {
+                return "语音转写暂不可用，请 \(seconds) 秒后重试"
+            }
+            return "语音转写暂不可用，请稍后重试"
+        }
+        if Self.isTimeoutVoiceErrorMessage(message) {
+            return "语音转写请求超时，请稍后重试"
+        }
         return "语音转写失败：\(message)"
+    }
+
+    nonisolated private static func isRetryableVoiceTranscriptionError(_ error: Error) -> Bool {
+        if let apiError = error as? AgentAPIError,
+           case AgentAPIError.server(let status, let message) = apiError {
+            if isNonRetryableVoiceErrorMessage(message) {
+                return false
+            }
+            if status == 408 || status == 429 {
+                return true
+            }
+            if status == 500 || status == 502 || status == 503 || status == 504 {
+                return true
+            }
+            return isTemporaryUnavailableVoiceErrorMessage(message) || isTimeoutVoiceErrorMessage(message)
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .networkConnectionLost, .cannotConnectToHost, .notConnectedToInternet, .dnsLookupFailed:
+                return true
+            default:
+                break
+            }
+        }
+        let message = error.localizedDescription
+        if isNonRetryableVoiceErrorMessage(message) {
+            return false
+        }
+        return isTemporaryUnavailableVoiceErrorMessage(message) || isTimeoutVoiceErrorMessage(message)
+    }
+
+    nonisolated private static func isNonRetryableVoiceErrorMessage(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("api key")
+            || lower.contains("codex login")
+            || message.contains("登录态已失效")
+            || message.contains("麦克风权限")
+            || message.contains("没有识别到语音内容")
+            || message.contains("按住说话至少")
+    }
+
+    nonisolated private static func isTemporaryUnavailableVoiceErrorMessage(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("http 429")
+            || lower.contains("429")
+            || lower.contains("temporarily unavailable")
+            || lower.contains("retry_after")
+            || lower.contains("rate limit")
+            || lower.contains("try again")
+            || message.contains("暂不可用")
+            || message.contains("稍后重试")
+    }
+
+    nonisolated private static func isTimeoutVoiceErrorMessage(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("timed out")
+            || lower.contains("timeout")
+            || message.contains("超时")
+    }
+
+    nonisolated private static func retryAfterSeconds(from message: String) -> Int? {
+        let patterns = [
+            #""retry_after_seconds"\s*:\s*(\d+)"#,
+            #"请\s*(\d+)\s*秒后重试"#
+        ]
+        let range = NSRange(message.startIndex..<message.endIndex, in: message)
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+            guard let match = regex.firstMatch(in: message, range: range),
+                  let secondsRange = Range(match.range(at: 1), in: message),
+                  let seconds = Int(message[secondsRange]) else {
+                continue
+            }
+            return seconds
+        }
+        return nil
     }
 
     private func loadPhotoAttachment(_ item: PhotosPickerItem) {
@@ -1814,9 +2086,9 @@ private struct VoiceMicButton: View {
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
         let isActive = isPreparing || isRecording || isTranscribing
-        let foreground = isRecording ? Color.red : tokens.accent
-        let background = isRecording ? Color.red.opacity(0.20) : tokens.accent.opacity(isActive ? 0.14 : 0.10)
-        let border = isRecording ? Color.red.opacity(0.72) : tokens.accent.opacity(isActive ? 0.54 : 0.42)
+        let foreground = isRecording ? Color.voiceRecording : tokens.accent
+        let background = isRecording ? Color.voiceRecording.opacity(0.15) : tokens.accent.opacity(isActive ? 0.14 : 0.10)
+        let border = isRecording ? Color.voiceRecording.opacity(0.5) : tokens.accent.opacity(isActive ? 0.54 : 0.42)
 
         HStack(spacing: 8) {
             if isPreparing {
@@ -1841,7 +2113,7 @@ private struct VoiceMicButton: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(border)
         }
-        .shadow(color: isRecording ? Color.red.opacity(0.18) : .clear, radius: 10, y: 3)
+        .shadow(color: isRecording ? Color.voiceRecording.opacity(0.14) : .clear, radius: 10, y: 3)
         .scaleEffect(isActive ? 1.04 : 1)
         .animation(.easeInOut(duration: 0.15), value: isActive)
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -1901,7 +2173,6 @@ private struct VoiceMicButton: View {
 private struct VoiceWaveformView: View {
     @ObservedObject var meter: VoiceLevelMeter
     let isActive: Bool
-    let tint: Color
 
     var body: some View {
         GeometryReader { proxy in
@@ -1909,55 +2180,63 @@ private struct VoiceWaveformView: View {
             let spacing: CGFloat = 3
             let count = max(samples.count, 1)
             let availableWidth = max(0, proxy.size.width - spacing * CGFloat(max(count - 1, 0)))
-            let barWidth = max(3, min(5, availableWidth / CGFloat(count)))
+            let barWidth = max(2.5, min(4, availableWidth / CGFloat(count)))
 
-            HStack(alignment: .center, spacing: spacing) {
-                ForEach(samples, id: \.offset) { index, level in
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [tint.opacity(isActive ? 0.95 : 0.45), tint.opacity(isActive ? 0.62 : 0.28)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .frame(width: barWidth, height: barHeight(index: index, level: level, maxHeight: proxy.size.height))
-                        .animation(.linear(duration: 0.08), value: level)
+            // 用一条铺满整个宽度的横向渐变，再用竖条形状做 mask：每根条只露出它所在位置的渐变色，
+            // 于是整组波形从左到右是平滑的紫色渐变，而不是每根单独着色拼出来的硬边。
+            LinearGradient(
+                colors: Color.voiceWaveformGradient,
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .mask {
+                HStack(alignment: .center, spacing: spacing) {
+                    ForEach(samples, id: \.offset) { index, level in
+                        RoundedRectangle(cornerRadius: barWidth / 2, style: .continuous)
+                            .frame(width: barWidth, height: barHeight(index: index, level: level, maxHeight: proxy.size.height))
+                            .animation(.easeOut(duration: 0.07), value: level)
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .opacity(isActive ? 1 : 0.45)
         }
     }
 
     private func barHeight(index: Int, level: CGFloat, maxHeight: CGFloat) -> CGFloat {
-        let minHeight: CGFloat = 4
+        let minHeight: CGFloat = 3
         let usable = max(0, maxHeight - minHeight)
         guard isActive else {
             // 静止时给一点高低错落，避免看起来像坏掉的直线。
-            return minHeight + (index.isMultiple(of: 2) ? 4 : 0)
+            return minHeight + (index.isMultiple(of: 2) ? 3 : 0)
         }
-        let visibleLevel = max(level, index.isMultiple(of: 3) ? 0.14 : 0.08)
-        return minHeight + pow(visibleLevel, 0.72) * usable
+        // 线性铺满整段高度，不再额外做幂次压缩：安静时贴近底部、说话时直接冲到顶，
+        // 上下起伏拉满，用户一眼能看出“到底有没有采到声音”。
+        let visibleLevel = max(level, 0.05)
+        return minHeight + visibleLevel * usable
     }
 }
 
 @MainActor
 private final class VoiceLevelMeter: ObservableObject {
-    static let barCount = 16
+    static let barCount = 22
 
     @Published private(set) var samples: [CGFloat] = Array(repeating: 0, count: VoiceLevelMeter.barCount)
 
     func push(_ level: CGFloat) {
         var next = samples
         next.removeFirst()
-        next.append(pow(max(0, min(1, level)), 0.62))
+        // 直接存归一化后的电平，不再做 pow 压缩：压缩会把小信号抬高、削掉动态对比，
+        // 正是导致“波形上下几乎不动”的元凶。动态范围交给 normalizedPower 的 dB 映射控制。
+        next.append(max(0, min(1, level)))
         samples = next
     }
 
     func prepareForRecording() {
-        // 录音器刚启动时 meter 还没吐出第一帧；先给一个低幅度基线，用户按下后立刻能看到反馈。
+        // 录音器刚启动时 meter 还没吐出第一帧；先给一个很低的基线，用户按下后立刻能看到细条，
+        // 一开口就会明显窜高，形成清晰的“静默 → 说话”落差。
         samples = (0..<Self.barCount).map { index in
-            index.isMultiple(of: 3) ? 0.18 : 0.10
+            index.isMultiple(of: 3) ? 0.12 : 0.07
         }
     }
 
@@ -2349,6 +2628,17 @@ private final class VoiceInputController: NSObject, ObservableObject {
         }
     }
 
+    func prewarm() {
+        // 进入对话页时先把音频会话 category 配好（不激活、不触发麦克风指示灯）。
+        // 这样真正按住说话时只需 setActive + record，省掉冷启动里最慢的 category 切换，
+        // 缩短“按下 → 看到红色波形”的可感知延迟。
+        guard recorder == nil, !isRecording else {
+            return
+        }
+        try? AVAudioSession.sharedInstance().setCategory(.record, mode: .measurement, options: [.duckOthers])
+        VoiceHaptics.prepareRecordingStarted()
+    }
+
     private func startRecording() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .measurement, options: [.duckOthers])
@@ -2382,13 +2672,18 @@ private final class VoiceInputController: NSObject, ObservableObject {
         meteringTask?.cancel()
         meteringTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 80_000_000)
+                // 45ms ≈ 22fps：比原来的 80ms 更跟手，波形随语音瞬态跳动而不是一卡一卡，
+                // 同时仍远低于会让主线程吃紧的刷新频率。
+                try? await Task.sleep(nanoseconds: 45_000_000)
                 await MainActor.run {
                     guard let self, let recorder = self.recorder, self.isRecording else {
                         return
                     }
                     recorder.updateMeters()
-                    let level = Self.normalizedPower(fromDecibels: recorder.averagePower(forChannel: 0))
+                    let level = Self.normalizedPower(
+                        average: recorder.averagePower(forChannel: 0),
+                        peak: recorder.peakPower(forChannel: 0)
+                    )
                     self.levelMeter.push(level)
                 }
             }
@@ -2468,15 +2763,30 @@ private final class VoiceInputController: NSObject, ObservableObject {
         finishHandler = nil
     }
 
-    nonisolated private static func normalizedPower(fromDecibels db: Float) -> CGFloat {
-        // 录音器直接给 dBFS；-60dB 以下按静音处理，映射到波形高度 0...1。
-        let clamped = max(-60, min(0, db))
-        return CGFloat((clamped + 60) / 60)
+    nonisolated private static func normalizedPower(average: Float, peak: Float) -> CGFloat {
+        // 以峰值为主、平均值兜底：峰值让波形对说话的瞬态更灵敏，平均值压住静音段的底噪抖动。
+        // 人声说话时峰值常窜到 -20...-3 dBFS，安静时落在 -45 以下；把映射区间收紧到 [-45, -3]，
+        // 让“安静≈0、说话≈铺满”的落差最大化，解决波形上下几乎不动的问题。
+        let floorDB: Float = -45
+        let ceilDB: Float = -3
+        let blended = max(average, peak - 6)
+        let clamped = max(floorDB, min(ceilDB, blended))
+        return CGFloat((clamped - floorDB) / (ceilDB - floorDB))
     }
 }
 
 private struct VoiceRecordingResult {
     let fileURL: URL
+    let recordedDuration: TimeInterval
+    let pressDuration: TimeInterval
+}
+
+private struct RetryableVoiceTranscription: Identifiable {
+    let id = UUID()
+    let filename: String
+    let contentType: String
+    let audioData: Data
+    let language: VoiceInputLanguage
     let recordedDuration: TimeInterval
     let pressDuration: TimeInterval
 }

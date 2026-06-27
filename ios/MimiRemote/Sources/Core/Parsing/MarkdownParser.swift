@@ -37,6 +37,9 @@ struct MarkdownParser {
         let range = sourceByteRange(for: markup, lineIndex: lineIndex, baseByteOffset: baseByteOffset)
 
         if let paragraph = markup as? Paragraph {
+            if let image = standaloneImageReference(from: paragraph.children) {
+                return MarkdownBlock(id: id, sourceByteRange: range, kind: .image(image))
+            }
             return MarkdownBlock(id: id, sourceByteRange: range, kind: .paragraph(inlineText(from: paragraph.children)))
         }
 
@@ -151,6 +154,25 @@ struct MarkdownParser {
         var builder = InlineTextBuilder()
         children.forEach { builder.append($0) }
         return builder.build()
+    }
+
+    private func standaloneImageReference(from children: MarkupChildren) -> MarkdownImageReference? {
+        let children = Array(children)
+        guard children.count == 1,
+              let image = children.first as? Markdown.Image,
+              let source = image.source?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty
+        else {
+            return nil
+        }
+
+        let altText = inlineText(from: image.children).plain.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = image.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return MarkdownImageReference(
+            source: source,
+            altText: altText.isEmpty ? nil : altText,
+            title: title?.isEmpty == false ? title : nil
+        )
     }
 
     private func sourceByteRange(
@@ -308,7 +330,11 @@ private struct InlineTextBuilder {
             }
             markdownLink.children.forEach { append($0, intent: intent, link: safeLink ?? link) }
         case let image as Markdown.Image:
+            let beforeCount = plain.count
             image.children.forEach { append($0, intent: intent, link: link) }
+            if plain.count == beforeCount, let source = image.source {
+                append(source, intent: intent, link: link)
+            }
         case let html as InlineHTML:
             append(html.rawHTML, intent: intent, link: link)
         case let symbol as SymbolLink:

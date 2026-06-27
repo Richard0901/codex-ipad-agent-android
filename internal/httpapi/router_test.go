@@ -1632,54 +1632,6 @@ func TestWorkspaceResolveAllowsBrowseRootDirectoryWithSelfBinding(t *testing.T) 
 	}
 }
 
-func TestChatWorkspaceCreatesAndResolvesCodexThreadsWorkspace(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	server := newTestServer(t)
-
-	rec := httptest.NewRecorder()
-	server.handler.ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/workspaces/chat", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("chat workspace 应成功，实际 %d body=%s", rec.Code, rec.Body.String())
-	}
-	chatPath := filepath.Join(home, ".codex", "threads")
-	realChatPath, err := filepath.EvalSymlinks(chatPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stat, err := os.Stat(realChatPath); err != nil || !stat.IsDir() {
-		t.Fatalf("chat workspace 应创建真实目录：stat=%v err=%v", stat, err)
-	}
-
-	body := decodeJSON(t, rec)
-	workspace, ok := body["workspace"].(map[string]any)
-	if !ok {
-		t.Fatalf("workspace 响应异常：%v", body)
-	}
-	if workspace["name"] != "Chats" || workspace["path"] != realChatPath {
-		t.Fatalf("chat workspace 基础字段异常：%v", workspace)
-	}
-	if workspace["root_project_id"] != workspace["id"] || workspace["root_project_path"] != realChatPath {
-		t.Fatalf("chat workspace 应自指 root 字段：%v", workspace)
-	}
-	if workspace["trusted"] != true || workspace["can_start_session"] != true {
-		t.Fatalf("chat workspace 应允许作为真实会话 cwd：%v", workspace)
-	}
-
-	rec = httptest.NewRecorder()
-	server.handler.ServeHTTP(rec, authedRequest(t, http.MethodPost, "/api/workspaces/resolve", map[string]string{
-		"path": chatPath,
-	}))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("chat workspace 应可被 resolve 复核，实际 %d body=%s", rec.Code, rec.Body.String())
-	}
-	resolvedBody := decodeJSON(t, rec)
-	resolved, ok := resolvedBody["workspace"].(map[string]any)
-	if !ok || resolved["id"] != workspace["id"] || resolved["path"] != realChatPath {
-		t.Fatalf("resolve 后应返回同一个 chat workspace：%v", resolvedBody)
-	}
-}
-
 func TestWorkspaceResolveRejectsOutsidePathWithoutLeakingDetails(t *testing.T) {
 	server := newTestServer(t)
 	outside := filepath.Join(t.TempDir(), "outside")

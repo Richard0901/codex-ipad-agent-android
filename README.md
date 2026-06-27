@@ -66,13 +66,10 @@ brew install gaixianggeng/tap/mimi-remote
 codex --version
 codex app-server --help
 
-agentd setup
-agentd doctor --check-port
-agentd start
-agentd doctor
+agentd up
 ```
 
-`agentd setup` 会生成：
+`agentd up` 会完成首次使用的主流程：
 
 - 用户配置，macOS 默认在 `~/Library/Application Support/mimi-remote/config.json`，Linux 默认在 `~/.config/mimi-remote/config.json`
 - iPad 访问 `agentd` 的随机 Token
@@ -80,27 +77,45 @@ agentd doctor
 - 默认项目扫描目录，优先 `~/code`，否则使用执行 `setup` 时所在目录
 - 默认目录浏览授权根（`browse_roots`）：用户 Home。iPad 端可以浏览并打开 Home 下任意目录作为工作区（如 `~/finance`）；它不参与项目发现，会话也只绑定打开的那个目录。隐藏目录、`~/Library` 和常见缓存目录不会出现在浏览列表里。要收窄范围用 `agentd setup --force --browse-root <目录>`，或直接编辑配置里的 `browse_roots`
 - 默认 loopback app-server upstream：`ws://127.0.0.1:4222`
+- 启动 Homebrew 后台服务，并等待 `/healthz` 可用
+- 在当前终端输出 iPad 扫码配对二维码
 
-`agentd setup` 会打印实际配置文件路径。首次运行前需要先安装并登录 Codex CLI；`agentd doctor --check-port` 会检查 `codex app-server` 是否支持当前需要的 WebSocket 参数。
+首次运行前需要先安装并登录 Codex CLI；`agentd up` 会复用已有配置，不会重复覆盖已配对的 Token。需要排查环境时运行 `agentd doctor --fix`。
 
 如果 Mac 已安装并登录 Tailscale，`setup` 会优先把 `agentd` 绑定到 Tailscale IP；否则会使用 `127.0.0.1:8787` 并给出真机 iPad 不可直连的警告。
 
-`agentd start` 会调用 `brew services start mimi-remote` 后台启动服务，等待 `/healthz` 可用，然后在当前终端输出扫码连接二维码。`agentd serve` 只有在交互式前台终端运行时才会输出二维码；作为 Homebrew service 后台运行时不会把 Token 写入服务日志。`agentd setup` 和 `agentd pair` 会输出同一份连接信息：
+`agentd up` 和 `agentd start` 会调用 `brew services start mimi-remote` 后台启动服务，等待 `/healthz` 可用，然后在当前终端输出扫码连接二维码。`agentd serve` 只有在交互式前台终端运行时才会输出二维码；作为 Homebrew service 后台运行时不会把 Token 写入服务日志。`agentd up`、`agentd start` 和 `agentd pair` 会输出连接信息：
 
 ```text
 Endpoint：http://100.x.x.x:8787
 Token：<随机 token>
 连接链接：mimiremote://connect?endpoint=...&token=...
 配对链接：mimiremote://pair?endpoint=...&token=...
+二维码有效期至：<UTC 时间>
 ```
 
-iPad App 首次启动后优先点“扫码连接”，扫描二维码会自动填入 Endpoint/Token 并测试连接；测试成功后点击“保存并加载”。二维码和连接链接只包含 iPad 访问 `agentd` 的外侧 Token，不包含本机 app-server upstream token。扫码不可用时再手动输入 Endpoint/Token。
+iPad App 首次启动后优先点“扫描 Mac 上的配对二维码”，扫描二维码会自动填入 Endpoint/Token 并测试连接；测试成功后点击“保存并加载”。二维码和连接链接只包含 iPad 访问 `agentd` 的外侧 Token，不包含本机 app-server upstream token。二维码过期后重新运行 `agentd pair` 刷新；扫码不可用时再展开“高级手动连接”输入 Endpoint/Token。
 
 常用命令：
 
 ```bash
-# 启动 Homebrew 后台服务，并在当前终端显示扫码二维码
-agentd start
+# 首次使用：生成配置、启动后台服务、显示扫码二维码
+agentd up
+
+# 查看服务、连接和环境状态
+agentd status
+
+# 刷新配对二维码
+agentd pair
+
+# 自动检查并修复安全的常见问题
+agentd doctor --fix
+
+# 查看最近日志
+agentd logs
+
+# 重启 Homebrew 后台服务
+agentd restart
 
 # 重新生成配置和 token
 agentd setup --force
@@ -113,9 +128,6 @@ agentd setup --force --browse-root "$HOME/code"
 
 # 指定监听地址，例如手动绑定 Tailscale IP
 agentd setup --listen "$(tailscale ip -4):8787"
-
-# 查看配对信息
-agentd pair
 
 # 机器可读输出，适合脚本或后续二维码工具
 agentd pair --json
@@ -477,13 +489,6 @@ curl -H "Authorization: Bearer $AGENTD_TOKEN" \
 ```bash
 curl -H "Authorization: Bearer $AGENTD_TOKEN" \
   http://127.0.0.1:8787/api/app-server/config
-```
-
-打开无项目 Chats 工作区（返回并确保 `~/.codex/threads` 作为真实 cwd 可用）：
-
-```bash
-curl -H "Authorization: Bearer $AGENTD_TOKEN" \
-  http://127.0.0.1:8787/api/workspaces/chat
 ```
 
 目录浏览（供 iPad「打开工作区」选目录和预览文件用；只列允许范围内的一级目录/普通文件，不递归）：

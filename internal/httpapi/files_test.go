@@ -73,6 +73,80 @@ func TestFileReadRejectsOutsidePathWithoutLeakingDetails(t *testing.T) {
 	}
 }
 
+func TestFileReadAllowsPhotosDerivativeImage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	server := newTestServer(t)
+	photoDir := filepath.Join(home, "Pictures", "Photos Library.photoslibrary", "resources", "derivatives", "2")
+	if err := os.MkdirAll(photoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	imagePath := filepath.Join(photoDir, "screen shot.jpeg")
+	imageBytes := []byte{0xff, 0xd8, 0xff, 0xd9}
+	if err := os.WriteFile(imagePath, imageBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, body := readPreviewFile(t, server.handler, imagePath)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("照片库 derivatives 图片应可读取，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	realPath, err := filepath.EvalSymlinks(imagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["path"] != realPath || body["name"] != "screen shot.jpeg" {
+		t.Fatalf("响应应包含照片真实路径和文件名：%v", body)
+	}
+	if !strings.HasPrefix(body["content_type"].(string), "image/jpeg") {
+		t.Fatalf("照片库 jpeg 应识别为图片：%v", body["content_type"])
+	}
+	data, err := base64.StdEncoding.DecodeString(body["content_base64"].(string))
+	if err != nil {
+		t.Fatalf("content_base64 应可解码：%v", err)
+	}
+	if string(data) != string(imageBytes) {
+		t.Fatalf("文件内容不正确：%v", data)
+	}
+}
+
+func TestFileReadRejectsPhotosLibraryOutsideDerivatives(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	server := newTestServer(t)
+	photoDir := filepath.Join(home, "Pictures", "Photos Library.photoslibrary", "originals")
+	if err := os.MkdirAll(photoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	imagePath := filepath.Join(photoDir, "original.jpeg")
+	if err := os.WriteFile(imagePath, []byte{0xff, 0xd8, 0xff, 0xd9}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := readPreviewFile(t, server.handler, imagePath)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("非 derivatives 照片库文件应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFileReadRejectsOutsideImagePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	server := newTestServer(t)
+	outside := filepath.Join(t.TempDir(), "outside.jpeg")
+	if err := os.WriteFile(outside, []byte{0xff, 0xd8, 0xff, 0xd9}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _ := readPreviewFile(t, server.handler, outside)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("普通外部图片仍应被拒绝，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFileReadRejectsDirectoryPath(t *testing.T) {
 	server := newTestServer(t)
 	projectDir := configuredProjectPath(t, server.handler)

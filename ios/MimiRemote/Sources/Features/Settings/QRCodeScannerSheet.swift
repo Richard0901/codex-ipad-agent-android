@@ -34,7 +34,7 @@ struct QRCodeScannerSheet: View {
                         Text("正在启动相机")
                             .font(.headline)
                             .foregroundStyle(.white)
-                        Text("如果系统弹出权限请求，请允许相机访问。")
+                        Text("如果系统弹出权限请求，请允许相机访问，用来扫描 Mac 上的配对二维码。")
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.78))
                             .multilineTextAlignment(.center)
@@ -45,7 +45,7 @@ struct QRCodeScannerSheet: View {
                 }
             }
             .ignoresSafeArea(edges: .bottom)
-            .navigationTitle("扫码连接")
+            .navigationTitle("扫描配对二维码")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

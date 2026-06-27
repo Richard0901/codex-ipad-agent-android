@@ -87,7 +87,7 @@ private enum SessionInspectorSection: String, CaseIterable, Identifiable {
         case .activity:
             return "活动"
         case .diff:
-            return "文件"
+            return "Git"
         case .approval:
             return "审批"
         }

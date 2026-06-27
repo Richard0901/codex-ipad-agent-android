@@ -701,22 +701,43 @@ enum ConversationFileReferenceDetector {
         "md", "numbers", "pages", "pdf", "png", "ppt", "pptx", "rtf", "txt", "webp",
         "xls", "xlsx", "yaml", "yml", "zip"
     ]
-    private static let tokenSeparators = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+    private static let imageExtensions: Set<String> = ["gif", "heic", "jpeg", "jpg", "png", "webp"]
     private static let edgeTrimCharacters = CharacterSet(charactersIn: "`\"'“”‘’()[]{}<>.,;")
+    private static let pathStartBoundaryCharacters = CharacterSet.whitespacesAndNewlines
+        .union(.controlCharacters)
+        .union(CharacterSet(charactersIn: "`\"'“”‘’([{<：:，,;；"))
+    private static let candidateStopCharacters = CharacterSet.newlines
+        .union(.controlCharacters)
+        .union(CharacterSet(charactersIn: "`\"'“”‘’<>"))
+    private static let extensionTerminatorCharacters = CharacterSet.whitespacesAndNewlines
+        .union(.controlCharacters)
+        .union(CharacterSet(charactersIn: "`\"'“”‘’()[]{}<>,;:.!?。！？、，；："))
 
     static func references(in text: String, limit: Int = 5) -> [ConversationFileReference] {
+        references(in: text, limit: limit, allowedExtensions: previewExtensions)
+    }
+
+    static func imageReferences(in text: String, limit: Int = 5) -> [ConversationFileReference] {
+        references(in: text, limit: limit, allowedExtensions: imageExtensions)
+    }
+
+    private static func references(
+        in text: String,
+        limit: Int,
+        allowedExtensions: Set<String>
+    ) -> [ConversationFileReference] {
         guard limit > 0 else {
             return []
         }
 
         var result: [ConversationFileReference] = []
         var seen = Set<String>()
-        for rawToken in text.components(separatedBy: tokenSeparators) {
-            guard let path = normalizedPathCandidate(rawToken) else {
+        for candidate in pathCandidates(in: text, allowedExtensions: allowedExtensions) {
+            guard let path = normalizedPathCandidate(candidate) else {
                 continue
             }
             let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
-            guard previewExtensions.contains(ext), seen.insert(path).inserted else {
+            guard allowedExtensions.contains(ext), seen.insert(path).inserted else {
                 continue
             }
             result.append(ConversationFileReference(path: path, name: URL(fileURLWithPath: path).lastPathComponent))
@@ -725,6 +746,110 @@ enum ConversationFileReferenceDetector {
             }
         }
         return result
+    }
+
+    private static func pathCandidates(in text: String, allowedExtensions: Set<String>) -> [String] {
+        let extensions = allowedExtensions
+            .sorted { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }
+
+        var result: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            guard isPathStart(in: text, at: index) else {
+                index = text.index(after: index)
+                continue
+            }
+
+            if let candidate = pathCandidate(in: text, start: index, allowedExtensions: extensions) {
+                result.append(candidate.value)
+                index = candidate.end
+            } else {
+                index = text.index(after: index)
+            }
+        }
+        return result
+    }
+
+    private static func pathCandidate(
+        in text: String,
+        start: String.Index,
+        allowedExtensions: [String]
+    ) -> (value: String, end: String.Index)? {
+        var index = start
+        while index < text.endIndex {
+            if index != start, isPathStart(in: text, at: index) {
+                return nil
+            }
+
+            let character = text[index]
+            if characterBelongsToSet(character, candidateStopCharacters) {
+                return nil
+            }
+
+            if character == "." {
+                let extensionStart = text.index(after: index)
+                for ext in allowedExtensions where hasCaseInsensitivePrefix(ext, in: text, at: extensionStart) {
+                    guard let extensionEnd = text.index(extensionStart, offsetBy: ext.count, limitedBy: text.endIndex),
+                          isExtensionTerminator(in: text, at: extensionEnd)
+                    else {
+                        continue
+                    }
+                    return (String(text[start..<extensionEnd]), extensionEnd)
+                }
+            }
+
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private static func isPathStart(in text: String, at index: String.Index) -> Bool {
+        guard hasPathStartBoundary(in: text, at: index) else {
+            return false
+        }
+        if hasCaseInsensitivePrefix("file://", in: text, at: index) {
+            return true
+        }
+        guard text[index] == "/" else {
+            return false
+        }
+        let nextIndex = text.index(after: index)
+        if nextIndex < text.endIndex, text[nextIndex] == "/" {
+            return false
+        }
+        return true
+    }
+
+    private static func hasPathStartBoundary(in text: String, at index: String.Index) -> Bool {
+        guard index > text.startIndex else {
+            return true
+        }
+        let previousIndex = text.index(before: index)
+        return characterBelongsToSet(text[previousIndex], pathStartBoundaryCharacters)
+    }
+
+    private static func isExtensionTerminator(in text: String, at index: String.Index) -> Bool {
+        guard index < text.endIndex else {
+            return true
+        }
+        let character = text[index]
+        return character == "?"
+            || character == "#"
+            || characterBelongsToSet(character, extensionTerminatorCharacters)
+    }
+
+    private static func hasCaseInsensitivePrefix(_ prefix: String, in text: String, at index: String.Index) -> Bool {
+        guard let end = text.index(index, offsetBy: prefix.count, limitedBy: text.endIndex) else {
+            return false
+        }
+        return text[index..<end].lowercased() == prefix.lowercased()
+    }
+
+    private static func characterBelongsToSet(_ character: Character, _ set: CharacterSet) -> Bool {
+        guard character.unicodeScalars.count == 1, let scalar = character.unicodeScalars.first else {
+            return false
+        }
+        return set.contains(scalar)
     }
 
     private static func normalizedPathCandidate(_ raw: String) -> String? {
@@ -736,10 +861,15 @@ enum ConversationFileReferenceDetector {
             token = String(token[..<queryIndex])
         }
         if token.lowercased().hasPrefix("file://") {
-            guard let url = URL(string: token), url.isFileURL else {
-                return nil
+            let rawPath = String(token.dropFirst("file://".count))
+            if rawPath.hasPrefix("/") {
+                token = rawPath.removingPercentEncoding ?? rawPath
+            } else {
+                guard let url = URL(string: token), url.isFileURL else {
+                    return nil
+                }
+                token = url.path
             }
-            token = url.path
         }
         token = stripLineSuffix(from: token)
         guard token.hasPrefix("/"), token.count > 1, !token.contains("\u{0}") else {
@@ -1245,8 +1375,8 @@ enum ConnectionStatus: Equatable {
             return "未连接"
         case .testing:
             return "连接中"
-        case .connected(let version):
-            return "已连接 \(version)"
+        case .connected:
+            return "已连接 Mac 助手"
         case .failed:
             return "连接失败"
         }

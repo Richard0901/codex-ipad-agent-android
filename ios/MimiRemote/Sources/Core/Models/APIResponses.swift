@@ -1101,16 +1101,13 @@ enum CodexAppServerUserInput: Codable, Hashable, Identifiable {
 
     var retainedAfterAcceptedSend: CodexAppServerUserInput? {
         switch self {
-        case .image(let url, _):
-            return Self.isInlineImageDataURL(url) ? nil : self
+        case .image:
+            // 图片消息发送成功后仍然要保留可渲染来源，否则 UI 只能剩下「[图片]」占位。
+            // 这里牺牲一点内存，换取当前会话里的真实图片预览和失败重试一致性。
+            return self
         default:
             return self
         }
-    }
-
-    private static func isInlineImageDataURL(_ value: String) -> Bool {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .range(of: "data:image/", options: [.anchored, .caseInsensitive]) != nil
     }
 
     var previewText: String {
