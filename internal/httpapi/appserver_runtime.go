@@ -1155,7 +1155,6 @@ func appServerThreadStatusValueToSessionStatus(status appServerThreadStatus) str
 func safeThreadStartParams(project projects.Project) map[string]any {
 	return map[string]any{
 		"cwd":               project.RealPath,
-		"model":             defaultCodexAppServerModel,
 		"approvalPolicy":    "on-request",
 		"approvalsReviewer": "user",
 		"sandbox":           "danger-full-access",
@@ -1182,7 +1181,6 @@ func safeTurnStartParams(threadID string, project projects.Project, prompt strin
 		}},
 		"approvalPolicy":    "on-request",
 		"approvalsReviewer": "user",
-		"model":             defaultCodexAppServerModel,
 		"effort":            defaultCodexReasoningEffort,
 		"sandboxPolicy": map[string]any{
 			"type":          "dangerFullAccess",

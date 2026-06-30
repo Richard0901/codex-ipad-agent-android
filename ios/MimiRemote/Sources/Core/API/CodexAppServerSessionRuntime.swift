@@ -119,7 +119,7 @@ actor CodexAppServerSessionRuntime {
     }
 
     func modelOptions() async throws -> [CodexAppServerModelOption] {
-        let result = try await ensureConnection().send(
+        let result = try await sendRecoveringFromStaleInitialization(
             CodexAppServerRequestBuilder(allowlistedProjects: try await projects()).modelList()
         )
         return CodexAppServerModelOption.parseListResult(result)
@@ -163,7 +163,7 @@ actor CodexAppServerSessionRuntime {
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: projects)
         let spec = try builder.threadList(cwd: project.path, limit: limit, cursor: cursor)
 
-        let result = try await ensureConnection().send(spec, timeout: threadListRequestTimeout)
+        let result = try await sendRecoveringFromStaleInitialization(spec, timeout: threadListRequestTimeout)
         let page = threadListPage(from: result, projects: projects, fallbackProject: project)
         for session in page.sessions {
             contextsBySessionID[session.id] = CodexAppServerSessionContext(
@@ -183,7 +183,7 @@ actor CodexAppServerSessionRuntime {
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: projects)
         let spec = try builder.threadList(cwd: listCWD, limit: limit, cursor: cursor)
 
-        let result = try await ensureConnection().send(spec, timeout: threadListRequestTimeout)
+        let result = try await sendRecoveringFromStaleInitialization(spec, timeout: threadListRequestTimeout)
         let page = threadListPage(from: result, projects: projects, fallbackProject: workspaceProject)
         for session in page.sessions {
             contextsBySessionID[session.id] = CodexAppServerSessionContext(
@@ -281,7 +281,9 @@ actor CodexAppServerSessionRuntime {
     }
 
     func session(id: SessionID, afterSeq: EventSequence?) async throws -> SessionResponse {
-        let result = try await ensureConnection().send(CodexAppServerRequestBuilder(allowlistedProjects: try await projects()).threadRead(threadID: id, includeTurns: false))
+        let result = try await sendRecoveringFromStaleInitialization(
+            CodexAppServerRequestBuilder(allowlistedProjects: try await projects()).threadRead(threadID: id, includeTurns: false)
+        )
         guard let thread = threadObject(from: result) else {
             throw CodexAppServerSessionRuntimeError.sessionNotFound(id)
         }
@@ -296,7 +298,7 @@ actor CodexAppServerSessionRuntime {
 
     func threadGoal(threadID: SessionID) async throws -> ThreadGoal? {
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
-        let result = try await ensureConnection().send(builder.threadGoalGet(threadID: threadID))
+        let result = try await sendRecoveringFromStaleInitialization(builder.threadGoalGet(threadID: threadID))
         guard let goal = threadGoal(from: result) else {
             clearThreadGoalLocal(threadID: threadID)
             emit(.goalCleared(metadata(threadID: threadID, turnID: nil)))
@@ -316,7 +318,7 @@ actor CodexAppServerSessionRuntime {
     ) async throws -> ThreadGoal {
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
         let normalizedObjective = objective?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let result = try await ensureConnection().send(builder.threadGoalSet(
+        let result = try await sendRecoveringFromStaleInitialization(builder.threadGoalSet(
             threadID: threadID,
             objective: normalizedObjective?.isEmpty == false ? normalizedObjective : nil,
             status: status,
@@ -332,7 +334,7 @@ actor CodexAppServerSessionRuntime {
 
     func clearThreadGoal(threadID: SessionID) async throws {
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
-        _ = try await ensureConnection().send(builder.threadGoalClear(threadID: threadID))
+        _ = try await sendRecoveringFromStaleInitialization(builder.threadGoalClear(threadID: threadID))
         clearThreadGoalLocal(threadID: threadID)
         emit(.goalCleared(metadata(threadID: threadID, turnID: nil)))
     }
@@ -373,15 +375,19 @@ actor CodexAppServerSessionRuntime {
                 : try builder.threadResume(threadID: payload.resumeID, projectID: payload.projectID, options: payload.turnOptions)
         }
 
-        let result = try await ensureConnection().send(spec)
+        let result = try await sendRecoveringFromStaleInitialization(spec)
         guard let thread = threadObject(from: result) else {
             throw AgentAPIError.invalidResponse
         }
         var session = try agentSession(from: thread, projects: projects, fallbackProject: project, forceRunning: true)
         let cwd = session.dir
         contextsBySessionID[session.id] = CodexAppServerSessionContext(session: session, cwd: cwd, activeTurnID: session.activeTurnID)
-        // thread/start 与 thread/resume 都已经把 thread 绑定到当前连接，记录下来避免随后的 turn/start 再重复 resume。
-        threadsResumedOnConnection.insert(session.id)
+        let turnPayload = CodexAppServerTurnPayload(input: payload.input, options: payload.turnOptions)
+        if !turnPayload.isEmpty {
+            // thread/start 后立刻 turn/start 仍沿用当前连接；但空会话没有立即 turn，
+            // 后续监听/发送前必须补 thread/resume，否则真实 app-server 可能不回推事件。
+            threadsResumedOnConnection.insert(session.id)
+        }
 
         let initialGoalObjective = payload.initialGoalObjective?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let initialGoalObjective, !initialGoalObjective.isEmpty {
@@ -393,7 +399,6 @@ actor CodexAppServerSessionRuntime {
             }
         }
 
-        let turnPayload = CodexAppServerTurnPayload(input: payload.input, options: payload.turnOptions)
         if !turnPayload.isEmpty {
             let turnID = try await startTurn(
                 sessionID: session.id,
@@ -420,7 +425,7 @@ actor CodexAppServerSessionRuntime {
             return
         }
         let spec = CodexAppServerRequestBuilder(allowlistedProjects: try await projects()).turnInterrupt(threadID: id, turnID: activeTurnID)
-        _ = try await ensureConnection().send(spec)
+        _ = try await sendRecoveringFromStaleInitialization(spec)
         _ = withUpdatedSession(id) { item in
             item.status = "closed"
             item.activeTurnID = nil
@@ -432,7 +437,7 @@ actor CodexAppServerSessionRuntime {
         let spec = archived
             ? builder.threadArchive(threadID: id)
             : builder.threadUnarchive(threadID: id)
-        _ = try await ensureConnection().send(spec)
+        _ = try await sendRecoveringFromStaleInitialization(spec)
         if archived {
             contextsBySessionID.removeValue(forKey: id)
             threadHistoryCacheBySessionID.removeValue(forKey: id)
@@ -445,7 +450,7 @@ actor CodexAppServerSessionRuntime {
         let projects = projectsIncludingWorkspace(baseProjects, workspace: workspace)
         var options = CodexAppServerTurnOptions.default
         options.threadSource = "worktree_handoff"
-        let result = try await ensureConnection().send(
+        let result = try await sendRecoveringFromStaleInitialization(
             try CodexAppServerRequestBuilder(allowlistedProjects: projects).threadFork(
                 threadID: threadID,
                 cwd: workspace.path,
@@ -480,7 +485,7 @@ actor CodexAppServerSessionRuntime {
             )
         }
         let projects = try await projects()
-        let result = try await ensureConnection().send(
+        let result = try await sendRecoveringFromStaleInitialization(
             CodexAppServerRequestBuilder(allowlistedProjects: projects).threadRead(threadID: sessionID, includeTurns: true),
             timeout: Self.bulkReadTimeout
         )
@@ -668,19 +673,28 @@ actor CodexAppServerSessionRuntime {
             sessionsStartingTurn.remove(sessionID)
         }
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: projectsIncludingSessionContext(try await projects(), context: context))
-        let connection = try await ensureConnection()
         let result: CodexAppServerJSONValue?
-        do {
-            try await ensureThreadResumedOnConnection(sessionID: sessionID, cwd: context.cwd, builder: builder, connection: connection)
-            result = try await connection.send(try builder.turnStart(
-                threadID: sessionID,
-                cwd: context.cwd,
-                payload: payload,
-                clientMessageID: clientMessageID
-            ))
-        } catch {
-            await retireCurrentConnectionAfterRecoverableError(connection, error: error)
-            throw error
+        var didRetryAfterStaleInitialization = false
+        while true {
+            let connection = try await ensureConnection()
+            do {
+                try await ensureThreadResumedOnConnection(sessionID: sessionID, cwd: context.cwd, builder: builder, connection: connection)
+                result = try await connection.send(try builder.turnStart(
+                    threadID: sessionID,
+                    cwd: context.cwd,
+                    payload: payload,
+                    clientMessageID: clientMessageID
+                ))
+                break
+            } catch {
+                if !didRetryAfterStaleInitialization,
+                   await recoverConnectionAfterStaleInitialization(connection, error: error) {
+                    didRetryAfterStaleInitialization = true
+                    continue
+                }
+                await retireCurrentConnectionAfterRecoverableError(connection, error: error)
+                throw error
+            }
         }
         let turnID = result?["turn"]?.objectValue?["id"]?.stringValue
         if let turnID {
@@ -709,19 +723,28 @@ actor CodexAppServerSessionRuntime {
             throw CodexAppServerSessionRuntimeError.missingActiveTurn(sessionID)
         }
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: projectsIncludingSessionContext(try await projects(), context: context))
-        let connection = try await ensureConnection()
-        do {
-            try await ensureThreadResumedOnConnection(sessionID: sessionID, cwd: context.cwd, builder: builder, connection: connection)
-            _ = try await connection.send(try builder.turnSteer(
-                threadID: sessionID,
-                cwd: context.cwd,
-                payload: payload,
-                clientMessageID: clientMessageID,
-                expectedTurnID: expectedTurnID
-            ))
-        } catch {
-            await retireCurrentConnectionAfterRecoverableError(connection, error: error)
-            throw error
+        var didRetryAfterStaleInitialization = false
+        while true {
+            let connection = try await ensureConnection()
+            do {
+                try await ensureThreadResumedOnConnection(sessionID: sessionID, cwd: context.cwd, builder: builder, connection: connection)
+                _ = try await connection.send(try builder.turnSteer(
+                    threadID: sessionID,
+                    cwd: context.cwd,
+                    payload: payload,
+                    clientMessageID: clientMessageID,
+                    expectedTurnID: expectedTurnID
+                ))
+                return
+            } catch {
+                if !didRetryAfterStaleInitialization,
+                   await recoverConnectionAfterStaleInitialization(connection, error: error) {
+                    didRetryAfterStaleInitialization = true
+                    continue
+                }
+                await retireCurrentConnectionAfterRecoverableError(connection, error: error)
+                throw error
+            }
         }
     }
 
@@ -732,10 +755,9 @@ actor CodexAppServerSessionRuntime {
         turnStartTasksBySessionID.removeValue(forKey: sessionID)
     }
 
-    // 直连发送路径下，目标 thread 可能只在 thread/list 里出现过，但没有在当前 gateway 连接上 resume。
-    // app-server 不会向「没在本连接 resume/start 过」的 thread 推送 turn 事件，于是直接 turn/start 会
-    // 看不到任何回复（也收不到 turn/completed，active turn 角标会一直挂着）。这里在首次 turn/start 前补
-    // 一次按当前连接的 resume，事件才会回流；连接重连后集合清空，会自动重新补上。
+    // 直连发送路径下，thread 可能只在 thread/list 或 thread/start 里出现过，但没有在当前 gateway
+    // 连接上执行过 thread/resume。真实 app-server 只有 resume 后才稳定建立 live listener；
+    // 否则 turn/start 虽然被接受，iPad 也可能收不到 turn/started、delta 和 completed，界面就会一直等待。
     private func ensureThreadResumedOnConnection(
         sessionID: SessionID,
         cwd: String,
@@ -786,7 +808,7 @@ actor CodexAppServerSessionRuntime {
             throw CodexAppServerSessionRuntimeError.missingActiveTurn(sessionID)
         }
         let spec = CodexAppServerRequestBuilder(allowlistedProjects: try await projects()).turnInterrupt(threadID: sessionID, turnID: turnID)
-        _ = try await ensureConnection().send(spec)
+        _ = try await sendRecoveringFromStaleInitialization(spec)
     }
 
     func respondToApproval(sessionID: SessionID? = nil, approvalID: String, decision: String) async throws {
@@ -922,6 +944,44 @@ actor CodexAppServerSessionRuntime {
         }
     }
 
+    private func sendRecoveringFromStaleInitialization(
+        _ request: CodexAppServerRequestSpec,
+        timeout: TimeInterval? = nil
+    ) async throws -> CodexAppServerJSONValue? {
+        let firstConnection = try await ensureConnection()
+        do {
+            return try await firstConnection.send(request, timeout: timeout)
+        } catch {
+            if await recoverConnectionAfterStaleInitialization(firstConnection, error: error) {
+                let secondConnection = try await ensureConnection()
+                do {
+                    return try await secondConnection.send(request, timeout: timeout)
+                } catch {
+                    await retireCurrentConnectionAfterRecoverableError(secondConnection, error: error)
+                    throw error
+                }
+            }
+            await retireCurrentConnectionAfterRecoverableError(firstConnection, error: error)
+            throw error
+        }
+    }
+
+    private func recoverConnectionAfterStaleInitialization(_ stale: CodexAppServerConnection, error: Error) async -> Bool {
+        guard isStaleInitializationError(error) else {
+            return false
+        }
+        if let current = connection, current === stale {
+            // app-server upstream 重启或 gateway 旧连接错位时会返回 -32600 Not initialized。
+            // 这不是用户请求本身非法，丢弃当前连接并重新 initialize 后重试一次即可自愈。
+            await retireConnection(stale)
+        } else {
+            // 并发发送/重连可能已经把 actor 里的 current connection 清空或替换；
+            // stale 请求仍应允许重试一次，但不能误删另一条刚建立好的连接。
+            await stale.disconnect()
+        }
+        return true
+    }
+
     private func retireConnection(_ stale: CodexAppServerConnection) async {
         notificationPumpTask?.cancel()
         notificationPumpTask = nil
@@ -956,9 +1016,30 @@ actor CodexAppServerSessionRuntime {
         switch error {
         case .disconnected, .notInitialized, .timeout, .transport:
             return true
-        case .duplicateRequestID, .appServer, .decoding:
+        case .appServer(let appServerError):
+            return isStaleInitializationAppServerError(appServerError)
+        case .duplicateRequestID, .decoding:
             return false
         }
+    }
+
+    private func isStaleInitializationError(_ error: Error) -> Bool {
+        guard let error = error as? CodexAppServerConnectionError else {
+            return false
+        }
+        switch error {
+        case .notInitialized:
+            return true
+        case .appServer(let appServerError):
+            return isStaleInitializationAppServerError(appServerError)
+        default:
+            return false
+        }
+    }
+
+    private func isStaleInitializationAppServerError(_ error: CodexAppServerError) -> Bool {
+        error.code == -32600
+            && error.message.range(of: "not initialized", options: [.caseInsensitive, .diacriticInsensitive]) != nil
     }
 
     func hasReadyConnectionForTesting() async -> Bool {

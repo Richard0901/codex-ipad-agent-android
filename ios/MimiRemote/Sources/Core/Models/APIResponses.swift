@@ -1281,7 +1281,7 @@ enum CodexAppServerPersonality: String, Codable, CaseIterable, Hashable, Identif
 }
 
 private enum CodexAppServerDefaults {
-    static let model = "gpt-5.5"
+    static let model: String? = nil
     static let reasoningEffort: CodexAppServerReasoningEffort = .xhigh
 }
 
@@ -1379,7 +1379,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
         serviceName: String? = nil,
         sessionStartSource: String? = nil,
         threadSource: String? = nil,
-        collaborationMode: CollaborationMode? = nil,
+        collaborationMode: CollaborationMode? = .default,
         planGuidanceEnabled: Bool = false
     ) {
         self.model = model
@@ -1406,7 +1406,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
-            model: try container.decodeIfPresent(String.self, forKey: .model) ?? CodexAppServerDefaults.model,
+            model: try container.decodeIfPresent(String.self, forKey: .model),
             modelProvider: try container.decodeIfPresent(String.self, forKey: .modelProvider),
             serviceTier: try container.decodeIfPresent(String.self, forKey: .serviceTier),
             reasoningEffort: try container.decodeIfPresent(CodexAppServerReasoningEffort.self, forKey: .reasoningEffort) ?? CodexAppServerDefaults.reasoningEffort,
@@ -1423,7 +1423,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
             serviceName: try container.decodeIfPresent(String.self, forKey: .serviceName),
             sessionStartSource: try container.decodeIfPresent(String.self, forKey: .sessionStartSource),
             threadSource: try container.decodeIfPresent(String.self, forKey: .threadSource),
-            collaborationMode: try container.decodeIfPresent(CollaborationMode.self, forKey: .collaborationMode),
+            collaborationMode: try container.decodeIfPresent(CollaborationMode.self, forKey: .collaborationMode) ?? .default,
             planGuidanceEnabled: try container.decodeIfPresent(Bool.self, forKey: .planGuidanceEnabled) ?? false
         )
     }
@@ -1446,7 +1446,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
         serviceName: nil,
         sessionStartSource: nil,
         threadSource: nil,
-        collaborationMode: nil,
+        collaborationMode: .default,
         planGuidanceEnabled: false
     )
 
@@ -1464,7 +1464,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
         sanitized.serviceName = nil
         sanitized.sessionStartSource = nil
         sanitized.threadSource = nil
-        sanitized.collaborationMode = nil
+        sanitized.collaborationMode = .default
         sanitized.planGuidanceEnabled = false
         return sanitized
     }
@@ -1502,7 +1502,9 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
             "sandboxPolicy": sandboxPolicy(projectPath: projectPath),
             "personality": personality.map { .string($0.rawValue) },
             "outputSchema": outputSchema,
-            "collaborationMode": collaborationMode.map { collaborationModePayload(mode: $0) }
+            // app-server 会把 collaboration mode 作为 turn 级状态处理；普通模式也必须显式发送
+            // default，避免上一轮 Plan Mode 在上游被沿用。
+            "collaborationMode": collaborationModePayload(mode: collaborationMode ?? .default)
         ]
     }
 
@@ -1564,15 +1566,20 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
     }
 
     private func collaborationModePayload(mode: CollaborationMode) -> CodexAppServerJSONValue {
-        // app-server 的 Plan Mode 需要 settings 里显式带 model/reasoning_effort/developer_instructions。
-        // developer_instructions 固定 null，表示使用 Codex 内置的 Plan Mode 指令，避免移动端透传危险自定义指令。
-        .object([
+        // Plan/default 都带 settings：Plan 用于启用规划协作，default 用于明确退出规划协作。
+        // developer_instructions 固定 null，表示使用 Codex 内置指令，避免移动端透传危险自定义指令。
+        var settings: [String: CodexAppServerJSONValue] = [
+            "reasoning_effort": reasoningEffort.map { .string($0.rawValue) } ?? .null,
+            "developer_instructions": .null
+        ]
+        // 默认模型交给 app-server 根据账号 rollout 选择；只有用户显式选模型时才透传，避免
+        // 硬编码模型在没有 rollout 权限的账号上触发 “no rollout found”。
+        if let model = model.flatMap(nonEmptyString) {
+            settings["model"] = .string(model)
+        }
+        return .object([
             "mode": .string(mode.rawValue),
-            "settings": .object([
-                "model": .string(nonEmptyString(model ?? "") ?? CodexAppServerDefaults.model),
-                "reasoning_effort": reasoningEffort.map { .string($0.rawValue) } ?? .null,
-                "developer_instructions": .null
-            ])
+            "settings": .object(settings)
         ])
     }
 }
@@ -1675,7 +1682,7 @@ struct CodexAppServerModelOption: Codable, Hashable, Identifiable {
     }
 
     static let builtInFallback: [CodexAppServerModelOption] = [
-        CodexAppServerModelOption(id: "gpt-5.5", title: "GPT-5.5"),
+        CodexAppServerModelOption(id: "gpt-5.5", title: "GPT-5.5", isDefault: true),
         CodexAppServerModelOption(id: "gpt-5-codex", title: "gpt-5-codex"),
         CodexAppServerModelOption(id: "gpt-5.1-codex", title: "gpt-5.1-codex"),
         CodexAppServerModelOption(id: "gpt-5", title: "gpt-5"),
@@ -1750,7 +1757,8 @@ struct CodexAppServerModelOption: Codable, Hashable, Identifiable {
             title: firstString(in: object, keys: ["title", "label", "displayName", "display_name", "name"]),
             provider: firstString(in: object, keys: ["provider", "modelProvider", "model_provider"]),
             description: firstString(in: object, keys: ["description", "summary"]),
-            isDefault: object["isDefault"]?.boolValue ?? object["default"]?.boolValue ?? false
+            // app-server 历史返回里默认标记存在 camelCase 和 snake_case 两种形态。
+            isDefault: object["isDefault"]?.boolValue ?? object["is_default"]?.boolValue ?? object["default"]?.boolValue ?? false
         )
     }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -118,9 +119,11 @@ func TestAppServerGatewaySendsConfiguredUpstreamToken(t *testing.T) {
 		if params["cwd"] != projectDir ||
 			params["approvalPolicy"] != "on-request" ||
 			params["approvalsReviewer"] != "user" ||
-			params["sandbox"] != "workspace-write" ||
-			params["model"] != "gpt-5.5" {
-			t.Fatalf("合法帧必须补默认模型后转发：got=%s want-base=%s", got, authorized)
+			params["sandbox"] != "workspace-write" {
+			t.Fatalf("合法帧必须保留安全参数后转发：got=%s want-base=%s", got, authorized)
+		}
+		if _, ok := params["model"]; ok {
+			t.Fatalf("默认模型应由 app-server rollout 决定，gateway 不应补 model：got=%s", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake upstream 未收到合法帧，可能 upstream Authorization 未发送")
@@ -359,9 +362,11 @@ func TestAppServerGatewayKeepsAuthorizedThreadAcrossReconnects(t *testing.T) {
 		params := decodeGatewayParamsForTest(t, got)
 		if params["threadId"] != "thread-reconnect" ||
 			params["cwd"] != projectDir ||
-			params["model"] != "gpt-5.5" ||
 			params["effort"] != "xhigh" {
-			t.Fatalf("重连后已授权 turn/start 必须补默认模型后转发：got=%s want-base=%s", got, turnFrame)
+			t.Fatalf("重连后已授权 turn/start 必须补默认推理强度后转发：got=%s want-base=%s", got, turnFrame)
+		}
+		if _, ok := params["model"]; ok {
+			t.Fatalf("重连 turn/start 不应补默认 model：got=%s", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake upstream 未收到重连后的已授权 turn/start")
@@ -422,9 +427,11 @@ func TestAppServerGatewayBindsBrowseWorkspaceToExactCWD(t *testing.T) {
 		params := decodeGatewayParamsForTest(t, got)
 		if params["threadId"] != "thread-browse" ||
 			params["cwd"] != realFinanceDir ||
-			params["model"] != "gpt-5.5" ||
 			params["effort"] != "xhigh" {
-			t.Fatalf("browse workspace 同 cwd 的 turn/start 应补默认模型后转发：got=%s want-base=%s", got, turnFrame)
+			t.Fatalf("browse workspace 同 cwd 的 turn/start 应补默认推理强度后转发：got=%s want-base=%s", got, turnFrame)
+		}
+		if _, ok := params["model"]; ok {
+			t.Fatalf("browse workspace turn/start 不应补默认 model：got=%s", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake upstream 未收到 browse workspace 的 turn/start")
@@ -445,9 +452,11 @@ func TestAppServerGatewayBindsBrowseWorkspaceToExactCWD(t *testing.T) {
 		params := decodeGatewayParamsForTest(t, got)
 		if params["threadId"] != "thread-browse" ||
 			params["cwd"] != realFinanceDir ||
-			params["model"] != "gpt-5.5" ||
 			params["effort"] != "xhigh" {
-			t.Fatalf("绑定目录内 mention 输入应补默认模型后转发：got=%s want-base=%s", got, mentionFrame)
+			t.Fatalf("绑定目录内 mention 输入应补默认推理强度后转发：got=%s want-base=%s", got, mentionFrame)
+		}
+		if _, ok := params["model"]; ok {
+			t.Fatalf("mention turn/start 不应补默认 model：got=%s", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake upstream 未收到 mention turn/start")
@@ -822,6 +831,65 @@ func TestAppServerGatewayRejectsUnsafeCWDAndSandbox(t *testing.T) {
 			want: "developer_instructions",
 		},
 		{
+			name: "collaboration mode blank model",
+			payload: map[string]any{
+				"id":     1901,
+				"method": "turn/start",
+				"params": map[string]any{
+					"threadId": "thread-1",
+					"cwd":      projectDir,
+					"input":    []any{map[string]any{"type": "text", "text": "plan"}},
+					"collaborationMode": map[string]any{
+						"mode": "default",
+						"settings": map[string]any{
+							"model":                  " ",
+							"developer_instructions": nil,
+						},
+					},
+				},
+			},
+			want: "collaborationMode.settings.model",
+		},
+		{
+			name: "collaboration mode invalid reasoning effort",
+			payload: map[string]any{
+				"id":     1902,
+				"method": "turn/start",
+				"params": map[string]any{
+					"threadId": "thread-1",
+					"cwd":      projectDir,
+					"input":    []any{map[string]any{"type": "text", "text": "plan"}},
+					"collaborationMode": map[string]any{
+						"mode": "default",
+						"settings": map[string]any{
+							"reasoning_effort":       "turbo",
+							"developer_instructions": nil,
+						},
+					},
+				},
+			},
+			want: "reasoning_effort",
+		},
+		{
+			name: "turn steer invalid collaboration mode fails closed",
+			payload: map[string]any{
+				"id":     1903,
+				"method": "turn/steer",
+				"params": map[string]any{
+					"threadId":       "thread-1",
+					"expectedTurnId": "turn-1",
+					"input":          []any{map[string]any{"type": "text", "text": "continue"}},
+					"collaborationMode": map[string]any{
+						"mode": "execute",
+						"settings": map[string]any{
+							"developer_instructions": nil,
+						},
+					},
+				},
+			},
+			want: "collaborationMode.mode",
+		},
+		{
 			name: "collaboration mode nested danger sandbox",
 			payload: map[string]any{
 				"id":     20,
@@ -926,6 +994,49 @@ func TestAppServerGatewayAllowsExplicitFullAccessSandbox(t *testing.T) {
 	}
 }
 
+func TestAppServerGatewayPreservesDefaultCollaborationMode(t *testing.T) {
+	var projectDir string
+	upstreamURL, received, _ := fakeAppServerUpstream(t, func(conn *websocket.Conn, messageType int, payload []byte) {
+		respondToThreadListAuthorization(t, conn, payload, projectDir, "thread-default-mode")
+	})
+	handler, dir := appServerGatewayRouterFixture(t, upstreamURL)
+	projectDir = dir
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGateway(t, server.URL)
+	defer conn.Close()
+
+	authorizeGatewayThread(t, conn, received, projectDir, "thread-default-mode")
+
+	request := []byte(fmt.Sprintf(
+		`{"id":10,"method":"turn/start","params":{"threadId":"thread-default-mode","cwd":%q,"input":[{"type":"text","text":"hi"}],"approvalPolicy":"on-request","approvalsReviewer":"user","collaborationMode":{"mode":"default","settings":{"reasoning_effort":"xhigh","developer_instructions":null}},"sandboxPolicy":{"type":"workspaceWrite","writableRoots":[%q],"networkAccess":false}}}`,
+		projectDir,
+		projectDir,
+	))
+	if err := conn.WriteMessage(websocket.TextMessage, request); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-received:
+		params := decodeGatewayParamsForTest(t, got)
+		collaboration, ok := params["collaborationMode"].(map[string]any)
+		if !ok || collaboration["mode"] != "default" {
+			t.Fatalf("turn/start 应保留 collaborationMode.mode=default：%s", got)
+		}
+		settings, ok := collaboration["settings"].(map[string]any)
+		if !ok || settings["reasoning_effort"] != "xhigh" || settings["developer_instructions"] != nil {
+			t.Fatalf("default collaborationMode settings 应安全转发：%v", collaboration["settings"])
+		}
+		if _, ok := settings["model"]; ok {
+			t.Fatalf("default collaborationMode 未显式选模型时不应补 model：%v", settings)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake upstream 未收到 default collaborationMode 帧")
+	}
+}
+
 func TestAppServerGatewayDoesNotScanPromptTextForDangerFullAccess(t *testing.T) {
 	var projectDir string
 	upstreamURL, received, _ := fakeAppServerUpstream(t, func(conn *websocket.Conn, messageType int, payload []byte) {
@@ -955,9 +1066,11 @@ func TestAppServerGatewayDoesNotScanPromptTextForDangerFullAccess(t *testing.T) 
 		params := decodeGatewayParamsForTest(t, got)
 		if params["threadId"] != "thread-1" ||
 			params["cwd"] != projectDir ||
-			params["model"] != "gpt-5.5" ||
 			params["effort"] != "xhigh" {
 			t.Fatalf("prompt 中的策略 token 不应被 gateway 当作策略字段：got=%s want-base=%s", got, authorized)
+		}
+		if _, ok := params["model"]; ok {
+			t.Fatalf("prompt 安全扫描路径不应补默认 model：got=%s", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake upstream 未收到合法 prompt 帧")
@@ -986,8 +1099,11 @@ func TestAppServerGatewayRewritesMissingSafeDefaults(t *testing.T) {
 	}
 	gotThreadStart := readUpstreamFrame(t, received)
 	threadParams := decodeGatewayParamsForTest(t, gotThreadStart)
-	if threadParams["approvalPolicy"] != "on-request" || threadParams["approvalsReviewer"] != "user" || threadParams["sandbox"] != "danger-full-access" || threadParams["model"] != "gpt-5.5" {
+	if threadParams["approvalPolicy"] != "on-request" || threadParams["approvalsReviewer"] != "user" || threadParams["sandbox"] != "danger-full-access" {
 		t.Fatalf("thread/start 应补安全默认值：%s", gotThreadStart)
+	}
+	if _, ok := threadParams["model"]; ok {
+		t.Fatalf("thread/start 默认模型应交给 app-server，不应补 model：%s", gotThreadStart)
 	}
 	assertGatewayParamAbsent(t, threadParams, "permissions", "runtimeWorkspaceRoots", "dynamicTools", "environments", "config")
 
@@ -1008,8 +1124,11 @@ func TestAppServerGatewayRewritesMissingSafeDefaults(t *testing.T) {
 	if turnParams["approvalsReviewer"] != "auto_review" {
 		t.Fatalf("turn/start 应保留安全自动审批 approvalsReviewer=auto_review：%s", gotTurnStart)
 	}
-	if turnParams["model"] != "gpt-5.5" || turnParams["effort"] != "xhigh" {
-		t.Fatalf("turn/start 应补最强默认模型和推理强度：%s", gotTurnStart)
+	if turnParams["effort"] != "xhigh" {
+		t.Fatalf("turn/start 应补默认推理强度：%s", gotTurnStart)
+	}
+	if _, ok := turnParams["model"]; ok {
+		t.Fatalf("turn/start 默认模型应交给 app-server，不应补 model：%s", gotTurnStart)
 	}
 	collaboration, ok := turnParams["collaborationMode"].(map[string]any)
 	if !ok || collaboration["mode"] != "plan" {
@@ -1083,6 +1202,192 @@ func TestSanitizedGatewayApprovalAllowsOnlySafeAutoReview(t *testing.T) {
 	}
 }
 
+func TestValidateGatewayCollaborationModeAllowsOptionalModelOnlyWhenSafe(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		wantErr string
+	}{
+		{
+			name: "missing model is allowed",
+			value: map[string]any{
+				"mode": "default",
+				"settings": map[string]any{
+					"reasoning_effort":       "xhigh",
+					"developer_instructions": nil,
+				},
+			},
+		},
+		{
+			name: "null model is allowed",
+			value: map[string]any{
+				"mode": "default",
+				"settings": map[string]any{
+					"model":                  nil,
+					"reasoning_effort":       nil,
+					"developer_instructions": nil,
+				},
+			},
+		},
+		{
+			name: "blank model is rejected",
+			value: map[string]any{
+				"mode": "default",
+				"settings": map[string]any{
+					"model":                  "",
+					"developer_instructions": nil,
+				},
+			},
+			wantErr: "model",
+		},
+		{
+			name: "non string model is rejected",
+			value: map[string]any{
+				"mode": "plan",
+				"settings": map[string]any{
+					"model":                  123,
+					"developer_instructions": nil,
+				},
+			},
+			wantErr: "model",
+		},
+		{
+			name: "unknown effort is rejected",
+			value: map[string]any{
+				"mode": "plan",
+				"settings": map[string]any{
+					"reasoning_effort":       "max",
+					"developer_instructions": nil,
+				},
+			},
+			wantErr: "reasoning_effort",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateGatewayCollaborationMode(tt.value)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateGatewayCollaborationMode() unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateGatewayCollaborationMode() error=%v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestGatewayTurnSummaryRedactsPromptAndPaths(t *testing.T) {
+	params := map[string]any{
+		"threadId": "thread-very-secret-id-value",
+		"cwd":      "/private/secret/repo-name",
+		"input": []any{
+			map[string]any{"type": "text", "text": "secret prompt should not leak"},
+			map[string]any{"type": "image", "url": "https://example.test/private.png"},
+			map[string]any{"type": "localImage", "path": "/private/secret/screen.png"},
+			map[string]any{"type": "mention", "name": "file", "path": "/private/secret/file.md"},
+		},
+		"collaborationMode": map[string]any{
+			"mode": "plan",
+			"settings": map[string]any{
+				"model":                  "gpt-5-codex",
+				"reasoning_effort":       "high",
+				"developer_instructions": "top secret instructions",
+			},
+		},
+	}
+
+	summary := strings.Join([]string{
+		gatewayCompactLogToken("thread-very-secret-id-value"),
+		gatewayCWDBaseLabel(params),
+		gatewayInputTypeSummary(params),
+		gatewayCollaborationModeSummary(params),
+	}, " ")
+	for _, sensitive := range []string{
+		"secret prompt",
+		"example.test",
+		"/private/secret",
+		"screen.png",
+		"file.md",
+		"top secret instructions",
+	} {
+		if strings.Contains(summary, sensitive) {
+			t.Fatalf("turn 诊断摘要不应泄漏敏感内容 %q：%s", sensitive, summary)
+		}
+	}
+	for _, want := range []string{"repo-name", "count=4", "image=1", "localImage=1", "mention=1", "text=1", "mode=plan", "model=gpt-5-codex", "effort=high"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("turn 诊断摘要缺少 %q：%s", want, summary)
+		}
+	}
+}
+
+func TestGatewayTurnSummaryLogRedactsPromptAndPaths(t *testing.T) {
+	var buf bytes.Buffer
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	previousPrefix := log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+		log.SetPrefix(previousPrefix)
+	})
+
+	params := map[string]any{
+		"threadId": "thread-log-secret-id-value",
+		"cwd":      "/private/secret/log-repo",
+		"input": []any{
+			map[string]any{"type": "text", "text": "secret prompt should not leak"},
+			map[string]any{"type": "image", "url": "https://example.test/private.png"},
+			map[string]any{"type": "localImage", "path": "/private/secret/screen.png"},
+		},
+		"collaborationMode": map[string]any{
+			"mode": "default",
+			"settings": map[string]any{
+				"model":                  "gpt-5-codex",
+				"reasoning_effort":       "xhigh",
+				"developer_instructions": "top secret instructions",
+			},
+		},
+	}
+	frame := appServerGatewayFrame{Method: "turn/start", Params: mustRawMessageForGatewayTest(t, params)}
+	payload, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logGatewayForwardedClientTurnSummary("model/list", payload)
+	if buf.Len() != 0 {
+		t.Fatalf("非 turn 方法不应写 turn 摘要日志：%s", buf.String())
+	}
+	logGatewayForwardedClientTurnSummary("turn/start", payload)
+	logGatewayForwardedClientTurnSummary("turn/steer", payload)
+	got := buf.String()
+
+	for _, sensitive := range []string{
+		"secret prompt",
+		"example.test",
+		"/private/secret",
+		"screen.png",
+		"top secret instructions",
+	} {
+		if strings.Contains(got, sensitive) {
+			t.Fatalf("turn 摘要日志不应泄漏敏感内容 %q：%s", sensitive, got)
+		}
+	}
+	for _, want := range []string{"method=turn/start", "method=turn/steer", "cwdBase=log-repo", "input=count=3", "text=1", "image=1", "localImage=1", "mode=default", "model=gpt-5-codex", "effort=xhigh"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("turn 摘要日志缺少 %q：%s", want, got)
+		}
+	}
+}
+
 func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 	var projectDir string
 	upstreamURL, received, _ := fakeAppServerUpstream(t, func(conn *websocket.Conn, messageType int, payload []byte) {
@@ -1134,6 +1439,27 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatalf("initialize capabilities 内容异常：%v", capabilities)
 	}
 
+	threadStart := []byte(fmt.Sprintf(
+		`{"id":6301,"method":"thread/start","params":{"cwd":%q,"model":"gpt-explicit","modelProvider":"openai","serviceTier":"priority","personality":"friendly","approvalPolicy":"on-request","sandbox":"workspace-write",%s}}`,
+		projectDir,
+		dangerousTail,
+	))
+	if err := conn.WriteMessage(websocket.TextMessage, threadStart); err != nil {
+		t.Fatal(err)
+	}
+	threadStartParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
+	assertGatewayParamsOnly(t, threadStartParams, "cwd", "model", "modelProvider", "serviceTier", "personality", "approvalPolicy", "approvalsReviewer", "sandbox")
+	if threadStartParams["cwd"] != projectDir ||
+		threadStartParams["model"] != "gpt-explicit" ||
+		threadStartParams["modelProvider"] != "openai" ||
+		threadStartParams["serviceTier"] != "priority" ||
+		threadStartParams["personality"] != "friendly" ||
+		threadStartParams["approvalPolicy"] != "on-request" ||
+		threadStartParams["approvalsReviewer"] != "user" ||
+		threadStartParams["sandbox"] != "workspace-write" {
+		t.Fatalf("thread/start 显式模型和安全参数应保留：%v", threadStartParams)
+	}
+
 	threadList := []byte(fmt.Sprintf(
 		`{"id":63,"method":"thread/list","params":{"cwd":%q,"limit":20,"cursor":"next",%s}}`,
 		projectDir,
@@ -1152,7 +1478,7 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 	authorizeGatewayThread(t, conn, received, projectDir, "thread-sanitize")
 
 	threadResume := []byte(fmt.Sprintf(
-		`{"id":64,"method":"thread/resume","params":{"threadId":"thread-sanitize","cwd":%q,"excludeTurns":false,"sandbox":"custom","ephemeral":true,%s}}`,
+		`{"id":64,"method":"thread/resume","params":{"threadId":"thread-sanitize","cwd":%q,"model":"gpt-resume","modelProvider":"openai","excludeTurns":false,"sandbox":"custom","ephemeral":true,%s}}`,
 		projectDir,
 		dangerousTail,
 	))
@@ -1160,19 +1486,20 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	threadResumeParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
-	assertGatewayParamsOnly(t, threadResumeParams, "cwd", "threadId", "excludeTurns", "approvalPolicy", "approvalsReviewer", "sandbox", "model")
+	assertGatewayParamsOnly(t, threadResumeParams, "cwd", "model", "modelProvider", "threadId", "excludeTurns", "approvalPolicy", "approvalsReviewer", "sandbox")
 	if threadResumeParams["threadId"] != "thread-sanitize" ||
 		threadResumeParams["cwd"] != projectDir ||
+		threadResumeParams["model"] != "gpt-resume" ||
+		threadResumeParams["modelProvider"] != "openai" ||
 		threadResumeParams["excludeTurns"] != true ||
 		threadResumeParams["approvalPolicy"] != "on-request" ||
 		threadResumeParams["approvalsReviewer"] != "user" ||
-		threadResumeParams["sandbox"] != "danger-full-access" ||
-		threadResumeParams["model"] != "gpt-5.5" {
+		threadResumeParams["sandbox"] != "danger-full-access" {
 		t.Fatalf("thread/resume 合法参数和安全默认值异常：%v", threadResumeParams)
 	}
 
 	threadFork := []byte(fmt.Sprintf(
-		`{"id":6401,"method":"thread/fork","params":{"threadId":"thread-sanitize","cwd":%q,"sandbox":"custom","ephemeral":true,%s}}`,
+		`{"id":6401,"method":"thread/fork","params":{"threadId":"thread-sanitize","cwd":%q,"model":"gpt-fork","modelProvider":"openai","sandbox":"custom","ephemeral":true,%s}}`,
 		projectDir,
 		dangerousTail,
 	))
@@ -1180,13 +1507,14 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	threadForkParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
-	assertGatewayParamsOnly(t, threadForkParams, "cwd", "threadId", "approvalPolicy", "approvalsReviewer", "sandbox", "model")
+	assertGatewayParamsOnly(t, threadForkParams, "cwd", "model", "modelProvider", "threadId", "approvalPolicy", "approvalsReviewer", "sandbox")
 	if threadForkParams["threadId"] != "thread-sanitize" ||
 		threadForkParams["cwd"] != projectDir ||
+		threadForkParams["model"] != "gpt-fork" ||
+		threadForkParams["modelProvider"] != "openai" ||
 		threadForkParams["approvalPolicy"] != "on-request" ||
 		threadForkParams["approvalsReviewer"] != "user" ||
-		threadForkParams["sandbox"] != "danger-full-access" ||
-		threadForkParams["model"] != "gpt-5.5" {
+		threadForkParams["sandbox"] != "danger-full-access" {
 		t.Fatalf("thread/fork 合法参数和安全默认值异常：%v", threadForkParams)
 	}
 
@@ -1263,7 +1591,9 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatalf("turn/interrupt 合法参数应保留：%v", interruptParams)
 	}
 
-	steer := []byte(`{"id":6601,"method":"turn/steer","params":{"threadId":"thread-sanitize","expectedTurnId":"turn-1","input":[{"type":"text","text":"继续"}],"clientUserMessageId":"client-1",` + dangerousTail + `}}`)
+	// turn/steer 只能补充当前 turn 的输入；即使客户端误带 collaborationMode，
+	// gateway 也必须按白名单丢弃，避免把 guided follow-up 误解释成 Plan/目标新 turn。
+	steer := []byte(`{"id":6601,"method":"turn/steer","params":{"threadId":"thread-sanitize","expectedTurnId":"turn-1","input":[{"type":"text","text":"继续"}],"clientUserMessageId":"client-1",` + dangerousTail + `,"collaborationMode":{"mode":"plan","settings":{"model":"gpt-5-codex","reasoning_effort":"high","developer_instructions":null}}}}`)
 	if err := conn.WriteMessage(websocket.TextMessage, steer); err != nil {
 		t.Fatal(err)
 	}
@@ -1674,9 +2004,11 @@ func TestAppServerGatewayForwardsAuthorizedFrameUnchanged(t *testing.T) {
 		params := decodeGatewayParamsForTest(t, got)
 		if params["threadId"] != "thread-1" ||
 			params["cwd"] != projectDir ||
-			params["model"] != "gpt-5.5" ||
 			params["effort"] != "xhigh" {
-			t.Fatalf("合法帧必须补默认模型后转发：got=%s want-base=%s", got, authorized)
+			t.Fatalf("合法帧必须补默认推理强度后转发：got=%s want-base=%s", got, authorized)
+		}
+		if _, ok := params["model"]; ok {
+			t.Fatalf("合法 turn/start 不应补默认 model：got=%s", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake upstream 未收到合法帧")
@@ -1917,6 +2249,15 @@ func decodeGatewayParamsForTest(t *testing.T, payload []byte) map[string]any {
 		t.Fatalf("gateway frame 缺少 params：%s", payload)
 	}
 	return frame.Params
+}
+
+func mustRawMessageForGatewayTest(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func decodeGatewayResultForTest(t *testing.T, payload []byte) map[string]any {

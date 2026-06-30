@@ -225,6 +225,88 @@ final class MarkdownRenderingTests: XCTestCase {
         })
     }
 
+    func testCompleteProposedPlanWrapperRendersInnerMarkdownOnly() throws {
+        let result = MarkdownParser.shared.parse("""
+        <proposed_plan>
+        ## 修复计划
+
+        1. 确认链路
+        2. 补测试
+        </proposed_plan>
+        """)
+
+        let plan = try XCTUnwrap(result.blocks.first)
+        guard case let .proposedPlan(blocks, isComplete) = plan.kind else {
+            return XCTFail("完整 proposed_plan 应解析成计划块")
+        }
+        XCTAssertTrue(isComplete)
+        XCTAssertTrue(blocks.contains { block in
+            if case let .heading(level, inline) = block.kind {
+                return level == 2 && inline.plain == "修复计划"
+            }
+            return false
+        })
+        XCTAssertFalse(blocks.map(\.plainTextForTesting).joined(separator: "\n").contains("proposed_plan"))
+    }
+
+    func testStreamingProposedPlanWrapperRendersPartialBody() throws {
+        let result = MarkdownParser.shared.parse("""
+        <proposed_plan>
+        - 先修 default mode
+        - 再补 UI
+        """)
+
+        let plan = try XCTUnwrap(result.blocks.first)
+        guard case let .proposedPlan(blocks, isComplete) = plan.kind else {
+            return XCTFail("只有 opening tag 时应按流式计划块展示")
+        }
+        XCTAssertFalse(isComplete)
+        XCTAssertTrue(blocks.map(\.plainTextForTesting).joined(separator: "\n").contains("先修 default mode"))
+    }
+
+    func testProposedPlanWrapperKeepsMarkdownAfterClosingTag() throws {
+        let result = MarkdownParser.shared.parse("""
+        <proposed_plan>
+        - 第一步
+        </proposed_plan>
+
+        后续说明 **继续正常渲染**。
+        """)
+
+        XCTAssertEqual(result.blocks.count, 2)
+        guard case .proposedPlan = result.blocks[0].kind else {
+            return XCTFail("第一块应是计划块")
+        }
+        guard case let .paragraph(inline) = result.blocks[1].kind else {
+            return XCTFail("closing tag 后的内容应作为普通 Markdown")
+        }
+        XCTAssertEqual(inline.plain, "后续说明 继续正常渲染。")
+        XCTAssertTrue(inline.hasFormatting)
+    }
+
+    func testInlineOrInvalidProposedPlanTagsFallBackToPlainMarkdown() {
+        let inline = MarkdownParser.shared.parse("开始 <proposed_plan> 不应特殊处理 </proposed_plan>")
+        XCTAssertFalse(inline.blocks.contains { block in
+            if case .proposedPlan = block.kind {
+                return true
+            }
+            return false
+        })
+        XCTAssertTrue(inline.blocks.map(\.plainTextForTesting).joined(separator: "\n").contains("proposed_plan"))
+
+        let invalid = MarkdownParser.shared.parse("""
+        <proposed_plan> 行内正文
+        - 普通列表
+        </proposed_plan>
+        """)
+        XCTAssertFalse(invalid.blocks.contains { block in
+            if case .proposedPlan = block.kind {
+                return true
+            }
+            return false
+        })
+    }
+
     func testMarkdownStyleKeepsConversationTypographyCompactAndScaled() {
         let style = MarkdownStyle.make(role: .assistant, colorScheme: .light, fontScale: 1.2)
 
@@ -292,6 +374,8 @@ private extension MarkdownBlock {
             return blocks.map(\.plainTextForTesting).joined(separator: "\n")
         case let .codeBlock(_, code):
             return code
+        case let .proposedPlan(blocks, _):
+            return blocks.map(\.plainTextForTesting).joined(separator: "\n")
         case let .image(reference):
             return reference.displayText
         case let .table(header, rows, _):

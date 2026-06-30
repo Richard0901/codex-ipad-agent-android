@@ -63,6 +63,7 @@ struct MarkdownBlock: Identifiable, Hashable {
         case taskList(items: [MarkdownTaskListItem])
         case blockquote(blocks: [MarkdownBlock])
         case codeBlock(language: String?, code: String)
+        case proposedPlan(blocks: [MarkdownBlock], isComplete: Bool)
         case image(MarkdownImageReference)
         case table(header: [MarkdownInlineText], rows: [[MarkdownInlineText]], alignments: [MarkdownColumnAlignment])
         case thematicBreak

@@ -211,8 +211,8 @@ func TestCodexAppServerRuntimeCreateSessionStartsThreadWithAllowlistedCWD(t *tes
 			if params["approvalPolicy"] != "on-request" || params["sandbox"] != "danger-full-access" {
 				t.Fatalf("移动端入口必须使用用户批准 + 完全访问默认值：%v", params)
 			}
-			if params["model"] != "gpt-5.5" {
-				t.Fatalf("thread/start 必须默认使用最强模型：%v", params)
+			if _, ok := params["model"]; ok {
+				t.Fatalf("thread/start 默认模型必须交给 app-server rollout，不应发送 model：%v", params)
 			}
 			*(result.(*appServerThreadEnvelope)) = appServerThreadEnvelope{Thread: appServerThread{
 				ID:        "thread-new",
@@ -267,6 +267,12 @@ func TestCodexAppServerRuntimeResumeSessionUsesThreadResumeThenTurnStart(t *test
 			if params["threadId"] != "thread-old" || params["cwd"] != project.RealPath {
 				t.Fatalf("thread/resume 参数异常：%v", params)
 			}
+			if _, ok := params["model"]; ok {
+				t.Fatalf("thread/resume 默认模型必须交给 app-server rollout，不应发送 model：%v", params)
+			}
+			if params["excludeTurns"] != true || params["approvalPolicy"] != "on-request" || params["sandbox"] != "danger-full-access" {
+				t.Fatalf("thread/resume 必须保留安全默认值和 excludeTurns：%v", params)
+			}
 			*(result.(*appServerThreadEnvelope)) = appServerThreadEnvelope{Thread: appServerThread{
 				ID:        "thread-old",
 				Name:      "resumed",
@@ -278,6 +284,12 @@ func TestCodexAppServerRuntimeResumeSessionUsesThreadResumeThenTurnStart(t *test
 		case "turn/start":
 			if params["threadId"] != "thread-old" {
 				t.Fatalf("resume 后 prompt 必须发到同一 thread：%v", params)
+			}
+			if _, ok := params["model"]; ok {
+				t.Fatalf("turn/start 默认模型必须交给 app-server rollout，不应发送 model：%v", params)
+			}
+			if params["effort"] != "xhigh" || params["approvalPolicy"] != "on-request" {
+				t.Fatalf("turn/start 必须保留默认推理强度和审批策略：%v", params)
 			}
 			*(result.(*appServerTurnEnvelope)) = appServerTurnEnvelope{Turn: appServerTurn{ID: "turn-resume", Status: "inProgress"}}
 		default:
@@ -480,8 +492,8 @@ func TestCodexAppServerRuntimeSafeParamsUseFullAccessWithApproval(t *testing.T) 
 	if start["cwd"] != project.RealPath {
 		t.Fatalf("thread/start 必须使用 allowlist cwd：%v", start)
 	}
-	if start["model"] != "gpt-5.5" {
-		t.Fatalf("thread/start 必须默认使用最强模型：%v", start)
+	if _, ok := start["model"]; ok {
+		t.Fatalf("thread/start 默认模型必须交给 app-server rollout，不应发送 model：%v", start)
 	}
 	if _, ok := start["runtimeWorkspaceRoots"]; ok {
 		t.Fatalf("thread/start 不能发送需要 experimentalApi 的 runtimeWorkspaceRoots：%v", start)
@@ -491,8 +503,11 @@ func TestCodexAppServerRuntimeSafeParamsUseFullAccessWithApproval(t *testing.T) 
 	if turn["approvalPolicy"] == "never" {
 		t.Fatalf("turn/start 不能暴露 approvalPolicy=never：%v", turn)
 	}
-	if turn["model"] != "gpt-5.5" || turn["effort"] != "xhigh" {
-		t.Fatalf("turn/start 必须默认使用最强模型和超高思考：%v", turn)
+	if turn["effort"] != "xhigh" {
+		t.Fatalf("turn/start 必须默认使用超高思考：%v", turn)
+	}
+	if _, ok := turn["model"]; ok {
+		t.Fatalf("turn/start 默认模型必须交给 app-server rollout，不应发送 model：%v", turn)
 	}
 	sandbox, ok := turn["sandboxPolicy"].(map[string]any)
 	if !ok {

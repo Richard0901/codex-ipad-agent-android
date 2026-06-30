@@ -31,10 +31,11 @@ final class CodexAppServerProtocolTests: XCTestCase {
         let params = try XCTUnwrap(request.params?.objectValue)
         XCTAssertEqual(request.method, "turn/start")
         XCTAssertEqual(params["cwd"]?.stringValue, "/Users/me/repo")
-        XCTAssertEqual(params["model"]?.stringValue, "gpt-5.5")
+        XCTAssertNil(params["model"]?.stringValue)
         XCTAssertEqual(params["effort"]?.stringValue, "xhigh")
         XCTAssertEqual(params["approvalPolicy"]?.stringValue, "on-request")
         XCTAssertEqual(params["clientUserMessageId"]?.stringValue, "client-1")
+        XCTAssertEqual(params["collaborationMode"]?.objectValue?["mode"]?.stringValue, "default")
 
         let sandbox = try XCTUnwrap(params["sandboxPolicy"]?.objectValue)
         XCTAssertEqual(sandbox["type"]?.stringValue, "dangerFullAccess")
@@ -42,7 +43,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertNil(sandbox["writableRoots"])
     }
 
-    func testTurnStartBuilderAddsCollaborationModeOnlyForPlanMode() throws {
+    func testTurnStartBuilderSendsExplicitCollaborationMode() throws {
         let project = AgentProject(id: "repo", name: "Repo", path: "/Users/me/repo")
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: [project])
 
@@ -63,7 +64,41 @@ final class CodexAppServerProtocolTests: XCTestCase {
 
         let standardPayload = CodexAppServerTurnPayload(prompt: "直接做", options: .default)
         let standardRequest = try builder.turnStart(threadID: "thread-1", projectID: project.id, payload: standardPayload)
-        XCTAssertNil(standardRequest.params?.objectValue?["collaborationMode"])
+        let standardMode = try XCTUnwrap(standardRequest.params?.objectValue?["collaborationMode"]?.objectValue)
+        XCTAssertEqual(standardMode["mode"]?.stringValue, "default")
+        let standardSettings = try XCTUnwrap(standardMode["settings"]?.objectValue)
+        XCTAssertNil(standardSettings["model"]?.stringValue)
+        XCTAssertEqual(standardSettings["reasoning_effort"]?.stringValue, "xhigh")
+        XCTAssertEqual(standardSettings["developer_instructions"], .null)
+    }
+
+    func testTurnOptionsDecodesLegacyPayloadWithNilModelAndDefaultCollaborationMode() throws {
+        let legacy = Data(#"{"approval_policy":"on-request","sandbox_mode":"dangerFullAccess"}"#.utf8)
+        let decoded = try JSONDecoder().decode(CodexAppServerTurnOptions.self, from: legacy)
+
+        XCTAssertNil(decoded.model)
+        XCTAssertEqual(decoded.reasoningEffort, .xhigh)
+        XCTAssertEqual(decoded.approvalPolicy, .onRequest)
+        XCTAssertEqual(decoded.sandboxMode, .dangerFullAccess)
+        XCTAssertEqual(decoded.collaborationMode, .default)
+        XCTAssertFalse(decoded.planGuidanceEnabled)
+    }
+
+    func testTurnStartBuilderUsesDefaultCollaborationModeForGoalTurns() throws {
+        let project = AgentProject(id: "repo", name: "Repo", path: "/Users/me/repo")
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: [project])
+        var goalOptions = CodexAppServerTurnOptions.default
+        goalOptions.collaborationMode = .default
+        goalOptions.planGuidanceEnabled = false
+
+        let request = try builder.turnStart(
+            threadID: "thread-1",
+            projectID: project.id,
+            payload: CodexAppServerTurnPayload(prompt: "完成目标", options: goalOptions)
+        )
+
+        let mode = try XCTUnwrap(request.params?.objectValue?["collaborationMode"]?.objectValue)
+        XCTAssertEqual(mode["mode"]?.stringValue, "default")
     }
 
     func testTurnSteerBuilderUsesActiveTurnPreconditionWithoutStartOptions() throws {
@@ -212,6 +247,27 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(parsed.first?.title, "GPT-5.1 Codex")
         XCTAssertEqual(parsed.first?.provider, "openai")
         XCTAssertEqual(parsed.first?.isDefault, true)
+    }
+
+    func testModelListParserAcceptsKeyedSnakeCaseDefaults() throws {
+        let parsed = CodexAppServerModelOption.parseListResult(.object([
+            "data": .object([
+                "gpt-snake-default": .object([
+                    "display_name": .string("Snake Default"),
+                    "model_provider": .string("openai"),
+                    "is_default": .bool(true)
+                ]),
+                "gpt-side": .object([
+                    "summary": .string("side model")
+                ])
+            ])
+        ]))
+
+        XCTAssertEqual(parsed.first?.model, "gpt-snake-default")
+        XCTAssertEqual(parsed.first?.title, "Snake Default")
+        XCTAssertEqual(parsed.first?.provider, "openai")
+        XCTAssertEqual(parsed.first?.isDefault, true)
+        XCTAssertEqual(Set(parsed.map(\.model)), ["gpt-snake-default", "gpt-side"])
     }
 
     func testRequestBuilderBuildsThreadGoalRequests() throws {

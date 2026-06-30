@@ -541,6 +541,16 @@ struct ConversationTimelineView: View {
                 guard newID != nil else {
                     return
                 }
+                if Self.shouldForceTailFollow(forNewTailMessage: messages.last) {
+                    // 本地发送代表用户明确进入最新上下文；即使滚动几何刚好误判为“不在底部”，
+                    // 也要立即贴到尾部，避免发完消息后还停在历史位置。
+                    forceScrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: true)
+                    Task { @MainActor in
+                        await Task.yield()
+                        forceScrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: false)
+                    }
+                    return
+                }
                 if forceNextMessageTailScroll {
                     // 首屏/切换会话：List 拿到首页数据后无动画贴底，并在下一拍补一次，
                     // 覆盖首次布局时机，确保落在真正的底部而不是空白区。
@@ -611,6 +621,15 @@ struct ConversationTimelineView: View {
         return nil
     }
 
+    static func shouldForceTailFollow(forNewTailMessage message: ConversationMessage?) -> Bool {
+        guard let message else {
+            return false
+        }
+        return message.role == .user
+            && message.kind == .message
+            && message.clientMessageID != nil
+    }
+
     private func loadEarlierRow(proxy: ScrollViewProxy, timelineItems: [ConversationTimelineItem]) -> some View {
         HStack {
             Spacer()
@@ -678,6 +697,19 @@ struct ConversationTimelineView: View {
         themeStore.tokens(for: colorScheme).secondaryText
     }
 
+    private func forceScrollToTimelineTail(timelineItems: [ConversationTimelineItem], proxy: ScrollViewProxy, animated: Bool) {
+        guard let lastID = timelineItems.last?.id else {
+            return
+        }
+        guard !isPreservingHistoryScroll else {
+            return
+        }
+        shouldFollowMessageTail = true
+        hasUnseenTailMessage = false
+        forceNextMessageTailScroll = false
+        scrollToTimelineTail(id: lastID, proxy: proxy, animated: animated)
+    }
+
     private func scrollToTimelineTail(timelineItems: [ConversationTimelineItem], proxy: ScrollViewProxy, animated: Bool) {
         guard let lastID = timelineItems.last?.id else {
             return
@@ -691,6 +723,10 @@ struct ConversationTimelineView: View {
         }
         hasUnseenTailMessage = false
         forceNextMessageTailScroll = false
+        scrollToTimelineTail(id: lastID, proxy: proxy, animated: animated)
+    }
+
+    private func scrollToTimelineTail(id lastID: String, proxy: ScrollViewProxy, animated: Bool) {
         if animated {
             withAnimation(.easeOut(duration: 0.18)) {
                 proxy.scrollTo(lastID, anchor: .bottom)

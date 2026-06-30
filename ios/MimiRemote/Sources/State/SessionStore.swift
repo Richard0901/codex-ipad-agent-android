@@ -2109,6 +2109,28 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    private func payloadResolvingRequiredModel(_ payload: CodexAppServerTurnPayload) async -> CodexAppServerTurnPayload {
+        var resolved = payload
+        if let model = resolved.options.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !model.isEmpty {
+            return resolved
+        }
+
+        if appServerModelOptions.isEmpty {
+            await refreshAppServerModelOptions()
+        }
+        let options = appServerModelOptions.isEmpty ? CodexAppServerModelOption.builtInFallback : appServerModelOptions
+        guard let selected = options.first(where: \.isDefault) ?? options.first else {
+            return resolved
+        }
+
+        // app-server 的 turn/start 目前要求顶层 model 必填；模型来源必须优先使用
+        // model/list 的账号默认值，只有列表不可用时才使用内置兜底，避免 iPad 硬编码旧模型踩 rollout。
+        resolved.options.model = selected.model
+        resolved.options.modelProvider = selected.provider
+        return resolved
+    }
+
     func refreshCapabilities() async {
         if isRefreshingCapabilities {
             return
@@ -2294,6 +2316,7 @@ final class SessionStore: ObservableObject {
         guard !payload.isEmpty else {
             return false
         }
+        let payload = runningDelivery == .queued ? await payloadResolvingRequiredModel(payload) : payload
         let prompt = payload.previewText
 
         if let session = selectedSession, session.isRunning {
@@ -2330,7 +2353,8 @@ final class SessionStore: ObservableObject {
                 return false
             }
             Task { [weak self] in
-                await self?.refreshSessions(forProjectID: session.projectID)
+                // 发送后的后台刷新只同步侧栏状态；不能清掉随后可能出现的发送失败原因。
+                await self?.refreshSessions(forProjectID: session.projectID, clearErrorOnSuccess: false)
             }
             return true
         }
@@ -2445,7 +2469,8 @@ final class SessionStore: ObservableObject {
             setSessionListProjection(sessionID: session.id, preview: prompt, source: .localUser, clientMessageID: clientMessageID)
             setForegroundActivity(.waitingForAssistant, sessionID: session.id)
             let payload = message.turnPayload ?? CodexAppServerTurnPayload(prompt: prompt)
-            guard socket.sendTurn(payload, clientMessageID: clientMessageID) else {
+            let resolvedPayload = await payloadResolvingRequiredModel(payload)
+            guard socket.sendTurn(resolvedPayload, clientMessageID: clientMessageID) else {
                 conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed)
                 clearSessionListProjection(sessionID: session.id, clientMessageID: clientMessageID)
                 clearForegroundActivity(sessionID: session.id)
@@ -2453,7 +2478,8 @@ final class SessionStore: ObservableObject {
                 return false
             }
             Task { [weak self] in
-                await self?.refreshSessions(forProjectID: session.projectID)
+                // 重试发送后的后台刷新只同步侧栏状态；不能清掉随后可能出现的发送失败原因。
+                await self?.refreshSessions(forProjectID: session.projectID, clearErrorOnSuccess: false)
             }
             return true
         }
@@ -2601,6 +2627,7 @@ final class SessionStore: ObservableObject {
         clientMessageID: ClientMessageID? = nil,
         initialGoalObjective: String? = nil
     ) async -> Bool {
+        let payload = await payloadResolvingRequiredModel(payload)
         var projectID = projectID
         guard let workspace = ensureWorkspaceForKnownProjectID(projectID) else {
             setErrorMessage("工作区已失效，请重新打开")
@@ -2792,7 +2819,11 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    private func refreshSessions(forProjectID projectID: String, showLoading: Bool = true) async {
+    private func refreshSessions(
+        forProjectID projectID: String,
+        showLoading: Bool = true,
+        clearErrorOnSuccess: Bool = true
+    ) async {
         var projectID = projectID
         guard let workspace = ensureWorkspaceForKnownProjectID(projectID) else {
             setErrorMessage("工作区已失效，请重新打开")
@@ -2828,7 +2859,10 @@ final class SessionStore: ObservableObject {
             updateSessionPageState(projectID: projectID, page: page)
             clearWorkspaceUnavailable(projectID)
             setStatusMessage("已加载 \(filteredSessions.count) 个会话")
-            setErrorMessage(nil)
+            // 手动刷新/切换工作区成功时可以清掉旧错误；发送后的后台刷新不能抢掉刚产生的发送失败提示。
+            if clearErrorOnSuccess {
+                setErrorMessage(nil)
+            }
         } catch {
             if let requestToken, !isCurrentSessionPageRequest(projectID: projectID, token: requestToken) {
                 return

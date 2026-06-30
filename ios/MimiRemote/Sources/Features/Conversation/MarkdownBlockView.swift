@@ -46,6 +46,8 @@ struct MarkdownBlockView: View {
             blockquote(blocks)
         case let .codeBlock(language, code):
             codeBlock(language: language, code: code)
+        case let .proposedPlan(blocks, isComplete):
+            proposedPlan(blocks: blocks, isComplete: isComplete)
         case let .image(reference):
             ConversationImagePreview(
                 source: .markdown(reference.source),
@@ -168,6 +170,37 @@ struct MarkdownBlockView: View {
         }
         .padding(8)
         .background(style.codeBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func proposedPlan(blocks: [MarkdownBlock], isComplete: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                Image(systemName: "list.clipboard")
+                    .font(style.captionFont.weight(.semibold))
+                    .foregroundStyle(style.linkColor)
+                Text("计划")
+                    .font(style.captionFont.weight(.semibold))
+                    .foregroundStyle(style.secondaryColor)
+                if !isComplete {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(style.linkColor)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: style.blockSpacing) {
+                ForEach(blocks) { child in
+                    MarkdownBlockView(block: child, style: style)
+                }
+            }
+        }
+        .padding(9)
+        .background(style.tableBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(style.dividerColor.opacity(0.75))
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

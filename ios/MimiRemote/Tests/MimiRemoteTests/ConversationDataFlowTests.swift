@@ -75,6 +75,40 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertGreaterThan(message.contentByteCount, initial.contentByteCount)
     }
 
+    func testConversationTimelineForcesTailFollowOnlyForLocalUserSubmissions() {
+        let localSubmission = ConversationMessage(
+            clientMessageID: "client-tail",
+            role: .user,
+            content: "继续修复滚动",
+            sendStatus: .sending
+        )
+        XCTAssertTrue(ConversationTimelineView.shouldForceTailFollow(forNewTailMessage: localSubmission))
+
+        let replayedHistoryUser = ConversationMessage(
+            role: .user,
+            content: "历史里的旧问题",
+            sendStatus: .confirmed
+        )
+        XCTAssertFalse(ConversationTimelineView.shouldForceTailFollow(forNewTailMessage: replayedHistoryUser))
+
+        let assistantReply = ConversationMessage(
+            clientMessageID: "client-ignored",
+            role: .assistant,
+            content: "收到",
+            sendStatus: .sending
+        )
+        XCTAssertFalse(ConversationTimelineView.shouldForceTailFollow(forNewTailMessage: assistantReply))
+
+        let processSummary = ConversationMessage(
+            clientMessageID: "client-process",
+            role: .user,
+            kind: .commandSummary,
+            content: "命令：go test ./...",
+            sendStatus: .sent
+        )
+        XCTAssertFalse(ConversationTimelineView.shouldForceTailFollow(forNewTailMessage: processSummary))
+    }
+
     func testSessionDisplayStatusUsesForegroundAndGoalProgress() {
         let goal = ThreadGoal(
             threadID: "session-1",
@@ -755,7 +789,7 @@ final class ConversationDataFlowTests: XCTestCase {
     func testComposerDefaultsToFullAccessWithApproval() {
         let composerState = ComposerState()
 
-        XCTAssertEqual(composerState.turnOptions.model, "gpt-5.5")
+        XCTAssertNil(composerState.turnOptions.model)
         XCTAssertEqual(composerState.turnOptions.reasoningEffort, .xhigh)
         XCTAssertEqual(composerState.permissionMode, .fullAccess)
         XCTAssertEqual(composerState.turnOptions.approvalPolicy, .onRequest)
@@ -778,6 +812,28 @@ final class ConversationDataFlowTests: XCTestCase {
         composerState.resetTransientSendMode()
         XCTAssertFalse(composerState.isPlanModeSelected)
         XCTAssertEqual(composerState.sendMode, .standard)
+    }
+
+    func testComposerPlanAndGoalModesDoNotUseGuidedDelivery() {
+        var composerState = ComposerState()
+
+        XCTAssertEqual(
+            composerState.runningTurnDelivery(canUseGuidedFollowUp: true, guidedFollowUpEnabled: true),
+            .guided
+        )
+
+        composerState.togglePlanMode()
+        XCTAssertEqual(
+            composerState.runningTurnDelivery(canUseGuidedFollowUp: true, guidedFollowUpEnabled: true),
+            .queued
+        )
+
+        composerState.resetTransientSendMode()
+        composerState.toggleGoalMode()
+        XCTAssertEqual(
+            composerState.runningTurnDelivery(canUseGuidedFollowUp: true, guidedFollowUpEnabled: true),
+            .queued
+        )
     }
 
     func testComposerStateCanSubmitWithStandardModeSanitizedOptions() throws {
@@ -824,6 +880,8 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertNil(options.serviceName)
         XCTAssertNil(options.sessionStartSource)
         XCTAssertNil(options.threadSource)
+        XCTAssertEqual(options.collaborationMode, .default)
+        XCTAssertFalse(options.planGuidanceEnabled)
     }
 
     func testComposerStateStandardModePreservesAutoApprovalPreset() throws {
@@ -844,6 +902,154 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(options.sandboxMode, .workspaceWrite)
         XCTAssertFalse(options.networkAccess)
         XCTAssertNil(options.config)
+        XCTAssertEqual(options.collaborationMode, .default)
+    }
+
+    func testComposerStandardModeClearsPreviousPlanModeToDefault() throws {
+        var options = CodexAppServerTurnOptions.default
+        options.collaborationMode = .plan
+        options.planGuidanceEnabled = true
+
+        let standard = options.sanitizedForStandardComposer()
+
+        XCTAssertEqual(standard.collaborationMode, .default)
+        XCTAssertFalse(standard.planGuidanceEnabled)
+    }
+
+    func testComposerGoalSubmissionPayloadUsesDefaultCollaborationMode() throws {
+        var composerState = ComposerState()
+        composerState.draft = "完成目标任务"
+        composerState.toggleGoalMode()
+        var goalOptions = composerState.turnOptions.sanitizedForStandardComposer()
+        // 目标模式的目标状态走 thread/goal/set；turn/start 必须显式回到 default。
+        goalOptions.collaborationMode = .default
+        goalOptions.planGuidanceEnabled = false
+
+        let submitted = try XCTUnwrap(composerState.takeDraftForSubmit(
+            isLoading: false,
+            turnOptionsOverride: goalOptions
+        ))
+
+        XCTAssertEqual(submitted.payload.options.collaborationMode, .default)
+        XCTAssertFalse(submitted.payload.options.planGuidanceEnabled)
+    }
+
+    func testConversationSendRegressionMatrixKeepsModesAttachmentsVoiceAndPermissionsIndependent() throws {
+        var composerState = ComposerState()
+        let projectPath = "/tmp/conversation-regression"
+
+        composerState.draft = "先规划完整链路"
+        composerState.togglePlanMode()
+        composerState.addAttachment(.image(url: "https://example.test/diagram.png", detail: .high))
+        composerState.addAttachment(.image(url: "data:image/png;base64,AA==", detail: .low))
+        composerState.addAttachment(.localImage(path: "\(projectPath)/screen.png", detail: .original))
+        composerState.addAttachment(.skill(name: "review", path: "\(projectPath)/.codex/skills/review/SKILL.md"))
+        composerState.addAttachment(.mention(name: "README", path: "\(projectPath)/README.md"))
+        var planOptions = composerState.turnOptions
+        planOptions.collaborationMode = .plan
+        planOptions.planGuidanceEnabled = true
+
+        let planSubmission = try XCTUnwrap(composerState.takeDraftForSubmit(
+            isLoading: false,
+            turnOptionsOverride: planOptions
+        ))
+        XCTAssertEqual(planSubmission.payload.options.collaborationMode, .plan)
+        XCTAssertTrue(planSubmission.payload.options.planGuidanceEnabled)
+        XCTAssertEqual(planSubmission.payload.input.count, 6)
+        XCTAssertEqual(planSubmission.payload.textPrompt, "先规划完整链路")
+        XCTAssertTrue(payloadContainsImageURL(planSubmission.payload, url: "https://example.test/diagram.png"))
+        XCTAssertTrue(payloadContainsInlineImage(planSubmission.payload))
+        XCTAssertTrue(planSubmission.payload.input.contains {
+            if case .localImage(let path, _) = $0 {
+                return path == "\(projectPath)/screen.png"
+            }
+            return false
+        })
+        XCTAssertTrue(payloadContainsSkill(planSubmission.payload, name: "review"))
+        XCTAssertTrue(payloadContainsMention(planSubmission.payload, name: "README"))
+
+        // 回归：上一条 Plan 的本地 options 即使被沿用，普通发送也必须 sanitize 回 default。
+        composerState.turnOptions = planSubmission.payload.options
+        composerState.resetSendModeAfterSubmit()
+        composerState.draft = "切回普通模式"
+        let standardSubmission = try XCTUnwrap(composerState.takeDraftForSubmit(
+            isLoading: false,
+            turnOptionsOverride: composerState.turnOptions.sanitizedForStandardComposer()
+        ))
+        XCTAssertEqual(standardSubmission.payload.options.collaborationMode, .default)
+        XCTAssertFalse(standardSubmission.payload.options.planGuidanceEnabled)
+        XCTAssertEqual(standardSubmission.payload.textPrompt, "切回普通模式")
+
+        composerState.restore("切到目标模式")
+        composerState.toggleGoalMode()
+        var goalOptions = composerState.turnOptions.sanitizedForStandardComposer()
+        goalOptions.collaborationMode = .default
+        goalOptions.planGuidanceEnabled = false
+        let goalSubmission = try XCTUnwrap(composerState.takeDraftForSubmit(
+            isLoading: false,
+            turnOptionsOverride: goalOptions
+        ))
+        XCTAssertEqual(goalSubmission.payload.options.collaborationMode, .default)
+        XCTAssertFalse(goalSubmission.payload.options.planGuidanceEnabled)
+        XCTAssertEqual(
+            composerState.runningTurnDelivery(canUseGuidedFollowUp: true, guidedFollowUpEnabled: true),
+            .queued
+        )
+
+        composerState.resetSendModeAfterSubmit()
+        composerState.beginVoiceInput()
+        composerState.applyVoiceTranscript("语音目标任务")
+        composerState.toggleGoalMode()
+        let voiceGoalSubmission = try XCTUnwrap(composerState.takeDraftForSubmit(
+            isLoading: false,
+            turnOptionsOverride: composerState.turnOptions.sanitizedForStandardComposer()
+        ))
+        XCTAssertTrue(voiceGoalSubmission.voiceDraftNeedsReview)
+        XCTAssertEqual(voiceGoalSubmission.payload.textPrompt, "语音目标任务")
+        XCTAssertEqual(voiceGoalSubmission.payload.options.collaborationMode, .default)
+
+        composerState.resetSendModeAfterSubmit()
+        composerState.beginVoiceInput()
+        composerState.applyVoiceTranscript("语音计划任务")
+        composerState.togglePlanMode()
+        var voicePlanOptions = composerState.turnOptions.sanitizedForStandardComposer()
+        voicePlanOptions.collaborationMode = .plan
+        voicePlanOptions.planGuidanceEnabled = true
+        let voicePlanSubmission = try XCTUnwrap(composerState.takeDraftForSubmit(
+            isLoading: false,
+            turnOptionsOverride: voicePlanOptions
+        ))
+        XCTAssertTrue(voicePlanSubmission.voiceDraftNeedsReview)
+        XCTAssertEqual(voicePlanSubmission.payload.options.collaborationMode, .plan)
+        XCTAssertTrue(voicePlanSubmission.payload.options.planGuidanceEnabled)
+    }
+
+    func testComposerPermissionRegressionMatrixKeepsNetworkDisabled() throws {
+        let cases: [(mode: ComposerPermissionMode, policy: CodexAppServerApprovalPolicy, reviewer: String, sandbox: CodexAppServerSandboxMode)] = [
+            (.readOnly, .onRequest, "user", .readOnly),
+            (.requestApproval, .onRequest, "user", .workspaceWrite),
+            (.autoApprove, .onFailure, "auto_review", .workspaceWrite),
+            (.fullAccess, .onRequest, "user", .dangerFullAccess)
+        ]
+
+        for testCase in cases {
+            var composerState = ComposerState()
+            composerState.draft = "权限矩阵 \(testCase.mode.rawValue)"
+            composerState.applyPermissionMode(testCase.mode)
+            composerState.turnOptions.networkAccess = true
+
+            let submitted = try XCTUnwrap(composerState.takeDraftForSubmit(
+                isLoading: false,
+                turnOptionsOverride: composerState.turnOptions.sanitizedForStandardComposer()
+            ))
+            let options = submitted.payload.options
+            XCTAssertEqual(options.approvalPolicy, testCase.policy, "mode=\(testCase.mode)")
+            XCTAssertEqual(options.approvalsReviewer, testCase.reviewer, "mode=\(testCase.mode)")
+            XCTAssertEqual(options.sandboxMode, testCase.sandbox, "mode=\(testCase.mode)")
+            // 移动端所有权限预设都不打开 networkAccess，避免一次发送把网络权限带进 app-server。
+            XCTAssertFalse(options.networkAccess, "mode=\(testCase.mode)")
+            XCTAssertEqual(options.collaborationMode, .default, "mode=\(testCase.mode)")
+        }
     }
 
     func testComposerStateStandardModePreservesFullAccessPreset() throws {
@@ -2911,6 +3117,40 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(store.selectedSessionID, history.id)
         XCTAssertFalse(conversationStore.hasLoadedHistory(sessionID: history.id))
         XCTAssertTrue(store.statusMessage?.contains("HTTP 404") == true)
+    }
+
+    func testSelectingHistorySessionKeepsSelectionWhenNoRolloutFound() async {
+        let project = makeProject(id: "proj_no_rollout")
+        let history = makeSession(
+            id: "codex_no_rollout",
+            projectID: project.id,
+            title: "缺失 rollout",
+            status: "history",
+            source: "codex",
+            resumeID: "missing-rollout"
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [history],
+            messagesError: AgentAPIError.server(status: 404, message: "no rollout found")
+        )
+        let conversationStore = ConversationStore()
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        await store.selectSession(history)
+
+        XCTAssertEqual(client.requestedMessageSessionIDs, [history.id])
+        XCTAssertEqual(store.selectedSessionID, history.id)
+        XCTAssertFalse(conversationStore.hasLoadedHistory(sessionID: history.id))
+        // 历史读取失败只影响历史面板，不应把会话选择清掉或伪装成仍在运行的 turn。
+        XCTAssertTrue(store.statusMessage?.contains("no rollout found") == true)
+        XCTAssertNil(store.selectedForegroundActivity)
     }
 
     func testSendingPromptToCodexHistoryResumesAndKeepsLocalHiMessage() async throws {
@@ -5897,7 +6137,10 @@ final class ConversationDataFlowTests: XCTestCase {
         let client = MockSessionStoreClient(
             projects: [project],
             sessions: [],
-            createSessionResponse: try makeCreateSessionResponse(session: created)
+            createSessionResponse: try makeCreateSessionResponse(session: created),
+            modelOptions: [
+                CodexAppServerModelOption(id: "gpt-goal-default", title: "Goal Default", provider: "openai", isDefault: true)
+            ]
         )
         let store = SessionStore(
             appStore: AppStore(),
@@ -5916,6 +6159,8 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(createPayload.prompt, "实现 iPad 目标任务")
         XCTAssertEqual(createPayload.initialGoalObjective, "实现 iPad 目标任务")
         XCTAssertEqual(createPayload.input, payload.input)
+        XCTAssertEqual(createPayload.turnOptions.model, "gpt-goal-default")
+        XCTAssertEqual(createPayload.turnOptions.collaborationMode, .default)
         XCTAssertEqual(store.selectedSessionID, created.id)
     }
 
@@ -5935,6 +6180,172 @@ final class ConversationDataFlowTests: XCTestCase {
         await store.refreshAppServerModelOptions(force: true)
 
         XCTAssertEqual(store.appServerModelOptions.map(\.model), ["gpt-5.1-codex", "gpt-5-codex"])
+        XCTAssertEqual(client.modelOptionsCallCount, 1)
+    }
+
+    func testNewSessionResolvesMissingModelFromAppServerDefaultBeforeCreate() async throws {
+        let project = makeProject(id: "proj_resolve_model_create")
+        let created = makeSession(id: "sess_resolve_model_create", projectID: project.id, title: "模型解析", status: "running", source: "codex")
+        let options = [
+            CodexAppServerModelOption(id: "gpt-dynamic-default", title: "Dynamic Default", provider: "openai", isDefault: true),
+            CodexAppServerModelOption(id: "gpt-other", title: "Other", provider: "openai")
+        ]
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            createSessionResponse: try makeCreateSessionResponse(session: created),
+            modelOptions: options
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.selectedProjectID = project.id
+        let accepted = await store.sendTurn(CodexAppServerTurnPayload(prompt: "检查默认模型"))
+
+        XCTAssertTrue(accepted)
+        let createPayload = try XCTUnwrap(client.createPayloads.first)
+        // app-server turn/start 必填 model；iPad 发送前必须用 model/list 的默认项补齐，而不是省略。
+        XCTAssertEqual(createPayload.turnOptions.model, "gpt-dynamic-default")
+        XCTAssertEqual(createPayload.turnOptions.modelProvider, "openai")
+        XCTAssertEqual(createPayload.turnOptions.collaborationMode, .default)
+        XCTAssertEqual(client.modelOptionsCallCount, 1)
+    }
+
+    func testExplicitModelBypassesModelListResolutionBeforeCreate() async throws {
+        let project = makeProject(id: "proj_explicit_model_create")
+        let created = makeSession(id: "sess_explicit_model_create", projectID: project.id, title: "显式模型", status: "running", source: "codex")
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            createSessionResponse: try makeCreateSessionResponse(session: created),
+            modelOptions: [
+                CodexAppServerModelOption(id: "gpt-should-not-load", title: "Should Not Load", provider: "openai", isDefault: true)
+            ]
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.selectedProjectID = project.id
+        var options = CodexAppServerTurnOptions.default
+        options.model = "gpt-user-selected"
+        options.modelProvider = "custom-provider"
+        let accepted = await store.sendTurn(CodexAppServerTurnPayload(prompt: "使用显式模型", options: options))
+
+        XCTAssertTrue(accepted)
+        let createPayload = try XCTUnwrap(client.createPayloads.first)
+        XCTAssertEqual(createPayload.turnOptions.model, "gpt-user-selected")
+        XCTAssertEqual(createPayload.turnOptions.modelProvider, "custom-provider")
+        XCTAssertEqual(client.modelOptionsCallCount, 0)
+    }
+
+    func testModelListFailureFallsBackToBuiltInModelBeforeCreate() async throws {
+        let project = makeProject(id: "proj_model_fallback_create")
+        let created = makeSession(id: "sess_model_fallback_create", projectID: project.id, title: "模型兜底", status: "running", source: "codex")
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            createSessionResponse: try makeCreateSessionResponse(session: created),
+            modelOptionsError: MockError.timeout
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.selectedProjectID = project.id
+        let accepted = await store.sendTurn(CodexAppServerTurnPayload(prompt: "模型列表失败也要能发"))
+
+        XCTAssertTrue(accepted)
+        let createPayload = try XCTUnwrap(client.createPayloads.first)
+        XCTAssertEqual(createPayload.turnOptions.model, "gpt-5.5")
+        XCTAssertNil(createPayload.turnOptions.modelProvider)
+        XCTAssertEqual(client.modelOptionsCallCount, 1)
+    }
+
+    func testEmptyPayloadDoesNotRefreshModelOptions() async throws {
+        let project = makeProject(id: "proj_empty_payload_model")
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            modelOptions: [
+                CodexAppServerModelOption(id: "gpt-unused", title: "Unused", provider: "openai", isDefault: true)
+            ]
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.selectedProjectID = project.id
+        let accepted = await store.sendTurn(CodexAppServerTurnPayload(prompt: "   "))
+
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(client.modelOptionsCallCount, 0)
+        XCTAssertTrue(client.createPayloads.isEmpty)
+    }
+
+    func testRunningQueuedTurnResolvesMissingModelButGuidedFollowUpDoesNot() async throws {
+        let project = makeProject(id: "proj_running_resolve_model")
+        let running = makeSession(
+            id: "sess_running_resolve_model",
+            projectID: project.id,
+            title: "运行中模型解析",
+            status: "running",
+            source: "codex",
+            activeTurnID: "turn_active_model"
+        )
+        let options = [
+            CodexAppServerModelOption(id: "gpt-running-default", title: "Running Default", provider: "openai", isDefault: true)
+        ]
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [], modelOptions: options)
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        let queued = await store.sendTurn(CodexAppServerTurnPayload(prompt: "排队新任务"))
+        let guided = await store.sendTurn(CodexAppServerTurnPayload(prompt: "继续当前回复"), runningDelivery: .guided)
+
+        XCTAssertTrue(queued)
+        XCTAssertTrue(guided)
+        let queuedPayload = try XCTUnwrap(sockets[0].sentTurns.first?.payload)
+        XCTAssertEqual(queuedPayload.options.model, "gpt-running-default")
+        XCTAssertEqual(queuedPayload.options.modelProvider, "openai")
+        let guidedPayload = try XCTUnwrap(sockets[0].sentGuidance.first?.payload)
+        // guided follow-up 走 turn/steer，不启动新 turn/start，因此不补 model、不携带 collaborationMode 参数。
+        XCTAssertNil(guidedPayload.options.model)
         XCTAssertEqual(client.modelOptionsCallCount, 1)
     }
 
@@ -6045,11 +6456,13 @@ final class ConversationDataFlowTests: XCTestCase {
         let failedMessage = try XCTUnwrap(conversationStore.messages(for: optimisticSessionID).first)
         XCTAssertEqual(failedMessage.sendStatus, .failed)
         XCTAssertTrue(payloadContainsInlineImage(failedMessage.turnPayload))
-        XCTAssertEqual(failedMessage.turnPayload, payload)
+        XCTAssertEqual(failedMessage.turnPayload?.input, payload.input)
+        XCTAssertEqual(failedMessage.turnPayload?.options.model, "gpt-5.5")
 
         let retryTask = Task { await store.retryFailedUserMessage(failedMessage) }
         await client.waitForCreateRequestCount(2)
         XCTAssertEqual(client.createPayloads[1].input, payload.input)
+        XCTAssertEqual(client.createPayloads[1].turnOptions.model, "gpt-5.5")
         XCTAssertTrue(client.createPayloads[1].input.contains { item in
             if case .image(let url, _) = item {
                 return url == "data:image/png;base64,AA=="
@@ -6192,7 +6605,8 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertTrue(retried)
         let sent = try XCTUnwrap(sockets[0].sentTurns.first)
         XCTAssertEqual(sent.clientMessageID, "client-rich-retry")
-        XCTAssertEqual(sent.payload, payload)
+        XCTAssertEqual(sent.payload.input, payload.input)
+        XCTAssertEqual(sent.payload.options.model, "gpt-5.5")
     }
 
     func testRunningSendKeepsInlineImagePayloadAfterAcceptedForPreview() async throws {
@@ -6234,7 +6648,8 @@ final class ConversationDataFlowTests: XCTestCase {
         let localEcho = try XCTUnwrap(conversationStore.messages(for: running.id).first { $0.clientMessageID != nil })
         let clientMessageID = try XCTUnwrap(localEcho.clientMessageID)
         XCTAssertTrue(payloadContainsInlineImage(localEcho.turnPayload))
-        XCTAssertEqual(localEcho.turnPayload, payload)
+        XCTAssertEqual(localEcho.turnPayload?.input, payload.input)
+        XCTAssertEqual(localEcho.turnPayload?.options.model, "gpt-5.5")
 
         sockets[0].onSendAccepted?(clientMessageID)
         let acceptedMessages = try await waitForConversationMessages(in: conversationStore, sessionID: running.id) { messages in
@@ -6607,6 +7022,60 @@ final class ConversationDataFlowTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
         let afterStaleAccepted = conversationStore.messages(for: running.id)
         XCTAssertEqual(afterStaleAccepted.first(where: { $0.clientMessageID == localEcho.clientMessageID })?.sendStatus, .failed)
+    }
+
+    func testRunningSendFailureNoRolloutFoundMarksLocalEchoFailedAndRetainsRetryPayload() async throws {
+        let project = makeProject(id: "proj_no_rollout_send")
+        let running = makeSession(id: "sess_no_rollout_send", projectID: project.id, title: "No Rollout", status: "running", source: "codex")
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
+        let conversationStore = ConversationStore()
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+        let payload = CodexAppServerTurnPayload(input: [
+            .text("继续这轮"),
+            .image(url: "data:image/png;base64,AA==", detail: .high),
+            .mention(name: "README", path: project.path)
+        ])
+
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        let sent = await store.sendTurn(payload)
+        XCTAssertTrue(sent)
+        let localEcho = try XCTUnwrap(conversationStore.messages(for: running.id).first { $0.role == .user })
+        let clientMessageID = try XCTUnwrap(localEcho.clientMessageID)
+        XCTAssertEqual(localEcho.sendStatus, .sending)
+
+        sockets[0].onSendFailure?(clientMessageID, "app-server 错误 -32000：no rollout found")
+        _ = try await waitForConversationMessages(in: conversationStore, sessionID: running.id) { messages in
+            messages.contains { $0.clientMessageID == clientMessageID && $0.sendStatus == .failed }
+        }
+
+        let failedMessage = try XCTUnwrap(conversationStore.messages(for: running.id).first { $0.clientMessageID == clientMessageID })
+        XCTAssertEqual(failedMessage.turnPayload?.input, payload.input)
+        XCTAssertEqual(failedMessage.turnPayload?.options.model, "gpt-5.5")
+        XCTAssertTrue(payloadContainsInlineImage(failedMessage.turnPayload))
+        XCTAssertTrue(payloadContainsMention(failedMessage.turnPayload, name: "README"))
+        for _ in 0..<50 where store.errorMessage != "发送失败：app-server 错误 -32000：no rollout found" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(store.errorMessage, "发送失败：app-server 错误 -32000：no rollout found")
+        XCTAssertNil(store.selectedForegroundActivity)
     }
 
     func testApprovalDecisionSendsThroughCurrentWebSocket() async throws {
@@ -7537,6 +8006,7 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     let gitPullRequestStatusResults: [String: Result<GitPullRequestStatusResponse, Error>]
     let messagesError: Error?
     let modelOptionsResult: [CodexAppServerModelOption]
+    let modelOptionsError: Error?
     var requestedProjectIDs: [String?] = []
     var requestedWorkspaceIDs: [String] = []
     var requestedCapabilityPaths: [String?] = []
@@ -7603,7 +8073,8 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         gitPullRequestResults: [String: Result<GitPullRequestResponse, Error>] = [:],
         gitPullRequestStatusResults: [String: Result<GitPullRequestStatusResponse, Error>] = [:],
         messagesError: Error? = nil,
-        modelOptions: [CodexAppServerModelOption] = []
+        modelOptions: [CodexAppServerModelOption] = [],
+        modelOptionsError: Error? = nil
     ) {
         self.projectsResult = projects
         self.sessionsResult = sessions
@@ -7644,6 +8115,7 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         self.gitPullRequestStatusResults = gitPullRequestStatusResults
         self.messagesError = messagesError
         self.modelOptionsResult = modelOptions
+        self.modelOptionsError = modelOptionsError
     }
 
     func projects() async throws -> [AgentProject] {
@@ -7652,6 +8124,9 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
 
     func modelOptions() async throws -> [CodexAppServerModelOption] {
         modelOptionsCallCount += 1
+        if let modelOptionsError {
+            throw modelOptionsError
+        }
         return modelOptionsResult
     }
 
@@ -8772,6 +9247,371 @@ extension ConversationDataFlowTests {
         socket.disconnect()
     }
 
+    func testDirectRuntimeRetriesModelListAfterStaleInitializationError() async throws {
+        let project = AgentProject(id: "proj_stale_model", name: "Stale Model", path: "/tmp/stale-model")
+        let pool = FakeCodexAppServerTransportPool()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { pool.make() },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+
+        let modelsTask = Task {
+            try await runtime.modelOptions()
+        }
+
+        let firstTransport = try await waitForFakeAppServerTransport(in: pool, index: 0)
+        let firstInitializeMessages = try await waitForFakeAppServerMessages(firstTransport, count: 1)
+        let firstInitialize = try decodeAppServerRequest(firstInitializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(firstInitialize)
+        transportResponse(firstTransport, id: firstInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let staleModelList = try await waitForFakeAppServerRequest(firstTransport, method: "model/list", after: 1)
+        // 旧 gateway/upstream 状态会把已初始化连接误判为未初始化；客户端应重连并重试一次。
+        transportErrorResponse(firstTransport, id: staleModelList.id, code: -32600, message: "Not initialized")
+
+        let secondTransport = try await waitForFakeAppServerTransport(in: pool, index: 1)
+        let secondInitializeMessages = try await waitForFakeAppServerMessages(secondTransport, count: 1)
+        let secondInitialize = try decodeAppServerRequest(secondInitializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(secondInitialize)
+        transportResponse(secondTransport, id: secondInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let retryModelList = try await waitForFakeAppServerRequest(secondTransport, method: "model/list", after: 1)
+        transportResponse(secondTransport, id: retryModelList.id, result: #"{"models":[{"id":"gpt-stale-default","title":"Stale Default","provider":"openai","isDefault":true},{"id":"gpt-side"}]}"#)
+
+        let options = try await modelsTask.value
+        XCTAssertEqual(options.first?.model, "gpt-stale-default")
+        XCTAssertEqual(options.first?.provider, "openai")
+        XCTAssertEqual(options.first?.isDefault, true)
+    }
+
+    func testDirectRuntimeRetriesNewSessionAfterStaleInitializationError() async throws {
+        let project = AgentProject(id: "proj_stale_init_new", name: "Stale Init New", path: "/tmp/stale-init-new")
+        let pool = FakeCodexAppServerTransportPool()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { pool.make() },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+
+        let createTask = Task {
+            try await client.createSession(CreateSessionRequest(
+                projectID: project.id,
+                prompt: "恢复发送",
+                resumeID: "",
+                clientMessageID: "client_stale_new"
+            ))
+        }
+
+        let firstTransport = try await waitForFakeAppServerTransport(in: pool, index: 0)
+        let firstInitializeMessages = try await waitForFakeAppServerMessages(firstTransport, count: 1)
+        let firstInitialize = try decodeAppServerRequest(firstInitializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(firstInitialize)
+        transportResponse(firstTransport, id: firstInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let firstThreadMessages = try await waitForFakeAppServerMessages(firstTransport, count: 3)
+        let staleThreadStart = try decodeAppServerRequest(firstThreadMessages[2])
+        XCTAssertEqual(staleThreadStart.method, "thread/start")
+        // app-server 上游重启后可能对旧连接返回 Not initialized；这里应重建连接而不是把用户发送直接标失败。
+        transportErrorResponse(firstTransport, id: staleThreadStart.id, code: -32600, message: "Not initialized")
+
+        let secondTransport = try await waitForFakeAppServerTransport(in: pool, index: 1)
+        let secondInitializeMessages = try await waitForFakeAppServerMessages(secondTransport, count: 1)
+        let secondInitialize = try decodeAppServerRequest(secondInitializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(secondInitialize)
+        transportResponse(secondTransport, id: secondInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let secondThreadMessages = try await waitForFakeAppServerMessages(secondTransport, count: 3)
+        let threadStart = try decodeAppServerRequest(secondThreadMessages[2])
+        XCTAssertEqual(threadStart.method, "thread/start")
+        transportResponse(secondTransport, id: threadStart.id, result: #"{"thread":{"id":"thr_stale_new","sessionId":"thr_stale_new","preview":"恢复发送","ephemeral":false,"modelProvider":"openai","createdAt":1780490800,"updatedAt":1780490801,"status":{"type":"idle"},"path":null,"cwd":"/tmp/stale-init-new","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"恢复发送","turns":[]}}"#)
+
+        let turnStart = try await waitForFakeAppServerRequest(secondTransport, method: "turn/start", after: 3)
+        XCTAssertEqual(turnStart.params?.objectValue?["threadId"]?.stringValue, "thr_stale_new")
+        XCTAssertEqual(turnStart.params?.objectValue?["clientUserMessageId"]?.stringValue, "client_stale_new")
+        transportResponse(secondTransport, id: turnStart.id, result: #"{"turn":{"id":"turn_stale_new","items":[],"itemsView":{"type":"complete"},"status":"inProgress","error":null,"startedAt":1780490802,"completedAt":null,"durationMs":null}}"#)
+
+        let created = try await createTask.value
+        XCTAssertEqual(created.session.id, "thr_stale_new")
+        XCTAssertEqual(created.session.activeTurnID, "turn_stale_new")
+    }
+
+    func testDirectRuntimeRetriesGoalSetAfterStaleInitializationError() async throws {
+        let project = AgentProject(id: "proj_stale_goal", name: "Stale Goal", path: "/tmp/stale-goal")
+        let pool = FakeCodexAppServerTransportPool()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { pool.make() },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+
+        let createTask = Task {
+            try await client.createSession(CreateSessionRequest(
+                projectID: project.id,
+                prompt: "",
+                input: [],
+                resumeID: "",
+                clientMessageID: nil
+            ))
+        }
+
+        let firstTransport = try await waitForFakeAppServerTransport(in: pool, index: 0)
+        let initializeMessages = try await waitForFakeAppServerMessages(firstTransport, count: 1)
+        let initialize = try decodeAppServerRequest(initializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(initialize)
+        transportResponse(firstTransport, id: initialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let threadMessages = try await waitForFakeAppServerMessages(firstTransport, count: 3)
+        let threadStart = try decodeAppServerRequest(threadMessages[2])
+        XCTAssertEqual(threadStart.method, "thread/start")
+        transportResponse(firstTransport, id: threadStart.id, result: #"{"thread":{"id":"thr_stale_goal","sessionId":"thr_stale_goal","preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1780490810,"updatedAt":1780490811,"status":{"type":"idle"},"path":null,"cwd":"/tmp/stale-goal","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"目标恢复","turns":[]}}"#)
+        _ = try await createTask.value
+
+        let goalTask = Task {
+            try await runtime.setThreadGoal(threadID: "thr_stale_goal", objective: "恢复目标", status: .active)
+        }
+        let staleGoalSet = try await waitForFakeAppServerRequest(firstTransport, method: "thread/goal/set", after: 3)
+        transportErrorResponse(firstTransport, id: staleGoalSet.id, code: -32600, message: "Not initialized")
+
+        let secondTransport = try await waitForFakeAppServerTransport(in: pool, index: 1)
+        let secondInitializeMessages = try await waitForFakeAppServerMessages(secondTransport, count: 1)
+        let secondInitialize = try decodeAppServerRequest(secondInitializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(secondInitialize)
+        transportResponse(secondTransport, id: secondInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let goalSet = try await waitForFakeAppServerRequest(secondTransport, method: "thread/goal/set", after: 1)
+        XCTAssertEqual(goalSet.params?.objectValue?["threadId"]?.stringValue, "thr_stale_goal")
+        XCTAssertEqual(goalSet.params?.objectValue?["objective"]?.stringValue, "恢复目标")
+        transportResponse(secondTransport, id: goalSet.id, result: #"{"goal":{"threadId":"thr_stale_goal","objective":"恢复目标","status":"active","tokenBudget":null,"tokensUsed":0,"timeUsedSeconds":0,"createdAt":1780490812,"updatedAt":1780490812}}"#)
+
+        let goal = try await goalTask.value
+        XCTAssertEqual(goal.threadID, "thr_stale_goal")
+        XCTAssertEqual(goal.objective, "恢复目标")
+        XCTAssertEqual(goal.status, .active)
+    }
+
+    func testDirectRuntimeRetriesQueuedTurnStartAfterStaleInitializationError() async throws {
+        let project = AgentProject(id: "proj_stale_turn", name: "Stale Turn", path: "/tmp/stale-turn")
+        let pool = FakeCodexAppServerTransportPool()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { pool.make() },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+
+        let listTask = Task {
+            try await runtime.sessionsPage(projectID: project.id, cursor: nil, limit: nil)
+        }
+        let firstTransport = try await waitForFakeAppServerTransport(in: pool, index: 0)
+        let initializeMessages = try await waitForFakeAppServerMessages(firstTransport, count: 1)
+        let initialize = try decodeAppServerRequest(initializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(initialize)
+        transportResponse(firstTransport, id: initialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let threadList = try await waitForFakeAppServerRequest(firstTransport, method: "thread/list", after: 1)
+        XCTAssertEqual(threadList.params?.objectValue?["cwd"]?.stringValue, project.path)
+        transportResponse(firstTransport, id: threadList.id, result: #"{"data":[{"id":"thr_stale_turn","sessionId":"thr_stale_turn","preview":"可恢复 turn","ephemeral":false,"modelProvider":"openai","createdAt":1780490820,"updatedAt":1780490821,"status":{"type":"idle"},"path":null,"cwd":"/tmp/stale-turn","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"恢复 turn","turns":[]}],"nextCursor":null}"#)
+        let page = try await listTask.value
+        XCTAssertEqual(page.sessions.first?.id, "thr_stale_turn")
+
+        let startTask = Task {
+            try await runtime.startTurn(
+                sessionID: "thr_stale_turn",
+                payload: CodexAppServerTurnPayload(prompt: "旧连接后继续"),
+                clientMessageID: "client_stale_turn"
+            )
+        }
+        let beforeResumeMessages = await firstTransport.sentMessages()
+        let firstResume = try await waitForFakeAppServerRequest(firstTransport, method: "thread/resume", after: beforeResumeMessages.count)
+        XCTAssertEqual(firstResume.params?.objectValue?["threadId"]?.stringValue, "thr_stale_turn")
+        transportResponse(firstTransport, id: firstResume.id, result: #"{"thread":{"id":"thr_stale_turn","sessionId":"thr_stale_turn","preview":"可恢复 turn","ephemeral":false,"modelProvider":"openai","createdAt":1780490820,"updatedAt":1780490822,"status":{"type":"idle"},"path":null,"cwd":"/tmp/stale-turn","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"恢复 turn","turns":[]}}"#)
+
+        let beforeTurnMessages = await firstTransport.sentMessages()
+        let staleTurnStart = try await waitForFakeAppServerRequest(firstTransport, method: "turn/start", after: beforeTurnMessages.count)
+        XCTAssertEqual(staleTurnStart.params?.objectValue?["clientUserMessageId"]?.stringValue, "client_stale_turn")
+        transportErrorResponse(firstTransport, id: staleTurnStart.id, code: -32600, message: "Not initialized")
+
+        let secondTransport = try await waitForFakeAppServerTransport(in: pool, index: 1)
+        let secondInitializeMessages = try await waitForFakeAppServerMessages(secondTransport, count: 1)
+        let secondInitialize = try decodeAppServerRequest(secondInitializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(secondInitialize)
+        transportResponse(secondTransport, id: secondInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        // 新连接必须重新 thread/resume，然后再发同一个 turn/start；否则 app-server 仍会认为线程未绑定。
+        let secondResume = try await waitForFakeAppServerRequest(secondTransport, method: "thread/resume", after: 1)
+        XCTAssertEqual(secondResume.params?.objectValue?["threadId"]?.stringValue, "thr_stale_turn")
+        transportResponse(secondTransport, id: secondResume.id, result: #"{"thread":{"id":"thr_stale_turn","sessionId":"thr_stale_turn","preview":"可恢复 turn","ephemeral":false,"modelProvider":"openai","createdAt":1780490820,"updatedAt":1780490823,"status":{"type":"idle"},"path":null,"cwd":"/tmp/stale-turn","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"恢复 turn","turns":[]}}"#)
+
+        let retryTurnStart = try await waitForFakeAppServerRequest(secondTransport, method: "turn/start", after: 2)
+        let retryParams = try XCTUnwrap(retryTurnStart.params?.objectValue)
+        XCTAssertEqual(retryParams["threadId"]?.stringValue, "thr_stale_turn")
+        XCTAssertEqual(retryParams["clientUserMessageId"]?.stringValue, "client_stale_turn")
+        XCTAssertEqual(retryParams["collaborationMode"]?.objectValue?["mode"]?.stringValue, "default")
+        transportResponse(secondTransport, id: retryTurnStart.id, result: #"{"turn":{"id":"turn_stale_turn","items":[],"itemsView":{"type":"complete"},"status":"inProgress","error":null,"startedAt":1780490824,"completedAt":null,"durationMs":null}}"#)
+
+        let turnID = try await startTask.value
+        XCTAssertEqual(turnID, "turn_stale_turn")
+    }
+
+    func testDirectRuntimeDoesNotRetryNonStaleInvalidRequestError() async throws {
+        let project = AgentProject(id: "proj_invalid_32600", name: "Invalid 32600", path: "/tmp/invalid-32600")
+        let pool = FakeCodexAppServerTransportPool()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { pool.make() },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+
+        let createTask = Task {
+            try await client.createSession(CreateSessionRequest(
+                projectID: project.id,
+                prompt: "非法请求不应重试",
+                resumeID: "",
+                clientMessageID: "client_invalid_32600"
+            ))
+        }
+        let firstTransport = try await waitForFakeAppServerTransport(in: pool, index: 0)
+        let initializeMessages = try await waitForFakeAppServerMessages(firstTransport, count: 1)
+        let initialize = try decodeAppServerRequest(initializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(initialize)
+        transportResponse(firstTransport, id: initialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let threadStart = try await waitForFakeAppServerRequest(firstTransport, method: "thread/start", after: 1)
+        transportErrorResponse(firstTransport, id: threadStart.id, code: -32600, message: "Invalid request: collaborationMode.mode")
+
+        do {
+            _ = try await createTask.value
+            XCTFail("非 Not initialized 的 -32600 应直接暴露协议错误")
+        } catch let error as CodexAppServerConnectionError {
+            guard case .appServer(let appServerError) = error else {
+                XCTFail("应保留 app-server 错误类型，got \(error)")
+                return
+            }
+            XCTAssertEqual(appServerError.code, -32600)
+            XCTAssertEqual(appServerError.message, "Invalid request: collaborationMode.mode")
+        }
+        // 只有 Not initialized 才允许自动重建连接；协议错误重试会掩盖真正的 payload bug。
+        XCTAssertNil(pool.transport(at: 1))
+    }
+
+    func testDirectRuntimeDoesNotRetryNoRolloutFoundAppServerError() async throws {
+        let project = AgentProject(id: "proj_no_rollout_direct", name: "No Rollout Direct", path: "/tmp/no-rollout-direct")
+        let pool = FakeCodexAppServerTransportPool()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { pool.make() },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+
+        let listTask = Task {
+            try await runtime.sessionsPage(projectID: project.id, cursor: nil, limit: nil)
+        }
+        let transport = try await waitForFakeAppServerTransport(in: pool, index: 0)
+        let initializeMessages = try await waitForFakeAppServerMessages(transport, count: 1)
+        let initialize = try decodeAppServerRequest(initializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(initialize)
+        transportResponse(transport, id: initialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let threadList = try await waitForFakeAppServerRequest(transport, method: "thread/list", after: 1)
+        transportResponse(transport, id: threadList.id, result: #"{"data":[{"id":"thr_no_rollout","sessionId":"thr_no_rollout","preview":"缺失 rollout","ephemeral":false,"modelProvider":"openai","createdAt":1780490830,"updatedAt":1780490831,"status":{"type":"idle"},"path":null,"cwd":"/tmp/no-rollout-direct","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"缺失 rollout","turns":[]}],"nextCursor":null}"#)
+        _ = try await listTask.value
+
+        let startTask = Task {
+            try await runtime.startTurn(
+                sessionID: "thr_no_rollout",
+                payload: CodexAppServerTurnPayload(prompt: "继续"),
+                clientMessageID: "client_no_rollout"
+            )
+        }
+        let beforeResumeMessages = await transport.sentMessages()
+        let resume = try await waitForFakeAppServerRequest(transport, method: "thread/resume", after: beforeResumeMessages.count)
+        transportResponse(transport, id: resume.id, result: #"{"thread":{"id":"thr_no_rollout","sessionId":"thr_no_rollout","preview":"缺失 rollout","ephemeral":false,"modelProvider":"openai","createdAt":1780490830,"updatedAt":1780490832,"status":{"type":"idle"},"path":null,"cwd":"/tmp/no-rollout-direct","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"缺失 rollout","turns":[]}}"#)
+
+        let beforeTurnMessages = await transport.sentMessages()
+        let turnStart = try await waitForFakeAppServerRequest(transport, method: "turn/start", after: beforeTurnMessages.count)
+        transportErrorResponse(transport, id: turnStart.id, code: -32000, message: "no rollout found")
+
+        do {
+            _ = try await startTask.value
+            XCTFail("no rollout found 是上游业务状态错误，不应被当成 stale initialize 自动重试")
+        } catch let error as CodexAppServerConnectionError {
+            guard case .appServer(let appServerError) = error else {
+                XCTFail("应保留 app-server 错误类型，got \(error)")
+                return
+            }
+            XCTAssertEqual(appServerError.code, -32000)
+            XCTAssertEqual(appServerError.message, "no rollout found")
+        }
+        XCTAssertNil(pool.transport(at: 1))
+    }
+
+    func testEmptyNewDirectSessionResumesBeforeFirstFollowUpTurn() async throws {
+        let project = AgentProject(id: "proj_empty_direct", name: "Empty Direct", path: "/tmp/empty-direct")
+        let transport = FakeCodexAppServerTransport()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { transport },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+
+        let createTask = Task {
+            try await client.createSession(CreateSessionRequest(
+                projectID: project.id,
+                prompt: "",
+                input: [],
+                resumeID: "",
+                clientMessageID: nil
+            ))
+        }
+
+        let initializeMessages = try await waitForFakeAppServerMessages(transport, count: 1)
+        let initialize = try decodeAppServerRequest(initializeMessages[0])
+        assertInitializeEnablesExperimentalAPI(initialize)
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: initialize.id)),"result":{"userAgent":"fake-codex","platformFamily":"macos"}}"#)
+
+        let threadMessages = try await waitForFakeAppServerMessages(transport, count: 3)
+        let threadStart = try decodeAppServerRequest(threadMessages[2])
+        XCTAssertEqual(threadStart.method, "thread/start")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: threadStart.id)),"result":{"thread":{"id":"thr_empty_direct","sessionId":"thr_empty_direct","preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1780490600,"updatedAt":1780490601,"status":{"type":"idle"},"path":null,"cwd":"/tmp/empty-direct","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"空会话","turns":[]}}}"#)
+
+        let created = try await createTask.value
+        XCTAssertEqual(created.session.id, "thr_empty_direct")
+
+        let socket = CodexAppServerSessionWebSocketClient(runtime: runtime)
+        var statuses: [WebSocketStatus] = []
+        socket.onStatus = { statuses.append($0) }
+        socket.connect(sessionID: "thr_empty_direct")
+
+        let resume = try await waitForFakeAppServerRequest(transport, method: "thread/resume", after: 3)
+        XCTAssertEqual(resume.params?.objectValue?["threadId"]?.stringValue, "thr_empty_direct")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: resume.id)),"result":{"thread":{"id":"thr_empty_direct","sessionId":"thr_empty_direct","preview":"","ephemeral":false,"modelProvider":"openai","createdAt":1780490600,"updatedAt":1780490602,"status":{"type":"idle"},"path":null,"cwd":"/tmp/empty-direct","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"空会话","turns":[]}}}"#)
+
+        for _ in 0..<200 where !statuses.contains(.connected) {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(statuses.contains(.connected))
+
+        XCTAssertTrue(socket.sendTurn(CodexAppServerTurnPayload(prompt: "第一条消息"), clientMessageID: "client_empty_first"))
+        let turnStart = try await waitForFakeAppServerRequest(transport, method: "turn/start", after: 4)
+        XCTAssertEqual(turnStart.params?.objectValue?["threadId"]?.stringValue, "thr_empty_direct")
+        XCTAssertEqual(turnStart.params?.objectValue?["clientUserMessageId"]?.stringValue, "client_empty_first")
+        XCTAssertEqual(turnStart.params?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue, "default")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: turnStart.id)),"result":{"turn":{"id":"turn_empty_first","items":[],"itemsView":{"type":"complete"},"status":"inProgress","error":null,"startedAt":1780490603,"completedAt":null,"durationMs":null}}}"#)
+
+        socket.disconnect()
+    }
+
     func testDirectRuntimeAutoSkipsUserInputWhenPlanGuidanceDisabled() async throws {
         let project = AgentProject(id: "proj_plan_skip", name: "Plan Skip", path: "/tmp/plan-skip")
         let transport = FakeCodexAppServerTransport()
@@ -9797,16 +10637,27 @@ extension ConversationDataFlowTests {
 
         let sendTask = Task { await store.sendPrompt("帮我验收 direct Store") }
         let threadMessages = try await waitForFakeAppServerMessages(transport, count: 4)
-        let threadStart = try decodeAppServerRequest(threadMessages[3])
+        let modelList = try decodeAppServerRequest(threadMessages[3])
+        XCTAssertEqual(modelList.method, "model/list")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: modelList.id)),"result":{"models":[{"id":"gpt-store-default","name":"Store Default","provider":"openai","isDefault":true}]}}"#)
+
+        let threadStartMessages = try await waitForFakeAppServerMessages(transport, count: 5)
+        let threadStart = try decodeAppServerRequest(threadStartMessages[4])
         XCTAssertEqual(threadStart.method, "thread/start")
+        XCTAssertEqual(threadStart.params?.objectValue?["model"]?.stringValue, "gpt-store-default")
+        XCTAssertEqual(threadStart.params?.objectValue?["modelProvider"]?.stringValue, "openai")
         transport.enqueue(#"{"id":\#(try jsonFragment(for: threadStart.id)),"result":{"thread":{"id":"thr_store_direct","sessionId":"thr_store_direct","preview":"帮我验收 direct Store","ephemeral":false,"modelProvider":"openai","createdAt":1780490100,"updatedAt":1780490101,"status":{"type":"idle"},"path":null,"cwd":"/tmp/store-direct","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"Store 直连","turns":[]}}}"#)
 
-        let turnMessages = try await waitForFakeAppServerMessages(transport, count: 5)
-        let turnStart = try decodeAppServerRequest(turnMessages[4])
+        let turnMessages = try await waitForFakeAppServerMessages(transport, count: 6)
+        let turnStart = try decodeAppServerRequest(turnMessages[5])
         XCTAssertEqual(turnStart.method, "turn/start")
+        XCTAssertEqual(turnStart.params?.objectValue?["model"]?.stringValue, "gpt-store-default")
+        let collaborationMode = try XCTUnwrap(turnStart.params?.objectValue?["collaborationMode"]?.objectValue)
+        XCTAssertEqual(collaborationMode["mode"]?.stringValue, "default")
+        XCTAssertEqual(collaborationMode["settings"]?.objectValue?["model"]?.stringValue, "gpt-store-default")
         transport.enqueue(#"{"id":\#(try jsonFragment(for: turnStart.id)),"result":{"turn":{"id":"turn_store_direct","items":[],"itemsView":{"type":"complete"},"status":"inProgress","error":null,"startedAt":1780490102,"completedAt":null,"durationMs":null}}}"#)
-        let historyMessages = try await waitForFakeAppServerMessages(transport, count: 6)
-        let historyRead = try decodeAppServerRequest(historyMessages[5])
+        let historyMessages = try await waitForFakeAppServerMessages(transport, count: 7)
+        let historyRead = try decodeAppServerRequest(historyMessages[6])
         XCTAssertEqual(historyRead.method, "thread/read")
         transport.enqueue(#"{"id":\#(try jsonFragment(for: historyRead.id)),"result":{"thread":{"id":"thr_store_direct","sessionId":"thr_store_direct","preview":"帮我验收 direct Store","ephemeral":false,"modelProvider":"openai","createdAt":1780490100,"updatedAt":1780490102,"status":{"type":"active","activeFlags":[]},"path":null,"cwd":"/tmp/store-direct","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"Store 直连","turns":[]}}}"#)
         let didSend = await sendTask.value
@@ -9906,16 +10757,27 @@ extension ConversationDataFlowTests {
 
         let sendTask = Task { await store.sendPrompt("继续排查") }
         let resumeMessages = try await waitForFakeAppServerMessages(transport, count: 5)
-        let resumeRequest = try decodeAppServerRequest(resumeMessages[4])
+        let modelList = try decodeAppServerRequest(resumeMessages[4])
+        XCTAssertEqual(modelList.method, "model/list")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: modelList.id)),"result":{"models":[{"id":"gpt-history-default","name":"History Default","provider":"openai","isDefault":true}]}}"#)
+
+        let resumeRequestMessages = try await waitForFakeAppServerMessages(transport, count: 6)
+        let resumeRequest = try decodeAppServerRequest(resumeRequestMessages[5])
         XCTAssertEqual(resumeRequest.method, "thread/resume")
         XCTAssertEqual(resumeRequest.params?.objectValue?["threadId"]?.stringValue, "thr_idle_history")
+        XCTAssertEqual(resumeRequest.params?.objectValue?["model"]?.stringValue, "gpt-history-default")
+        XCTAssertEqual(resumeRequest.params?.objectValue?["modelProvider"]?.stringValue, "openai")
         transport.enqueue(#"{"id":\#(try jsonFragment(for: resumeRequest.id)),"result":{"thread":{"id":"thr_idle_history","sessionId":"thr_idle_history","preview":"继续排查","ephemeral":false,"modelProvider":"openai","createdAt":1780490300,"updatedAt":1780490302,"status":{"type":"idle"},"path":null,"cwd":"/tmp/direct-history","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"历史 idle","turns":[]}}}"#)
 
-        let turnMessages = try await waitForFakeAppServerMessages(transport, count: 6)
-        let turnStart = try decodeAppServerRequest(turnMessages[5])
+        let turnMessages = try await waitForFakeAppServerMessages(transport, count: 7)
+        let turnStart = try decodeAppServerRequest(turnMessages[6])
         XCTAssertEqual(turnStart.method, "turn/start")
         XCTAssertEqual(turnStart.params?.objectValue?["threadId"]?.stringValue, "thr_idle_history")
         XCTAssertEqual(turnStart.params?.objectValue?["clientUserMessageId"]?.stringValue?.isEmpty, false)
+        XCTAssertEqual(turnStart.params?.objectValue?["model"]?.stringValue, "gpt-history-default")
+        let collaborationMode = try XCTUnwrap(turnStart.params?.objectValue?["collaborationMode"]?.objectValue)
+        XCTAssertEqual(collaborationMode["mode"]?.stringValue, "default")
+        XCTAssertEqual(collaborationMode["settings"]?.objectValue?["model"]?.stringValue, "gpt-history-default")
         transport.enqueue(#"{"id":\#(try jsonFragment(for: turnStart.id)),"result":{"turn":{"id":"turn_idle_history","items":[],"itemsView":{"type":"complete"},"status":"inProgress","error":null,"startedAt":1780490303,"completedAt":null,"durationMs":null}}}"#)
 
         let sent = await sendTask.value
@@ -10250,7 +11112,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(threadStart.method, "thread/start")
         let threadParams = try XCTUnwrap(threadStart.params?.objectValue)
         XCTAssertEqual(threadParams["cwd"]?.stringValue, project.path)
-        XCTAssertEqual(threadParams["model"]?.stringValue, "gpt-5.5")
+        XCTAssertNil(threadParams["model"]?.stringValue)
         XCTAssertEqual(threadParams["approvalPolicy"]?.stringValue, "on-request")
         XCTAssertEqual(threadParams["approvalsReviewer"]?.stringValue, "user")
         XCTAssertEqual(threadParams["sandbox"]?.stringValue, "danger-full-access")
@@ -10265,7 +11127,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(turnStart.method, "turn/start")
         let turnParams = try XCTUnwrap(turnStart.params?.objectValue)
         XCTAssertEqual(turnParams["cwd"]?.stringValue, project.path)
-        XCTAssertEqual(turnParams["model"]?.stringValue, "gpt-5.5")
+        XCTAssertNil(turnParams["model"]?.stringValue)
         XCTAssertEqual(turnParams["effort"]?.stringValue, "xhigh")
         XCTAssertEqual(turnParams["approvalPolicy"]?.stringValue, "on-request")
         XCTAssertEqual(turnParams["approvalsReviewer"]?.stringValue, "user")
@@ -10682,6 +11544,12 @@ private func jsonFragment(for id: CodexAppServerRequestID) throws -> String {
 private func transportResponse(_ transport: FakeCodexAppServerTransport, id: CodexAppServerRequestID, result: String) {
     let encodedID = (try? jsonFragment(for: id)) ?? "null"
     transport.enqueue(#"{"id":\#(encodedID),"result":\#(result)}"#)
+}
+
+private func transportErrorResponse(_ transport: FakeCodexAppServerTransport, id: CodexAppServerRequestID, code: Int, message: String) {
+    let encodedID = (try? jsonFragment(for: id)) ?? "null"
+    let encodedMessage = (try? String(decoding: JSONEncoder().encode(message), as: UTF8.self)) ?? #""app-server error""#
+    transport.enqueue(#"{"id":\#(encodedID),"error":{"code":\#(code),"message":\#(encodedMessage)}}"#)
 }
 
 private func makeProject(id: String) -> AgentProject {

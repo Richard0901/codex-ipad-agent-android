@@ -200,6 +200,15 @@ struct ComposerState {
         sendMode = .standard
     }
 
+    func runningTurnDelivery(canUseGuidedFollowUp: Bool, guidedFollowUpEnabled: Bool) -> RunningTurnDelivery {
+        // 目标/计划都必须启动一个新的 turn：目标要先写 thread 级元数据，计划模式要把
+        // collaborationMode 放进 turn/start。turn/steer 只补充当前 turn 的输入，会丢掉这些启动参数。
+        guard sendMode == .standard else {
+            return .queued
+        }
+        return canUseGuidedFollowUp && guidedFollowUpEnabled ? .guided : .queued
+    }
+
     mutating func takeDraftForSubmit(
         isLoading: Bool,
         turnOptionsOverride: CodexAppServerTurnOptions? = nil

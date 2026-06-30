@@ -255,7 +255,10 @@ struct ComposerView: View {
     @discardableResult
     private func submitGoalDraft() -> Bool {
         var options = preparedTurnOptionsForSubmit()
-        options.collaborationMode = nil
+        // 目标模式不是 Plan Mode：目标元数据走 thread/goal/set，turn/start 仍显式声明 default，
+        // 防止 app-server 沿用上一轮规划协作状态。
+        options.collaborationMode = .default
+        options.planGuidanceEnabled = false
         guard let submitted = composerState.takeDraftForSubmit(
             isLoading: sessionStore.isLoading || sessionStore.isUpdatingThreadGoal,
             turnOptionsOverride: options
@@ -296,7 +299,8 @@ struct ComposerView: View {
             options.collaborationMode = .plan
             options.planGuidanceEnabled = true
         } else {
-            options.collaborationMode = nil
+            // 普通发送也必须显式退出 Plan Mode，不能依赖 nil/absent。
+            options.collaborationMode = .default
             options.planGuidanceEnabled = false
         }
         return options
@@ -310,7 +314,10 @@ struct ComposerView: View {
     }
 
     private var runningTurnDeliveryForSubmit: RunningTurnDelivery {
-        canUseGuidedFollowUp && guidedFollowUpEnabled ? .guided : .queued
+        composerState.runningTurnDelivery(
+            canUseGuidedFollowUp: canUseGuidedFollowUp,
+            guidedFollowUpEnabled: guidedFollowUpEnabled
+        )
     }
 
     private var canSubmitDraft: Bool {

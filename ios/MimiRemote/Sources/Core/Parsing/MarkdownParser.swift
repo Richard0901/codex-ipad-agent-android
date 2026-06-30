@@ -5,15 +5,22 @@ struct MarkdownParser {
     static let shared = MarkdownParser()
 
     func parse(_ content: String, baseByteOffset: Int = 0) -> MarkdownParseResult {
-        let lineIndex = SourceLineByteIndex(content)
-        var nextID = 0
-        let document = Document(parsing: content, options: [.disableSmartOpts])
-        let blocks = document.children.compactMap {
-            block(from: $0, lineIndex: lineIndex, baseByteOffset: baseByteOffset, nextID: &nextID)
+        if let proposedPlanBlocks = proposedPlanAwareBlocks(in: content, baseByteOffset: baseByteOffset) {
+            let normalizedBlocks = proposedPlanBlocks.isEmpty
+                ? [MarkdownBlock(id: 0, sourceByteRange: baseByteOffset..<baseByteOffset, kind: .paragraph(.empty))]
+                : proposedPlanBlocks
+            return MarkdownParseResult(
+                blocks: normalizedBlocks,
+                openTailByteOffset: openTailStartByteOffset(
+                    for: normalizedBlocks,
+                    in: content,
+                    baseByteOffset: baseByteOffset
+                )
+            )
         }
-
+        let blocks = markdownBlocksOnly(content, baseByteOffset: baseByteOffset)
         let normalizedBlocks = blocks.isEmpty
-            ? [MarkdownBlock(id: nextID, sourceByteRange: 0..<0, kind: .paragraph(.empty))]
+            ? [MarkdownBlock(id: 0, sourceByteRange: baseByteOffset..<baseByteOffset, kind: .paragraph(.empty))]
             : blocks
 
         return MarkdownParseResult(
@@ -24,6 +31,111 @@ struct MarkdownParser {
                 baseByteOffset: baseByteOffset
             )
         )
+    }
+
+    private func markdownBlocksOnly(_ content: String, baseByteOffset: Int) -> [MarkdownBlock] {
+        let lineIndex = SourceLineByteIndex(content)
+        var nextID = 0
+        let document = Document(parsing: content, options: [.disableSmartOpts])
+        return document.children.compactMap {
+            block(from: $0, lineIndex: lineIndex, baseByteOffset: baseByteOffset, nextID: &nextID)
+        }
+    }
+
+    private func proposedPlanAwareBlocks(in content: String, baseByteOffset: Int) -> [MarkdownBlock]? {
+        let lines = sourceLines(in: content)
+        guard let openingIndex = lines.firstIndex(where: { $0.trimmedText == "<proposed_plan>" }) else {
+            return nil
+        }
+
+        let opening = lines[openingIndex]
+        let closingIndex = lines[(openingIndex + 1)...].firstIndex(where: { $0.trimmedText == "</proposed_plan>" })
+        let closing = closingIndex.map { lines[$0] }
+        var blocks: [MarkdownBlock] = []
+
+        // proposed_plan 是 app-server 的结构化 Plan Mode 包裹；只认独立行，避免误伤普通 XML/HTML 片段。
+        appendMarkdownSegment(
+            content[content.startIndex..<opening.startIndex],
+            baseByteOffset: baseByteOffset,
+            segmentStartByte: 0,
+            into: &blocks
+        )
+
+        let innerStartIndex = opening.nextIndex
+        let innerStartByte = opening.nextByte
+        let innerEndIndex = closing?.startIndex ?? content.endIndex
+        let inner = content[innerStartIndex..<innerEndIndex]
+        let innerBlocks = normalizedChildBlocks(markdownBlocksOnly(String(inner), baseByteOffset: baseByteOffset + innerStartByte))
+        let wrapperEndByte = closing?.nextByte ?? content.utf8.count
+        blocks.append(MarkdownBlock(
+            id: blocks.count,
+            sourceByteRange: (baseByteOffset + opening.startByte)..<(baseByteOffset + wrapperEndByte),
+            kind: .proposedPlan(blocks: innerBlocks, isComplete: closing != nil)
+        ))
+
+        if let closing {
+            appendMarkdownSegment(
+                content[closing.nextIndex..<content.endIndex],
+                baseByteOffset: baseByteOffset,
+                segmentStartByte: closing.nextByte,
+                into: &blocks
+            )
+        }
+
+        return renumber(blocks)
+    }
+
+    private func appendMarkdownSegment(
+        _ segment: Substring,
+        baseByteOffset: Int,
+        segmentStartByte: Int,
+        into blocks: inout [MarkdownBlock]
+    ) {
+        guard !segment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        blocks.append(contentsOf: markdownBlocksOnly(String(segment), baseByteOffset: baseByteOffset + segmentStartByte))
+    }
+
+    private func normalizedChildBlocks(_ blocks: [MarkdownBlock]) -> [MarkdownBlock] {
+        guard !blocks.isEmpty else {
+            return [MarkdownBlock(id: 0, sourceByteRange: nil, kind: .paragraph(.empty))]
+        }
+        return renumber(blocks)
+    }
+
+    private func renumber(_ blocks: [MarkdownBlock]) -> [MarkdownBlock] {
+        blocks.enumerated().map { index, block in
+            MarkdownBlock(id: index, sourceByteRange: block.sourceByteRange, kind: block.kind)
+        }
+    }
+
+    private func sourceLines(in content: String) -> [MarkdownSourceLine] {
+        var lines: [MarkdownSourceLine] = []
+        var startIndex = content.startIndex
+        var startByte = 0
+
+        while startIndex < content.endIndex {
+            let newlineIndex = content[startIndex...].firstIndex(of: "\n")
+            let contentEndIndex = newlineIndex ?? content.endIndex
+            let nextIndex = newlineIndex.map { content.index(after: $0) } ?? content.endIndex
+            let lineText = String(content[startIndex..<contentEndIndex])
+            let contentByteCount = content[startIndex..<contentEndIndex].utf8.count
+            let nextByte = startByte + content[startIndex..<nextIndex].utf8.count
+            lines.append(MarkdownSourceLine(
+                startIndex: startIndex,
+                contentEndIndex: contentEndIndex,
+                nextIndex: nextIndex,
+                startByte: startByte,
+                contentEndByte: startByte + contentByteCount,
+                nextByte: nextByte,
+                trimmedText: lineText.trimmingCharacters(in: .whitespacesAndNewlines)
+            ))
+            startIndex = nextIndex
+            startByte = nextByte
+        }
+
+        return lines
     }
 
     private func block(
@@ -293,6 +405,16 @@ private struct SourceLineByteIndex {
         let lineStart = lineStartByteOffsets[lineIndex]
         return lineStart + max(0, location.column - 1)
     }
+}
+
+private struct MarkdownSourceLine {
+    let startIndex: String.Index
+    let contentEndIndex: String.Index
+    let nextIndex: String.Index
+    let startByte: Int
+    let contentEndByte: Int
+    let nextByte: Int
+    let trimmedText: String
 }
 
 private struct InlineTextBuilder {

@@ -1,4 +1,4 @@
-//go:build ignore
+//go:build ignore || ipadwsprobe
 
 package main
 
@@ -83,6 +83,7 @@ type rpcClient struct {
 type workerResult struct {
 	Worker             int           `json:"worker"`
 	CWD                string        `json:"cwd"`
+	Model              string        `json:"model"`
 	ThreadID           string        `json:"thread_id,omitempty"`
 	TurnID             string        `json:"turn_id,omitempty"`
 	StartedNewThread   bool          `json:"started_new_thread"`
@@ -107,6 +108,12 @@ type listedThread struct {
 	UpdatedAt any    `json:"updated_at,omitempty"`
 }
 
+type listedModel struct {
+	Model     string
+	Provider  string
+	IsDefault bool
+}
+
 func main() {
 	var endpoint string
 	var token string
@@ -114,6 +121,7 @@ func main() {
 	var cwd string
 	var projectID string
 	var threadID string
+	var model string
 	var prompt string
 	var concurrency int
 	var listLimit int
@@ -122,6 +130,7 @@ func main() {
 	var startNew bool
 	var goalGet bool
 	var listOnly bool
+	var modelsOnly bool
 	var findThreadPrefix string
 
 	defaultConfig := filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "codex-ipad-agent", "config.json")
@@ -131,6 +140,7 @@ func main() {
 	flag.StringVar(&cwd, "cwd", "", "目标项目 cwd；为空时优先使用当前目录命中的 allowlist 项目")
 	flag.StringVar(&projectID, "project", "", "目标项目 id；为空时按 cwd 或当前目录选择")
 	flag.StringVar(&threadID, "thread", "", "指定已有 thread id；为空时按 -new 决定 thread/start 或 thread/list 最新项")
+	flag.StringVar(&model, "model", "", "显式指定 app-server model；为空时先读 model/list 的默认项")
 	flag.StringVar(&prompt, "prompt", "【ipad-ws-probe】请只回复 ok，用于验证 iPad WebSocket 链路。", "发送给 Codex 的探测消息")
 	flag.IntVar(&concurrency, "concurrency", 1, "并发会话数，每个 worker 使用独立 WebSocket")
 	flag.IntVar(&listLimit, "list-limit", 20, "thread/list limit")
@@ -139,6 +149,7 @@ func main() {
 	flag.BoolVar(&startNew, "new", true, "true=每个 worker thread/start 新会话；false=优先 resume 指定/最新 thread")
 	flag.BoolVar(&goalGet, "goal-get", true, "发送前模拟 iPad connectForEvents 的 thread/goal/get")
 	flag.BoolVar(&listOnly, "list-only", false, "只执行 initialize + thread/list，不发送 turn")
+	flag.BoolVar(&modelsOnly, "models-only", false, "只执行 initialize + model/list，不发送 turn")
 	flag.StringVar(&findThreadPrefix, "find-thread-prefix", "", "只输出 id 以该前缀开头的 thread；为空输出列表窗口")
 	flag.Parse()
 
@@ -179,6 +190,14 @@ func main() {
 		cfg.Runtime.Initialized,
 		cfg.Runtime.PendingRequests,
 	)
+	if modelsOnly {
+		models, err := listModels(ctx, cfg.GatewayWSURL, token, timeout)
+		if err != nil {
+			fatalf("model/list 失败：%v", err)
+		}
+		printJSON(models)
+		return
+	}
 	if listOnly || strings.TrimSpace(findThreadPrefix) != "" {
 		threads, err := listThreads(ctx, cfg.GatewayWSURL, token, selected, listLimit, timeout)
 		if err != nil {
@@ -202,6 +221,25 @@ func main() {
 		return
 	}
 
+	model = strings.TrimSpace(model)
+	var modelProvider string
+	if model == "" {
+		models, err := listModels(ctx, cfg.GatewayWSURL, token, timeout)
+		if err != nil {
+			fatalf("model/list 失败：%v", err)
+		}
+		selectedModel, err := defaultModelFromList(models)
+		if err != nil {
+			fatalf("解析 model/list 失败：%v", err)
+		}
+		model = selectedModel.Model
+		modelProvider = selectedModel.Provider
+	}
+	if model == "" {
+		fatalf("缺少 model：model/list 未返回可用模型，请显式传 -model")
+	}
+	fmt.Printf("probe selected model=%s provider=%s\n", model, emptyAsAbsent(modelProvider))
+
 	results := make([]workerResult, concurrency)
 	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
@@ -212,7 +250,7 @@ func main() {
 			if concurrency > 1 {
 				workerPrompt = fmt.Sprintf("%s worker=%d nonce=%s", prompt, worker, shortNonce())
 			}
-			results[worker] = runWorker(ctx, worker, cfg.GatewayWSURL, token, selected, threadID, workerPrompt, startNew, goalGet, listLimit, timeout, listenAfterTurn)
+			results[worker] = runWorker(ctx, worker, cfg.GatewayWSURL, token, selected, threadID, model, modelProvider, workerPrompt, startNew, goalGet, listLimit, timeout, listenAfterTurn)
 		}(i)
 	}
 	wg.Wait()
@@ -235,9 +273,9 @@ func main() {
 	}
 }
 
-func runWorker(ctx context.Context, worker int, wsURL string, token string, p project, threadID string, prompt string, startNew bool, goalGet bool, listLimit int, timeout time.Duration, listenAfterTurn time.Duration) workerResult {
+func runWorker(ctx context.Context, worker int, wsURL string, token string, p project, threadID string, model string, modelProvider string, prompt string, startNew bool, goalGet bool, listLimit int, timeout time.Duration, listenAfterTurn time.Duration) workerResult {
 	started := time.Now()
-	result := workerResult{Worker: worker, CWD: p.Path}
+	result := workerResult{Worker: worker, CWD: p.Path, Model: model}
 	client, err := dialRPC(ctx, fmt.Sprintf("worker-%d", worker), wsURL, token)
 	if err != nil {
 		result.Error = err.Error()
@@ -269,7 +307,7 @@ func runWorker(ctx context.Context, worker int, wsURL string, token string, p pr
 		result.ThreadID = strings.TrimSpace(threadID)
 	} else if startNew || latestThreadID == "" {
 		threadStart := time.Now()
-		threadResult, err := client.request(ctx, timeout, "thread/start", safeThreadParams(p.Path))
+		threadResult, err := client.request(ctx, timeout, "thread/start", safeThreadParams(p.Path, model, modelProvider))
 		if err != nil {
 			result.Error = "thread/start: " + err.Error()
 			return result
@@ -287,7 +325,7 @@ func runWorker(ctx context.Context, worker int, wsURL string, token string, p pr
 
 	if !result.StartedNewThread {
 		resumeStart := time.Now()
-		if _, err := client.request(ctx, timeout, "thread/resume", withThreadID(safeThreadParams(p.Path), result.ThreadID)); err != nil {
+		if _, err := client.request(ctx, timeout, "thread/resume", withThreadID(safeThreadParams(p.Path, model, modelProvider), result.ThreadID)); err != nil {
 			result.Error = "thread/resume: " + err.Error()
 			return result
 		}
@@ -304,8 +342,18 @@ func runWorker(ctx context.Context, worker int, wsURL string, token string, p pr
 		"cwd":                 p.Path,
 		"input":               []any{map[string]any{"type": "text", "text": prompt}},
 		"clientUserMessageId": clientMessageID,
+		"model":               model,
 		"approvalPolicy":      "on-request",
 		"approvalsReviewer":   "user",
+		// probe 必须模拟 iPad 新协议：普通执行显式退出 Plan Mode；model 来自 model/list 的账号默认项。
+		"collaborationMode": map[string]any{
+			"mode": "default",
+			"settings": map[string]any{
+				"model":                  model,
+				"reasoning_effort":       "xhigh",
+				"developer_instructions": nil,
+			},
+		},
 		"sandboxPolicy": map[string]any{
 			"type":                "workspaceWrite",
 			"writableRoots":       []any{p.Path},
@@ -385,6 +433,83 @@ func listThreads(ctx context.Context, wsURL string, token string, p project, lis
 		return nil, err
 	}
 	return listedThreadsFromResult(raw), nil
+}
+
+func listModels(ctx context.Context, wsURL string, token string, timeout time.Duration) (json.RawMessage, error) {
+	client, err := dialRPC(ctx, "models", wsURL, token)
+	if err != nil {
+		return nil, err
+	}
+	defer client.close()
+	if err := initializeClient(ctx, client, timeout); err != nil {
+		return nil, err
+	}
+	// Go 的 omitempty 会省略空 map；带一个哑字段让 gateway 白名单改写成 params={}。
+	return client.request(ctx, timeout, "model/list", map[string]any{"_probe": true})
+}
+
+func defaultModelFromList(raw json.RawMessage) (listedModel, error) {
+	models := parseListedModels(raw)
+	if len(models) == 0 {
+		return listedModel{}, errors.New("model/list 返回为空")
+	}
+	for _, model := range models {
+		if model.IsDefault {
+			return model, nil
+		}
+	}
+	return models[0], nil
+}
+
+func parseListedModels(raw json.RawMessage) []listedModel {
+	var root any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil
+	}
+	items := modelListItems(root)
+	models := make([]listedModel, 0, len(items))
+	seen := map[string]bool{}
+	for _, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		model := firstString(object, "model", "id", "name")
+		if model == "" || seen[model] {
+			continue
+		}
+		seen[model] = true
+		models = append(models, listedModel{
+			Model:     model,
+			Provider:  firstString(object, "provider", "modelProvider", "model_provider"),
+			IsDefault: firstBool(object, "isDefault", "default", "is_default"),
+		})
+	}
+	return models
+}
+
+func modelListItems(root any) []any {
+	switch typed := root.(type) {
+	case []any:
+		return typed
+	case map[string]any:
+		for _, key := range []string{"models", "data", "items"} {
+			if items, ok := typed[key].([]any); ok {
+				return items
+			}
+		}
+	}
+	return nil
+}
+
+func firstBool(object map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		value, ok := object[key].(bool)
+		if ok && value {
+			return true
+		}
+	}
+	return false
 }
 
 func dialRPC(ctx context.Context, name string, wsURL string, token string) (*rpcClient, error) {
@@ -638,14 +763,19 @@ func selectProject(projects []project, cwd string, projectID string) (project, e
 	return projects[0], nil
 }
 
-func safeThreadParams(cwd string) map[string]any {
-	return map[string]any{
+func safeThreadParams(cwd string, model string, modelProvider string) map[string]any {
+	params := map[string]any{
 		"cwd":               cwd,
+		"model":             model,
 		"approvalPolicy":    "on-request",
 		"approvalsReviewer": "user",
 		"sandbox":           "workspace-write",
 		"ephemeral":         false,
 	}
+	if strings.TrimSpace(modelProvider) != "" {
+		params["modelProvider"] = strings.TrimSpace(modelProvider)
+	}
+	return params
 }
 
 func withThreadID(params map[string]any, threadID string) map[string]any {
@@ -657,6 +787,13 @@ func withThreadID(params map[string]any, threadID string) map[string]any {
 	out["excludeTurns"] = true
 	delete(out, "ephemeral")
 	return out
+}
+
+func emptyAsAbsent(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "absent"
+	}
+	return strings.TrimSpace(value)
 }
 
 func firstThreadID(raw json.RawMessage) string {
@@ -756,6 +893,14 @@ func shortNonce() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(raw[:])
+}
+
+func printJSON(value any) {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		fatalf("输出 JSON 失败：%v", err)
+	}
 }
 
 func fatalf(format string, args ...any) {

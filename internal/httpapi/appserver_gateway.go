@@ -29,7 +29,6 @@ const (
 	appServerGatewayWriteWindow    = 10 * time.Second
 	appServerGatewayThreadCacheMax = 2048
 	appServerGatewayThreadCacheTTL = 24 * time.Hour
-	defaultCodexAppServerModel     = "gpt-5.5"
 	defaultCodexReasoningEffort    = "xhigh"
 )
 
@@ -491,6 +490,7 @@ func (p *appServerGatewayPolicy) validateClientFrame(messageType int, payload []
 	if err != nil {
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 	}
+	logGatewayForwardedClientTurnSummary(method, rewritten)
 	return rewritten, nil
 }
 
@@ -804,9 +804,6 @@ func sanitizedGatewayThreadParams(method string, params map[string]any) map[stri
 	}
 	safe["approvalPolicy"], safe["approvalsReviewer"] = sanitizedGatewayApproval(params)
 	safe["sandbox"] = sanitizedGatewayThreadSandbox(params)
-	if model, ok := gatewayStringParam(safe, "model"); !ok || strings.TrimSpace(model) == "" {
-		safe["model"] = defaultCodexAppServerModel
-	}
 	return safe
 }
 
@@ -830,9 +827,7 @@ func sanitizedGatewayTurnParams(params map[string]any, cwd string) map[string]an
 	}
 	safe["approvalPolicy"], safe["approvalsReviewer"] = sanitizedGatewayApproval(params)
 	safe["sandboxPolicy"] = sanitizedGatewaySandboxPolicy(params["sandboxPolicy"], cwd)
-	if model, ok := gatewayStringParam(safe, "model"); !ok || strings.TrimSpace(model) == "" {
-		safe["model"] = defaultCodexAppServerModel
-	}
+	// 默认模型必须交给 app-server 按账号 rollout 决定；gateway 只透传用户显式选择的 model。
 	if effort, ok := gatewayStringParam(safe, "effort"); !ok || strings.TrimSpace(effort) == "" {
 		safe["effort"] = defaultCodexReasoningEffort
 	}
@@ -841,6 +836,133 @@ func sanitizedGatewayTurnParams(params map[string]any, cwd string) map[string]an
 
 func sanitizedGatewayTurnSteerParams(params map[string]any) map[string]any {
 	return copyGatewayParams(params, "threadId", "input", "clientUserMessageId", "expectedTurnId")
+}
+
+func logGatewayForwardedClientTurnSummary(method string, payload []byte) {
+	if method != "turn/start" && method != "turn/steer" {
+		return
+	}
+	var frame appServerGatewayFrame
+	if err := json.Unmarshal(payload, &frame); err != nil {
+		log.Printf("app-server gateway forwarded client turn method=%s summary_error=json", method)
+		return
+	}
+	params, err := decodeGatewayParams(frame.Params)
+	if err != nil {
+		log.Printf("app-server gateway forwarded client turn method=%s summary_error=params", method)
+		return
+	}
+	threadID, _ := gatewayStringParam(params, "threadId")
+	expectedTurnID, _ := gatewayStringParam(params, "expectedTurnId")
+	clientUserMessageID, _ := gatewayStringParam(params, "clientUserMessageId")
+	// 这里只记录协议元信息，刻意不记录 input.text、图片 URL 或本地文件路径。
+	log.Printf(
+		"app-server gateway forwarded client turn method=%s threadId=%s cwdBase=%s input=%s collaborationMode=%s expectedTurnId=%s clientUserMessageId=%s",
+		method,
+		gatewayCompactLogToken(threadID),
+		gatewayCWDBaseLabel(params),
+		gatewayInputTypeSummary(params),
+		gatewayCollaborationModeSummary(params),
+		gatewayCompactLogToken(expectedTurnID),
+		gatewayCompactLogToken(clientUserMessageID),
+	)
+}
+
+func gatewayInputTypeSummary(params map[string]any) string {
+	raw, ok := params["input"]
+	if !ok {
+		return "absent"
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return "invalid"
+	}
+	counts := map[string]int{}
+	for _, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			counts["invalid"]++
+			continue
+		}
+		inputType, _ := gatewayStringParam(obj, "type")
+		if inputType == "" {
+			inputType = "unknown"
+		}
+		counts[inputType]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := []string{fmt.Sprintf("count=%d", len(items))}
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", gatewayCompactLogToken(key), counts[key]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func gatewayCollaborationModeSummary(params map[string]any) string {
+	raw, ok := params["collaborationMode"]
+	if !ok {
+		return "absent"
+	}
+	mode, ok := raw.(map[string]any)
+	if !ok {
+		return "invalid"
+	}
+	modeValue, ok := gatewayStringParam(mode, "mode")
+	if !ok {
+		modeValue = "missing"
+	}
+	settings, _ := mode["settings"].(map[string]any)
+	model, ok := gatewayStringParam(settings, "model")
+	if !ok {
+		model = "absent"
+	}
+	effort := "absent"
+	if value, exists := settings["reasoning_effort"]; exists {
+		switch typed := value.(type) {
+		case nil:
+			effort = "null"
+		case string:
+			effort = strings.TrimSpace(typed)
+			if effort == "" {
+				effort = "missing"
+			}
+		default:
+			effort = "invalid"
+		}
+	}
+	return fmt.Sprintf(
+		"mode=%s,model=%s,effort=%s",
+		gatewayCompactLogToken(modeValue),
+		gatewayCompactLogToken(model),
+		gatewayCompactLogToken(effort),
+	)
+}
+
+func gatewayCWDBaseLabel(params map[string]any) string {
+	cwd, ok := gatewayStringParam(params, "cwd")
+	if !ok {
+		return "absent"
+	}
+	base := filepath.Base(filepath.Clean(cwd))
+	if base == "" {
+		return "unknown"
+	}
+	return gatewayCompactLogToken(base)
+}
+
+func gatewayCompactLogToken(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), "_")
+	if value == "" {
+		return "absent"
+	}
+	if len(value) <= 16 {
+		return value
+	}
+	return value[:8] + "..." + value[len(value)-4:]
 }
 
 func sanitizedGatewayCollaborationMode(raw any) (map[string]any, bool) {
@@ -853,11 +975,13 @@ func sanitizedGatewayCollaborationMode(raw any) (map[string]any, bool) {
 		return nil, false
 	}
 	settings, _ := mode["settings"].(map[string]any)
-	model, _ := gatewayStringParam(settings, "model")
 	safeSettings := map[string]any{
-		"model":                  model,
 		"reasoning_effort":       nil,
 		"developer_instructions": nil,
+	}
+	// 默认模型不在 gateway 补齐；只有显式选择时才放进 collaboration settings。
+	if model, ok := gatewayStringParam(settings, "model"); ok {
+		safeSettings["model"] = model
 	}
 	if effort, ok := settings["reasoning_effort"]; ok {
 		safeSettings["reasoning_effort"] = effort
@@ -1378,9 +1502,10 @@ func validateGatewayCollaborationMode(value any) error {
 	if !ok {
 		return fmt.Errorf("collaborationMode.settings 必须是 object")
 	}
-	model, ok := gatewayStringParam(settings, "model")
-	if !ok || model == "" {
-		return fmt.Errorf("collaborationMode.settings.model 必须是非空字符串")
+	if model, ok := settings["model"]; ok && model != nil {
+		if text, ok := model.(string); !ok || strings.TrimSpace(text) == "" {
+			return fmt.Errorf("collaborationMode.settings.model 必须是非空字符串")
+		}
 	}
 	if developerInstructions, ok := settings["developer_instructions"]; ok && developerInstructions != nil {
 		return fmt.Errorf("collaborationMode.settings.developer_instructions 只能是 null")
