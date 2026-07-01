@@ -16,6 +16,7 @@ struct ProjectSidebarView: View {
         let tokens = themeStore.tokens(for: colorScheme)
         let selectedProjectID = sessionStore.selectedProjectID
         let selectedSessionID = sessionStore.selectedSessionID
+        let themeRenderKey = SidebarThemeRenderKey(themeVersion: themeStore.themeVersion, colorScheme: colorScheme)
 
         List {
             Section {
@@ -29,6 +30,7 @@ struct ProjectSidebarView: View {
                         isExpanded: snapshot.isExpanded,
                         isLoading: snapshot.isLoadingMore,
                         isUnavailable: sessionStore.isWorkspaceUnavailable(project.id),
+                        themeRenderKey: themeRenderKey,
                         onToggle: {
                             Task {
                                 if showsSessions {
@@ -63,7 +65,8 @@ struct ProjectSidebarView: View {
                             project: project,
                             snapshot: snapshot,
                             selectedSessionID: selectedSessionID,
-                            isLoading: sessionStore.isLoading
+                            isLoading: sessionStore.isLoading,
+                            themeRenderKey: themeRenderKey
                         )
                     }
                 }
@@ -79,12 +82,14 @@ struct ProjectSidebarView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(tokens.tertiaryText)
                     Button {
                         isPresentingOpenWorkspace = true
                     } label: {
                         Image(systemName: "folder.badge.plus")
                     }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(tokens.tertiaryText)
                     .accessibilityLabel("打开路径")
                 }
             }
@@ -93,7 +98,7 @@ struct ProjectSidebarView: View {
         .contentMargins(.top, 6, for: .scrollContent)
         .contentMargins(.bottom, 12, for: .scrollContent)
         .scrollContentBackground(.hidden)
-        .background(tokens.background)
+        .background(tokens.sidebarBackground)
         .tint(tokens.accent)
         .searchable(text: $sessionStore.sessionSearchQuery, placement: searchPlacement, prompt: "搜索会话")
         .sheet(isPresented: $isPresentingOpenWorkspace) {
@@ -133,6 +138,11 @@ struct ProjectSidebarView: View {
         // iPhone 没有真正的 sidebar 搜索区，放到导航栏抽屉里才是系统原生的窄屏入口。
         horizontalSizeClass == .compact ? .navigationBarDrawer(displayMode: .automatic) : .sidebar
     }
+}
+
+private struct SidebarThemeRenderKey: Equatable {
+    let themeVersion: Int
+    let colorScheme: ColorScheme
 }
 
 private struct OpenWorkspaceSheet: View {
@@ -470,6 +480,7 @@ private struct ProjectSessionRows: View {
     let snapshot: ProjectSessionListSnapshot
     let selectedSessionID: SessionID?
     let isLoading: Bool
+    let themeRenderKey: SidebarThemeRenderKey
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -478,8 +489,8 @@ private struct ProjectSessionRows: View {
             Text("暂无历史会话")
                 .font(themeStore.uiFont(size: 12))
                 .foregroundStyle(tokens.tertiaryText)
-                .padding(.leading, 34)
-                .padding(.vertical, 6)
+                .padding(.leading, 30)
+                .padding(.vertical, 4)
                 .sidebarListRow()
         }
 
@@ -495,7 +506,8 @@ private struct ProjectSessionRows: View {
                 isPinned: isPinned,
                 isArchived: isArchived,
                 reminder: reminder,
-                isObserving: sessionStore.isSessionObserving(session)
+                isObserving: sessionStore.isSessionObserving(session),
+                themeRenderKey: themeRenderKey
             )
                 .equatable()
                 // List 行内的 Button 会被 UICollectionView 的 delaysContentTouches 拖慢高亮，
@@ -559,7 +571,7 @@ private struct ProjectSessionRows: View {
                         Label(isArchived ? "取消归档" : "归档", systemImage: isArchived ? "archivebox.fill" : "archivebox")
                     }
                 }
-                .padding(.leading, 34)
+                .padding(.leading, 30)
                 .sidebarListRow()
         }
 
@@ -591,8 +603,8 @@ private struct ProjectSessionRows: View {
                         }
                     }
                 }
-                .padding(.leading, 42)
-                .padding(.vertical, 5)
+                .padding(.leading, 38)
+                .padding(.vertical, 4)
                 .sidebarListRow()
         }
     }
@@ -601,12 +613,14 @@ private struct ProjectSessionRows: View {
 private struct ProjectRow: View, Equatable {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
     let project: AgentProject
     let isActiveProject: Bool
     let isSelected: Bool
     let isExpanded: Bool
     let isLoading: Bool
     let isUnavailable: Bool
+    let themeRenderKey: SidebarThemeRenderKey
     let onToggle: () -> Void
     let onNewSession: () -> Void
     let onCreateWorktree: () -> Void
@@ -621,21 +635,24 @@ private struct ProjectRow: View, Equatable {
             && lhs.isExpanded == rhs.isExpanded
             && lhs.isLoading == rhs.isLoading
             && lhs.isUnavailable == rhs.isUnavailable
+            // 主题切换只通过轻量 key 打破行缓存，避免移除 .equatable() 导致长列表回退。
+            && lhs.themeRenderKey == rhs.themeRenderKey
     }
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
 
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             // 整块左侧区域作为展开/收起的点击目标。用 onTapGesture 绕开 List 行内 Button
             // 在 UICollectionView 下的 delaysContentTouches 高亮延迟。
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Image(systemName: isUnavailable ? "exclamationmark.triangle.fill" : (isActiveProject || isExpanded ? "folder.fill" : "folder"))
-                    .frame(width: 20)
-                    .foregroundStyle(isUnavailable ? Color.orange : (isActiveProject ? tokens.accent : tokens.secondaryText))
+                    .font(themeStore.uiFont(size: 15, weight: .medium))
+                    .frame(width: 18)
+                    .foregroundStyle(isUnavailable ? tokens.warning : (isActiveProject ? tokens.accent : tokens.tertiaryText))
                 Text(project.name)
-                    .font(themeStore.uiFont(size: 16, weight: .semibold))
-                    .foregroundStyle(isUnavailable ? tokens.tertiaryText : tokens.primaryText)
+                    .font(themeStore.uiFont(size: 15, weight: isActiveProject ? .semibold : .medium))
+                    .foregroundStyle(isUnavailable ? tokens.tertiaryText : (isActiveProject ? tokens.primaryText : tokens.secondaryText))
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
                     .layoutPriority(1)
@@ -643,7 +660,7 @@ private struct ProjectRow: View, Equatable {
                 if isUnavailable {
                     Text("不可用")
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(tokens.warning)
                 } else if isLoading {
                     ProgressView()
                         .controlSize(.small)
@@ -658,9 +675,11 @@ private struct ProjectRow: View, Equatable {
             .onTapGesture(perform: onToggle)
 
             Image(systemName: "square.and.pencil")
-                .font(themeStore.uiFont(size: 15, weight: .medium))
-                .foregroundStyle(tokens.primaryText.opacity(0.86))
-                .frame(width: 28, height: 28)
+                .font(themeStore.uiFont(size: 14, weight: .medium))
+                .foregroundStyle((isActiveProject ? tokens.accent : tokens.tertiaryText).opacity(isActiveProject ? 0.9 : 0.68))
+                .frame(width: 26, height: 26)
+                // 视觉图标保持紧凑，外层热区补到接近系统最小触控尺寸，避免 iPad 浮窗误触。
+                .frame(width: 34, height: 34)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onNewSession)
                 .accessibilityLabel("新建会话")
@@ -683,28 +702,39 @@ private struct ProjectRow: View, Equatable {
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(themeStore.uiFont(size: 15, weight: .semibold))
-                    .foregroundStyle(tokens.secondaryText)
-                    .frame(width: 24, height: 28)
+                    .font(themeStore.uiFont(size: 14, weight: .semibold))
+                    .foregroundStyle(tokens.tertiaryText.opacity(0.72))
+                    .frame(width: 22, height: 26)
+                    // 菜单点击区随行高扩展，不用负 padding，保证 hit-test 在布局边界内稳定生效。
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
             }
             .menuStyle(.button)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
         .background {
-            SidebarSelectionBackground(isSelected: isSelected, tint: tokens.selectionFill)
+            SidebarSelectionBackground(
+                isSelected: isSelected,
+                isHovered: isHovered,
+                selectedTint: tokens.selectionFill,
+                hoverTint: tokens.sidebarHoverFill
+            )
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isSelected ? tokens.accent.opacity(0.45) : Color.clear, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isSelected ? tokens.border.opacity(0.82) : Color.clear, lineWidth: 1)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onHover { isHovered = $0 }
     }
 }
 
 private struct SessionRow: View, Equatable {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
     let session: AgentSession
     let foregroundActivity: SessionForegroundActivity?
     let isSelected: Bool
@@ -712,6 +742,7 @@ private struct SessionRow: View, Equatable {
     let isArchived: Bool
     let reminder: SessionReminder?
     let isObserving: Bool
+    let themeRenderKey: SidebarThemeRenderKey
 
     static func == (lhs: SessionRow, rhs: SessionRow) -> Bool {
         lhs.session == rhs.session
@@ -721,20 +752,22 @@ private struct SessionRow: View, Equatable {
             && lhs.isArchived == rhs.isArchived
             && lhs.reminder == rhs.reminder
             && lhs.isObserving == rhs.isObserving
+            // 主题 key 让色彩/字体 token 变化能刷新，但仍避免流式状态更新重绘所有侧栏行。
+            && lhs.themeRenderKey == rhs.themeRenderKey
     }
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
 
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Circle()
                     .fill(statusDotColor)
-                    .frame(width: 7, height: 7)
+                    .frame(width: 6, height: 6)
                 if isPinned {
                     Image(systemName: "pin.fill")
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
-                        .foregroundStyle(tokens.accent)
+                        .foregroundStyle(isSelected ? tokens.secondaryText : tokens.tertiaryText)
                         .accessibilityLabel("已置顶")
                 }
                 if isArchived {
@@ -746,52 +779,52 @@ private struct SessionRow: View, Equatable {
                 if reminder != nil {
                     Image(systemName: "bell.fill")
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(tokens.warning.opacity(0.86))
                         .accessibilityLabel("已设置提醒")
                 }
                 Text(session.title)
                     .font(themeStore.uiFont(size: 15, weight: isSelected ? .semibold : .regular))
                     .foregroundStyle(isSelected ? tokens.primaryText : tokens.secondaryText)
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .minimumScaleFactor(0.86)
                     .layoutPriority(1)
                 Spacer(minLength: 8)
                 trailingMetadata
             }
 
-            if let preview = session.preview, !preview.isEmpty {
-                Text(preview)
-                    .font(themeStore.uiFont(size: 12))
-                    .foregroundStyle(isSelected ? tokens.secondaryText : tokens.tertiaryText)
-                    .lineLimit(1)
-            }
-
+            // 侧栏作为会话索引，默认不展示聊天 preview，避免内容摘要压过标题和关键状态。
             if shouldShowStatusLine {
-                HStack(spacing: 6) {
+                HStack(spacing: 0) {
                     statusCapsule(statusSummary)
-                    ForEach(Array(statusBadges.prefix(2))) { badge in
-                        statusCapsule(badge)
-                    }
+                    Spacer(minLength: 0)
                 }
+                .lineLimit(1)
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
         .background {
-            SidebarSelectionBackground(isSelected: isSelected, tint: tokens.selectionFill)
+            SidebarSelectionBackground(
+                isSelected: isSelected,
+                isHovered: isHovered,
+                selectedTint: tokens.selectionFill,
+                hoverTint: tokens.sidebarHoverFill
+            )
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isSelected ? tokens.accent.opacity(0.45) : Color.clear, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isSelected ? tokens.border.opacity(0.82) : Color.clear, lineWidth: 1)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onHover { isHovered = $0 }
     }
 
     @ViewBuilder
     private var trailingMetadata: some View {
         let tokens = themeStore.tokens(for: colorScheme)
 
-        if shouldShowStatusLine {
+        if !shouldShowStatusLine && shouldShowTrailingActivityIcon {
             if statusSummary.showsSpinner {
                 ProgressView()
                     .controlSize(.mini)
@@ -823,54 +856,53 @@ private struct SessionRow: View, Equatable {
         tint(for: statusSummary.tone)
     }
 
-    private var statusBadges: [AgentSessionStatusBadge] {
-        session.statusBadges(foregroundActivity: foregroundActivity).filter { badge in
-            // 主胶囊已经展示当前阶段；下方只保留补充信息，避免一行里重复“等待回复”。
-            badge.id != "foreground-\(foregroundActivity?.title ?? "")"
-        }
-    }
-
     private var shouldShowStatusLine: Bool {
-        session.isRunning
-            || foregroundActivity != nil
-            || session.pendingApproval != nil
+        session.pendingApproval != nil
             || session.status == SessionStatus.waitingForInput.rawValue
             || session.status == SessionStatus.waitingForApproval.rawValue
             || session.status == SessionStatus.failed.rawValue
-            || session.goal != nil
+    }
+
+    private var shouldShowTrailingActivityIcon: Bool {
+        isObserving || session.isRunning || foregroundActivity != nil || session.activeTurnID != nil
     }
 
     private func statusCapsule(_ status: AgentSessionDisplayStatus) -> some View {
-        HStack(spacing: 4) {
-            if status.showsSpinner {
-                ProgressView()
-                    .controlSize(.mini)
-                    .tint(tint(for: status.tone))
-            } else {
-                Image(systemName: status.systemImage)
-            }
-            Text(status.title)
-                .lineLimit(1)
-        }
-        .font(themeStore.uiFont(size: 11, weight: .medium))
-        .foregroundStyle(tint(for: status.tone))
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(tint(for: status.tone).opacity(0.10), in: Capsule())
-    }
-
-    private func statusCapsule(_ badge: AgentSessionStatusBadge) -> some View {
-        Label(badge.title, systemImage: badge.systemImage)
-            .font(themeStore.uiFont(size: 11, weight: .medium))
+        Text(status.title)
             .lineLimit(1)
-            .foregroundStyle(tint(for: badge.tone))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(tint(for: badge.tone).opacity(0.10), in: Capsule())
+        .font(themeStore.uiFont(size: 10, weight: .medium))
+        .foregroundStyle(tint(for: status.tone))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(statusCapsuleBackground(for: status.tone), in: Capsule())
     }
 
     private func tint(for tone: AgentSessionStatusTone) -> Color {
-        themeStore.tokens(for: colorScheme).tint(for: tone)
+        let tokens = themeStore.tokens(for: colorScheme)
+        // 侧栏只让运行、等待、失败等需要处理的状态使用强色；完成/历史态退到中性色。
+        switch tone {
+        case .active:
+            return tokens.success
+        case .warning:
+            return tokens.warning
+        case .danger:
+            return .red
+        case .complete:
+            return tokens.tertiaryText
+        case .neutral:
+            return tokens.secondaryText
+        }
+    }
+
+    private func statusCapsuleBackground(for tone: AgentSessionStatusTone) -> Color {
+        switch tone {
+        case .warning, .danger:
+            return tint(for: tone).opacity(0.11)
+        case .active:
+            return tint(for: tone).opacity(0.09)
+        case .complete, .neutral:
+            return themeStore.tokens(for: colorScheme).elevatedSurface.opacity(0.72)
+        }
     }
 
     // 左侧列表只展示到分钟，避免 relative 时间按秒触发刷新。
@@ -884,12 +916,17 @@ private struct SessionRow: View, Equatable {
 
 private struct SidebarSelectionBackground: View {
     let isSelected: Bool
-    let tint: Color
+    let isHovered: Bool
+    let selectedTint: Color
+    let hoverTint: Color
 
     var body: some View {
         if isSelected {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(tint)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(selectedTint)
+        } else if isHovered {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(hoverTint)
         }
     }
 }

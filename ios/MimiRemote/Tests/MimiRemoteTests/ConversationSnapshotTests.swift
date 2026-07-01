@@ -6,6 +6,9 @@ import SnapshotTesting
 
 @MainActor
 final class ConversationSnapshotTests: XCTestCase {
+    // 快照只验证布局和样式，消息时间固定，避免每次运行因当前分钟变化产生视觉误报。
+    private let snapshotMessageDate = Date(timeIntervalSince1970: 1_782_879_660)
+
     override func setUpWithError() throws {
         try super.setUpWithError()
         // 现有参考图按 iPad 渲染环境录制；Universal 后 iPhone 会使用不同 trait，
@@ -24,8 +27,8 @@ final class ConversationSnapshotTests: XCTestCase {
         let conversationStore = ConversationStore()
         let themeStore = makeThemeStore()
 
-        conversationStore.appendSystem("Codex 交互式会话已启动。", sessionID: sessionID)
-        conversationStore.appendUser("2216", sessionID: sessionID)
+        conversationStore.appendSystem("Codex 交互式会话已启动。", sessionID: sessionID, createdAt: snapshotMessageDate)
+        conversationStore.appendUser("2216", sessionID: sessionID, createdAt: snapshotMessageDate)
         conversationStore.applyAssistantDelta(
             AgentDelta(text: "这是助手的回复，应当靠左对齐，使用低对比中性气泡。", role: .assistant, kind: .message),
             metadata: AgentEventMetadata(
@@ -36,20 +39,22 @@ final class ConversationSnapshotTests: XCTestCase {
                 messageID: nil,
                 clientMessageID: nil,
                 revision: 1,
-                createdAt: nil
+                createdAt: snapshotMessageDate
             ),
             fallbackSessionID: sessionID
         )
         conversationStore.appendUser(
             "这是一条比较长的用户消息，用来验证多行情况下紫色气泡依然贴右对齐，而不是漂到屏幕中间。",
-            sessionID: sessionID
+            sessionID: sessionID,
+            createdAt: snapshotMessageDate
         )
         // 发送失败：验证红色状态标记出现在用户气泡左侧。
         conversationStore.appendLocalUser(
             "这条发送失败了",
             sessionID: sessionID,
             clientMessageID: "failed-1",
-            sendStatus: .failed
+            sendStatus: .failed,
+            createdAt: snapshotMessageDate
         )
 
         let sessionStore = SessionStore(
@@ -102,7 +107,7 @@ final class ConversationSnapshotTests: XCTestCase {
                 messageID: nil,
                 clientMessageID: nil,
                 revision: 1,
-                createdAt: nil
+                createdAt: snapshotMessageDate
             ),
             fallbackSessionID: sessionID
         )

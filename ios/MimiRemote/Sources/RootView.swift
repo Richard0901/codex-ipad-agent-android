@@ -213,10 +213,7 @@ struct RootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    HStack(spacing: 12) {
-                        AgentWorkbenchTitle(maxWidth: layout.titleMaxWidth)
-                        refreshControl
-                    }
+                    AgentWorkbenchTitle(maxWidth: layout.titleMaxWidth)
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     // 仅在侧栏收起时，在主界面提供展开按钮；展开时由侧栏自带的开关负责收起，避免两个图标同时出现。
@@ -242,6 +239,7 @@ struct RootView: View {
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    refreshControl
                     if let symbol = connectionBadgeSymbol {
                         Image(systemName: symbol)
                             .foregroundStyle(connectionBadgeColor)
@@ -255,6 +253,7 @@ struct RootView: View {
                             Label(layout.usesAttachedInspector ? "日志" : "会话详情", systemImage: layout.usesAttachedInspector ? "terminal" : "sidebar.right")
                         }
                         .labelStyle(.iconOnly)
+                        .foregroundStyle(themeStore.tokens(for: colorScheme).secondaryText.opacity(0.78))
                         .accessibilityLabel(showingLogInspector ? "隐藏详情" : "显示详情")
                     }
                     Button {
@@ -263,27 +262,29 @@ struct RootView: View {
                         Label("设置", systemImage: "gearshape")
                     }
                     .labelStyle(.iconOnly)
+                    .foregroundStyle(themeStore.tokens(for: colorScheme).secondaryText.opacity(0.78))
                     .accessibilityLabel("设置")
                 }
             }
             .sessionInspectorPresentation(isPresented: $showingLogInspector, layout: layout)
     }
 
-    // 刷新挪到标题旁，与右侧的日志/设置图标分开，避免功能与视觉都挤在右上角。
+    // 刷新属于维护动作，不参与主定位信息；放在 trailing 并弱化颜色，减少顶部抢眼控件。
     @ViewBuilder
     private var refreshControl: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
         if sessionStore.isLoading || sessionStore.isRefreshingSelectedSession {
             ProgressView()
                 .controlSize(.small)
-                .tint(.orange)
+                .tint(tokens.secondaryText.opacity(0.8))
                 .accessibilityLabel("正在刷新")
         } else {
             Button {
                 Task { await sessionStore.refreshCurrentContext() }
             } label: {
-                Image(systemName: "arrow.clockwise.circle.fill")
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.orange)
+                Image(systemName: "arrow.clockwise")
+                    .foregroundStyle(tokens.secondaryText.opacity(0.72))
             }
             .buttonStyle(.plain)
             .accessibilityLabel(sessionStore.selectedSessionID == nil ? "刷新会话列表" : "刷新当前会话")
@@ -291,10 +292,17 @@ struct RootView: View {
     }
 
     private var connectionBadgeKind: StatusPill.Kind {
-        if sessionStore.selectedSession?.isRunning == true, sessionStore.webSocketStatus == .connected {
-            return .success
-        }
-        if case .failed = sessionStore.webSocketStatus {
+        if sessionStore.selectedSession?.isRunning == true {
+            switch sessionStore.webSocketStatus {
+            case .connected:
+                return .success
+            case .connecting:
+                // 运行中但 WebSocket 还在握手，不算健康成功态，避免误导用户以为实时链路已就绪。
+                return .neutral
+            case .disconnected, .failed:
+                return .warning
+            }
+        } else if case .failed = sessionStore.webSocketStatus {
             return .warning
         }
         return .neutral
@@ -305,11 +313,12 @@ struct RootView: View {
         guard let session = sessionStore.selectedSession else {
             return nil
         }
+        if case .failed = sessionStore.webSocketStatus {
+            return "exclamationmark.triangle.fill"
+        }
         guard session.isRunning else {
-            if session.isAppServerHistory {
-                return "clock"
-            }
-            return session.status == "closed" ? "checkmark.circle" : "circle.dashed"
+            // closed/history 是普通完成态，不在顶部常驻提示；异常和运行态才需要占用视觉注意力。
+            return nil
         }
         switch sessionStore.webSocketStatus {
         case .connected:
@@ -453,46 +462,19 @@ private struct AgentWorkbenchTitle: View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         VStack(spacing: 2) {
-            HStack(spacing: 6) {
-                statusDot
-                Text(primaryText)
-                    .font(themeStore.codeFont(.subheadline, weight: .semibold))
-                    .foregroundStyle(tokens.primaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
-            }
+            Text(primaryText)
+                .font(themeStore.codeFont(.subheadline, weight: .semibold))
+                .foregroundStyle(tokens.primaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
             Text(secondaryText)
                 .font(themeStore.codeFont(.caption2))
-                .foregroundStyle(tokens.secondaryText)
+                .foregroundStyle(tokens.tertiaryText)
                 .lineLimit(1)
                 .minimumScaleFactor(0.76)
         }
         .frame(maxWidth: maxWidth)
         .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder
-    private var statusDot: some View {
-        if sessionStore.selectedForegroundActivity != nil {
-            ProgressView()
-                .controlSize(.small)
-                .tint(themeStore.tokens(for: colorScheme).success)
-        } else {
-            Circle()
-                .fill(dotColor)
-                .frame(width: 7, height: 7)
-        }
-    }
-
-    private var dotColor: Color {
-        let tokens = themeStore.tokens(for: colorScheme)
-        if sessionStore.selectedSession?.isRunning == true, sessionStore.webSocketStatus == .connected {
-            return tokens.success
-        }
-        if case .failed = sessionStore.webSocketStatus {
-            return tokens.warning
-        }
-        return .secondary.opacity(0.65)
     }
 
     private var primaryText: String {

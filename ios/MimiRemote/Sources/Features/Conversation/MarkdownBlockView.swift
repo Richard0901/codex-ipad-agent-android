@@ -196,10 +196,10 @@ struct MarkdownBlockView: View {
             }
         }
         .padding(9)
-        .background(style.tableBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(style.planCardBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(style.dividerColor.opacity(0.75))
+                .strokeBorder(style.planCardBorder)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

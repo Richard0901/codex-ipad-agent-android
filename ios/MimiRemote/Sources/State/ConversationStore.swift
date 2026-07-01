@@ -145,8 +145,8 @@ final class ConversationStore: ObservableObject {
         loadedHistorySessionIDs.insert(sessionID)
     }
 
-    func appendUser(_ text: String, sessionID: String) {
-        appendLocalUser(text, sessionID: sessionID, clientMessageID: nil, sendStatus: .sent)
+    func appendUser(_ text: String, sessionID: String, createdAt: Date? = nil) {
+        appendLocalUser(text, sessionID: sessionID, clientMessageID: nil, sendStatus: .sent, createdAt: createdAt)
     }
 
     func appendLocalUser(
@@ -154,7 +154,8 @@ final class ConversationStore: ObservableObject {
         sessionID: String,
         clientMessageID: ClientMessageID?,
         sendStatus: MessageSendStatus = .sending,
-        turnPayload: CodexAppServerTurnPayload? = nil
+        turnPayload: CodexAppServerTurnPayload? = nil,
+        createdAt: Date? = nil
     ) {
         if let clientMessageID,
            var list = messagesBySessionID[sessionID],
@@ -178,6 +179,7 @@ final class ConversationStore: ObservableObject {
                 clientMessageID: clientMessageID,
                 role: .user,
                 content: text,
+                createdAt: createdAt ?? Date(),
                 sendStatus: sendStatus,
                 turnPayload: turnPayload
             ),
@@ -234,7 +236,8 @@ final class ConversationStore: ObservableObject {
         _ text: String,
         sessionID: String,
         kind: MessageKind = .message,
-        metadata: AgentEventMetadata? = nil
+        metadata: AgentEventMetadata? = nil,
+        createdAt: Date? = nil
     ) {
         if kind == .approval, text.hasPrefix("等待审批："), upsertPendingApprovalMessage(text, sessionID: sessionID) {
             return
@@ -246,7 +249,7 @@ final class ConversationStore: ObservableObject {
             role: .system,
             kind: kind,
             content: text,
-            createdAt: metadata?.createdAt ?? Date(),
+            createdAt: metadata?.createdAt ?? createdAt ?? Date(),
             sendStatus: .confirmed,
             revision: metadata?.revision
         ), sessionID: sessionID)

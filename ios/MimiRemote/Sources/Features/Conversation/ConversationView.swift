@@ -433,7 +433,8 @@ struct ConversationLayout: Equatable {
         composerAvailableWidth = max(240, containerWidth - horizontalInset * 2)
         composerMaxWidth = isCompactWidth ? .infinity : min(920, max(360, composerAvailableWidth))
         composerTopPadding = isCompactWidth ? 8 : 10
-        composerBottomPadding = isCompactWidth ? 10 : 12
+        // 底部输入区是触屏主操作区，保留稳定的下方呼吸空间；不要依赖隐藏快捷键按钮撑高布局。
+        composerBottomPadding = isCompactWidth ? 20 : 22
 
         // 气泡宽度按实际容器收缩，保留左右身份感，同时避免 iPhone/mini 竖屏横向溢出。
         let rowAvailableWidth = max(240, containerWidth - horizontalInset * 2 - messageSideSpacer)
@@ -491,6 +492,9 @@ struct ConversationTimelineView: View {
                             // .equatable() 让流式输出时只重绘内容变化的那一行，其余行直接复用，
                             // 长对话下 ForEach 的 diff 成本降到只看可见行的值比较。
                             timelineRow(item, activeUserDeliveryMessageID: activeUserDeliveryMessageID)
+                                .simultaneousGesture(TapGesture().onEnded {
+                                    KeyboardDismissal.dismiss()
+                                })
                                 .id(item.id)
                                 .listRowSeparator(.hidden)
                                 .listRowInsets(layout.messageRowInsets)
@@ -500,7 +504,11 @@ struct ConversationTimelineView: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .scrollDismissesKeyboard(.interactively)
                 .background(tokens.background)
+                .simultaneousGesture(TapGesture().onEnded {
+                    KeyboardDismissal.dismiss()
+                })
                 // 是否贴近底部用滚动几何实时判断，只在贴底时跟随流式输出，
                 // 用户上翻历史时不会被尾部更新甩回底部。
                 .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -771,6 +779,12 @@ struct ConversationTimelineView: View {
         withTransaction(transaction) {
             proxy.scrollTo(anchorID, anchor: .top)
         }
+    }
+}
+
+private enum KeyboardDismissal {
+    static func dismiss() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
 

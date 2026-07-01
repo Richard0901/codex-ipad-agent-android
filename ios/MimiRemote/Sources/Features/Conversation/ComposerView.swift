@@ -114,6 +114,8 @@ struct ComposerView: View {
     @State private var voicePressStartedAt: Date?
     @State private var retryableVoiceTranscription: RetryableVoiceTranscription?
     @State private var measuredComposerTextHeight: CGFloat = 0
+    @State private var isComposerTextComposing = false
+    @State private var composerTextSubmitBridge = ComposerTextSubmitBridge()
     @AppStorage("agentd.developerMode") private var developerModeEnabled = false
     @AppStorage(ComposerPermissionMode.defaultStorageKey) private var defaultPermissionModeID = ComposerPermissionMode.defaultMode.rawValue
     @State private var guidedFollowUpEnabled = false
@@ -143,6 +145,9 @@ struct ComposerView: View {
             composerStatusRow
             composerCard(tokens: tokens)
             voiceKeyboardShortcutButton
+                .overlay {
+                    composerKeyboardShortcutButtons
+                }
         }
         .animation(.easeInOut(duration: 0.18), value: voiceInput.isRecording)
         .animation(.easeInOut(duration: 0.18), value: voiceInput.isPreparing)
@@ -226,6 +231,9 @@ struct ComposerView: View {
 
     @discardableResult
     private func submitDraft() -> Bool {
+        guard synchronizeComposerTextBeforeSubmit() else {
+            return false
+        }
         if composerState.isGoalModeSelected {
             return submitGoalDraft()
         }
@@ -293,6 +301,27 @@ struct ComposerView: View {
         return true
     }
 
+    private func synchronizeComposerTextBeforeSubmit() -> Bool {
+        guard let snapshot = composerTextSubmitBridge.snapshotForSubmit() else {
+            return true
+        }
+        guard !snapshot.isComposing else {
+            // 中文输入法合成中的文本还不是用户最终选择，提交时直接拒绝，避免发送旧 draft。
+            if !isComposerTextComposing {
+                isComposerTextComposing = true
+            }
+            return false
+        }
+        if composerState.draft != snapshot.text {
+            // 只在提交前同步一次 UIKit 最终文本，避免 marked text 每次变化都触发全局状态重绘。
+            composerState.draft = snapshot.text
+        }
+        if isComposerTextComposing {
+            isComposerTextComposing = false
+        }
+        return true
+    }
+
     private func preparedTurnOptionsForSubmit() -> CodexAppServerTurnOptions {
         var options = developerModeEnabled ? composerState.turnOptions : composerState.turnOptions.sanitizedForStandardComposer()
         if composerState.isPlanModeSelected {
@@ -321,6 +350,9 @@ struct ComposerView: View {
     }
 
     private var canSubmitDraft: Bool {
+        guard !isComposerTextComposing else {
+            return false
+        }
         if composerState.isGoalModeSelected {
             return canSubmitGoalDraft
         }
@@ -559,7 +591,7 @@ struct ComposerView: View {
         }
         .padding(composerCardPadding)
         .frame(maxWidth: .infinity)
-        .background(tokens.elevatedSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(tokens.inputBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .tint(tokens.accent)
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -571,6 +603,7 @@ struct ComposerView: View {
         ZStack(alignment: .topLeading) {
             ComposerTextView(
                 text: composerDraftBinding,
+                submitBridge: composerTextSubmitBridge,
                 font: composerUIFont,
                 textColor: UIColor(tokens.primaryText),
                 tintColor: UIColor(tokens.accent),
@@ -580,6 +613,11 @@ struct ComposerView: View {
                 onContentHeightChange: { height in
                     if abs(measuredComposerTextHeight - height) > 0.5 {
                         measuredComposerTextHeight = height
+                    }
+                },
+                onCompositionStateChange: { isComposing in
+                    if isComposerTextComposing != isComposing {
+                        isComposerTextComposing = isComposing
                     }
                 },
                 onVoiceShortcutPressChanged: { pressed in
@@ -592,7 +630,7 @@ struct ComposerView: View {
             )
             .frame(height: composerTextHeight)
 
-            if composerState.draft.isEmpty {
+            if composerState.draft.isEmpty && !isComposerTextComposing {
                 // ComposerTextView 把 textContainerInset 归零，占位文案与正文同源，无需再补 padding。
                 Text(composerPlaceholderText)
                     .font(themeStore.uiFont(.body))
@@ -671,23 +709,17 @@ struct ComposerView: View {
 
     @ViewBuilder
     private var toolbarMenuRow: some View {
-        let menus = HStack(spacing: 8) {
+        // 默认工具栏只保留高频路径：添加、发送模式状态、更多设置。
+        // Goal/Plan/权限/运行参数都还在，但不再和输入主路径抢常驻空间。
+        HStack(spacing: 8) {
             addContentButton
-            skillShortcutMenu
-            goalButton
-            planButton
-            voiceLanguageMenu
-            permissionMenu
-            runSettingsMenu
+            if composerState.sendMode != .standard {
+                sendModeMenu
+            }
+            composerMoreMenu
         }
         .font(themeStore.uiFont(.caption, weight: .medium))
         .controlSize(.small)
-
-        if isCompactComposer {
-            menus.labelStyle(.iconOnly)
-        } else {
-            menus
-        }
     }
 
     private var voiceMicControl: some View {
@@ -695,7 +727,9 @@ struct ComposerView: View {
             isPreparing: voiceInput.isPreparing || (isVoicePressActive && !voiceInput.isRecording),
             isRecording: voiceInput.isRecording,
             isTranscribing: isVoiceTranscribing,
-            isCompact: isCompactComposer,
+            // 底部默认态只保留图标主操作；录音/转写的长文案交给上方状态胶囊，
+            // 避免 Composer 在宽屏下又退回“控制台按钮排布”。
+            isCompact: true,
             onPressChanged: { pressed in
                 if pressed {
                     beginHoldToTalk()
@@ -721,24 +755,82 @@ struct ComposerView: View {
         .accessibilityHidden(true)
     }
 
+    private var composerKeyboardShortcutButtons: some View {
+        ZStack {
+            hiddenKeyboardShortcut("打开命令面板", key: "k", modifiers: [.command]) {
+                showsAddContentPanel = true
+            }
+            hiddenKeyboardShortcut("打开引用面板", key: "k", modifiers: [.command, .shift]) {
+                showsAddContentPanel = true
+            }
+            hiddenKeyboardShortcut("切换目标任务模式", key: "g", modifiers: [.command, .shift]) {
+                setSendMode(composerState.isGoalModeSelected ? .standard : .goal)
+            }
+            hiddenKeyboardShortcut("切换计划模式", key: "p", modifiers: [.command, .shift]) {
+                setSendMode(composerState.isPlanModeSelected ? .standard : .plan)
+            }
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
+    private func hiddenKeyboardShortcut(
+        _ title: String,
+        key: Character,
+        modifiers: EventModifiers,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            EmptyView()
+        }
+        .keyboardShortcut(KeyEquivalent(key), modifiers: modifiers)
+        .buttonStyle(.plain)
+        .frame(width: 0, height: 0)
+        .accessibilityLabel(title)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
     private var addContentButton: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
         Button {
             showsAddContentPanel.toggle()
         } label: {
-            Label("添加", systemImage: "plus.circle")
-                .foregroundStyle(themeStore.tokens(for: colorScheme).accent)
+            Image(systemName: "plus")
+                .font(themeStore.uiFont(size: 15, weight: .bold))
+                .foregroundStyle(tokens.accent)
+                .frame(width: 28, height: 28)
+                .frame(width: 44, height: 44)
+                .background(tokens.selectionFill, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .strokeBorder(tokens.border.opacity(0.86), lineWidth: 1)
+                }
         }
-        .buttonStyle(.bordered)
-        .tint(themeStore.tokens(for: colorScheme).accent)
+        .buttonStyle(.plain)
+        .contentShape(Capsule())
+        .accessibilityLabel("添加内容")
+        .help("添加图片、Skill、Mention 或快捷短语")
         .popover(isPresented: $showsAddContentPanel, arrowEdge: .bottom) {
             AddContentPanel(
                 selectedPhotoItem: $selectedPhotoItem,
+                skillShortcuts: enabledSkillShortcuts,
+                capabilityErrorMessage: sessionStore.capabilityErrorMessage,
+                isRefreshingCapabilities: sessionStore.isRefreshingCapabilities,
                 onPickImageFile: {
                     showsAddContentPanel = false
                     showsImageFileImporter = true
                 },
                 onManualInput: { kind in
                     openManualInput(kind)
+                },
+                onSkillShortcut: { skill in
+                    addSkillAttachment(skill)
+                },
+                onRefreshCapabilities: {
+                    Task { await sessionStore.refreshCapabilities() }
                 },
                 onShortcut: { shortcut in
                     composerState.insertShortcut(shortcut)
@@ -749,6 +841,92 @@ struct ComposerView: View {
             .environmentObject(themeStore)
             .presentationCompactAdaptation(.sheet)
         }
+    }
+
+    @ViewBuilder
+    private var composerMoreMenu: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        Menu {
+            sendModeMenuSection
+            Divider()
+            permissionMenu
+            runSettingsMenu
+            voiceLanguageMenu
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(themeStore.uiFont(size: 15, weight: .semibold))
+                .foregroundStyle(tokens.accent)
+                .frame(width: 28, height: 28)
+                .frame(width: 44, height: 44)
+                .background(tokens.selectionFill, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .strokeBorder(tokens.border.opacity(0.86), lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .contentShape(Capsule())
+        .accessibilityLabel("更多设置")
+        .accessibilityValue(moreMenuAccessibilitySummary)
+        .help("发送模式、权限、运行设置和语音语言")
+    }
+
+    private var sendModeMenu: some View {
+        Menu {
+            sendModeMenuSection
+        } label: {
+            Label(activeSendModeTitle, systemImage: activeSendModeSystemImage)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(themeStore.tokens(for: colorScheme).accent)
+        .accessibilityLabel("发送模式")
+        .accessibilityValue(activeSendModeTitle)
+        .accessibilityHint("只切换下一次发送方式，不会立即发送")
+    }
+
+    private var sendModeMenuSection: some View {
+        Section("发送模式") {
+            Button {
+                setSendMode(.standard)
+            } label: {
+                Label("普通发送", systemImage: composerState.sendMode == .standard ? "checkmark" : "paperplane")
+            }
+            Button {
+                setSendMode(.goal)
+            } label: {
+                Label("目标任务", systemImage: composerState.isGoalModeSelected ? "checkmark" : "target")
+            }
+            Button {
+                setSendMode(.plan)
+            } label: {
+                Label("计划模式", systemImage: composerState.isPlanModeSelected ? "checkmark" : "list.clipboard")
+            }
+        }
+    }
+
+    private var activeSendModeTitle: String {
+        if composerState.isGoalModeSelected {
+            return "目标"
+        }
+        if composerState.isPlanModeSelected {
+            return "计划"
+        }
+        return "发送"
+    }
+
+    private var activeSendModeSystemImage: String {
+        if composerState.isGoalModeSelected {
+            return "target"
+        }
+        if composerState.isPlanModeSelected {
+            return "list.clipboard"
+        }
+        return "paperplane"
+    }
+
+    private var moreMenuAccessibilitySummary: String {
+        "\(activeSendModeTitle)，\(composerState.permissionMode.title)，语音 \(selectedVoiceLanguage.title)"
     }
 
     private var skillShortcutMenu: some View {
@@ -806,6 +984,27 @@ struct ComposerView: View {
         composerState.addAttachment(.skill(name: skill.name, path: skill.path))
         clearVoiceTransientStatus()
         showsAddContentPanel = false
+    }
+
+    private func setSendMode(_ mode: ComposerSendMode) {
+        // 发送模式是“下一次发送”的轻量开关：视图层用现有 toggle API 对齐目标状态，
+        // 避免为这次收纳改动扩展 ComposerState 的公共面。
+        switch mode {
+        case .standard:
+            if composerState.isGoalModeSelected {
+                composerState.toggleGoalMode()
+            } else if composerState.isPlanModeSelected {
+                composerState.togglePlanMode()
+            }
+        case .goal:
+            if !composerState.isGoalModeSelected {
+                composerState.toggleGoalMode()
+            }
+        case .plan:
+            if !composerState.isPlanModeSelected {
+                composerState.togglePlanMode()
+            }
+        }
     }
 
     private var goalButton: some View {
@@ -1170,6 +1369,9 @@ struct ComposerView: View {
         }
         if let tier = composerState.turnOptions.serviceTier?.trimmingCharacters(in: .whitespacesAndNewlines), !tier.isEmpty {
             items.append(ComposerChipItem(id: "tier", text: "速度 \(tier)", symbol: "speedometer", tint: .secondary))
+        }
+        if selectedVoiceLanguage != .automatic {
+            items.append(ComposerChipItem(id: "voice-language", text: "语音 \(selectedVoiceLanguage.title)", symbol: "globe", tint: .secondary))
         }
         if let summary = composerState.turnOptions.reasoningSummary {
             items.append(ComposerChipItem(id: "summary", text: "摘要 \(summary.rawValue)", symbol: "text.bubble", tint: .secondary))
@@ -2437,8 +2639,13 @@ private struct AddContentPanel: View {
     @Environment(\.colorScheme) private var colorScheme
     @Binding var selectedPhotoItem: PhotosPickerItem?
 
+    let skillShortcuts: [SkillCapability]
+    let capabilityErrorMessage: String?
+    let isRefreshingCapabilities: Bool
     let onPickImageFile: () -> Void
     let onManualInput: (ManualInputKind) -> Void
+    let onSkillShortcut: (SkillCapability) -> Void
+    let onRefreshCapabilities: () -> Void
     let onShortcut: (String) -> Void
 
     private let columns = [
@@ -2495,8 +2702,37 @@ private struct AddContentPanel: View {
 
             panelSection("引用") {
                 LazyVGrid(columns: columns, spacing: 8) {
-                    Button {
-                        onManualInput(.skill)
+                    Menu {
+                        let error = capabilityErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if skillShortcuts.isEmpty {
+                            if let error, !error.isEmpty {
+                                Text("Skill 列表不可用：\(error)")
+                            } else {
+                                Text("暂无可用 Skill")
+                            }
+                        } else {
+                            Section("可用 Skill") {
+                                ForEach(skillShortcuts.prefix(12)) { skill in
+                                    Button {
+                                        onSkillShortcut(skill)
+                                    } label: {
+                                        Label(skill.name, systemImage: "wand.and.stars")
+                                    }
+                                }
+                            }
+                        }
+                        Divider()
+                        Button {
+                            onRefreshCapabilities()
+                        } label: {
+                            Label(isRefreshingCapabilities ? "刷新中" : "刷新 Skill 列表", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(isRefreshingCapabilities)
+                        Button {
+                            onManualInput(.skill)
+                        } label: {
+                            Label("手动添加 Skill", systemImage: "square.and.pencil")
+                        }
                     } label: {
                         panelActionLabel("Skill", systemImage: "wand.and.stars")
                     }
@@ -3354,8 +3590,32 @@ struct TextSelectionPolicy {
     }
 }
 
+private struct ComposerTextSubmitSnapshot {
+    let text: String
+    let isComposing: Bool
+}
+
+private final class ComposerTextSubmitBridge {
+    private weak var textView: CommandSubmitTextView?
+
+    func attach(_ textView: CommandSubmitTextView) {
+        self.textView = textView
+    }
+
+    func snapshotForSubmit() -> ComposerTextSubmitSnapshot? {
+        guard let textView else {
+            return nil
+        }
+        return ComposerTextSubmitSnapshot(
+            text: textView.text ?? "",
+            isComposing: textView.hasMarkedText
+        )
+    }
+}
+
 private struct ComposerTextView: UIViewRepresentable {
     @Binding var text: String
+    let submitBridge: ComposerTextSubmitBridge
     let font: UIFont
     let textColor: UIColor
     let tintColor: UIColor
@@ -3363,6 +3623,7 @@ private struct ComposerTextView: UIViewRepresentable {
     let maxHeight: CGFloat
     let onSubmit: () -> Bool
     let onContentHeightChange: (CGFloat) -> Void
+    let onCompositionStateChange: (Bool) -> Void
     let onVoiceShortcutPressChanged: (Bool) -> Void
 
     func makeUIView(context: Context) -> CommandSubmitTextView {
@@ -3370,6 +3631,7 @@ private struct ComposerTextView: UIViewRepresentable {
         textView.delegate = context.coordinator
         textView.text = text
         context.coordinator.lastSyncedText = text
+        submitBridge.attach(textView)
         textView.onCommandSubmit = onSubmit
         textView.onContentLayoutChanged = { textView in
             context.coordinator.reportContentHeight(for: textView)
@@ -3397,11 +3659,13 @@ private struct ComposerTextView: UIViewRepresentable {
 
     func updateUIView(_ uiView: CommandSubmitTextView, context: Context) {
         context.coordinator.parent = self
+        submitBridge.attach(uiView)
         uiView.onCommandSubmit = onSubmit
         uiView.onContentLayoutChanged = { textView in
             context.coordinator.reportContentHeight(for: textView)
         }
         uiView.onVoiceShortcutPressChanged = onVoiceShortcutPressChanged
+        context.coordinator.updateCompositionState(uiView.hasMarkedText)
 
         // 字体/颜色只在真正变化时赋值：UITextView 的 font setter 会让 TextKit 对整段文本重新排版，
         // 打字时（尤其是中文 marked text 合成期间）每次按键都重设会打断输入法合成并造成可感知卡顿。
@@ -3415,6 +3679,15 @@ private struct ComposerTextView: UIViewRepresentable {
         }
         if uiView.tintColor != tintColor {
             uiView.tintColor = tintColor
+        }
+
+        if uiView.hasMarkedText, context.coordinator.lastSyncedText == text {
+            // 中文/日文等输入法会先把拼音或假名放在 marked text 中。此时外层草稿仍是
+            // 上一次已确认文本，不能把 SwiftUI 状态回灌到 UITextView，否则首个字母会被提交成正文。
+            if needsContentHeightReport {
+                context.coordinator.reportContentHeight(for: uiView)
+            }
+            return
         }
 
         guard context.coordinator.lastSyncedText != text else {
@@ -3432,6 +3705,7 @@ private struct ComposerTextView: UIViewRepresentable {
         uiView.text = text
         context.coordinator.lastSyncedText = text
         context.coordinator.isApplyingExternalText = false
+        context.coordinator.updateCompositionState(false)
         uiView.selectedRange = TextSelectionPolicy.rangeAfterExternalTextSync(
             previousText: previousText,
             nextText: text,
@@ -3451,6 +3725,9 @@ private struct ComposerTextView: UIViewRepresentable {
         private var lastReportedContentHeight: CGFloat = 0
         private var pendingContentHeight: CGFloat?
         private var isContentHeightReportScheduled = false
+        private var isComposingText = false
+        private var pendingCompositionState: Bool?
+        private var isCompositionStateReportScheduled = false
 
         init(_ parent: ComposerTextView) {
             self.parent = parent
@@ -3460,9 +3737,58 @@ private struct ComposerTextView: UIViewRepresentable {
             guard !isApplyingExternalText else {
                 return
             }
-            lastSyncedText = textView.text
-            parent.text = textView.text
+            let currentText = textView.text ?? ""
+            let hasMarkedText = textView.hasMarkedText
+            updateCompositionState(hasMarkedText)
+            if !hasMarkedText {
+                syncCommittedTextIfNeeded(currentText, force: false)
+            }
             reportContentHeight(for: textView)
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            guard !isApplyingExternalText else {
+                return
+            }
+            let hasMarkedText = textView.hasMarkedText
+            updateCompositionState(hasMarkedText)
+            if !hasMarkedText {
+                // 部分输入法结束 marked text 时只触发 selection 变化；这里补一次收敛。
+                syncCommittedTextIfNeeded(textView.text ?? "", force: false)
+            }
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            guard !isApplyingExternalText else {
+                return
+            }
+            updateCompositionState(false)
+            // 失焦是最后兜底边界，保证 UIKit 文本不会滞留在旧 draft 之外。
+            syncCommittedTextIfNeeded(textView.text ?? "", force: true)
+        }
+
+        func updateCompositionState(_ isComposing: Bool) {
+            guard isComposingText != isComposing else {
+                return
+            }
+            isComposingText = isComposing
+            pendingCompositionState = isComposing
+            guard !isCompositionStateReportScheduled else {
+                return
+            }
+            isCompositionStateReportScheduled = true
+            // updateUIView 也会检查 marked text；状态回写放到下一拍，避免在 SwiftUI 更新周期内直接改 @State。
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.isCompositionStateReportScheduled = false
+                guard let isComposing = self.pendingCompositionState else {
+                    return
+                }
+                self.pendingCompositionState = nil
+                self.parent.onCompositionStateChange(isComposing)
+            }
         }
 
         func reportContentHeight(for textView: UITextView) {
@@ -3494,6 +3820,16 @@ private struct ComposerTextView: UIViewRepresentable {
             }
         }
 
+        private func syncCommittedTextIfNeeded(_ currentText: String, force: Bool) {
+            guard force || currentText != lastSyncedText || currentText != parent.text else {
+                return
+            }
+            lastSyncedText = currentText
+            if parent.text != currentText {
+                parent.text = currentText
+            }
+        }
+
         private func visibleContentHeight(for textView: UITextView) -> CGFloat {
             let contentHeight = ceil(textView.contentSize.height)
             if contentHeight > 0 {
@@ -3507,6 +3843,12 @@ private struct ComposerTextView: UIViewRepresentable {
         private func clampedVisibleHeight(_ height: CGFloat) -> CGFloat {
             min(max(height, parent.minHeight), parent.maxHeight)
         }
+    }
+}
+
+private extension UITextView {
+    var hasMarkedText: Bool {
+        markedTextRange != nil
     }
 }
 

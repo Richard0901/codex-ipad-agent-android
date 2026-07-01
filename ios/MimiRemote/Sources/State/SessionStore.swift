@@ -225,13 +225,13 @@ struct ProjectSessionListSnapshot: Equatable {
     }
 
     var actionTitle: String {
-        if !isShowingAll {
-            return "展开显示"
+        if isLoadingMore {
+            return "加载中..."
         }
-        if canLoadMore {
-            return isLoadingMore ? "加载中..." : "加载更多"
+        if isShowingAll && visibleSessions.count >= allSessionCount && !canLoadMore {
+            return "收起显示"
         }
-        return "收起显示"
+        return "显示更多"
     }
 }
 
@@ -682,6 +682,7 @@ final class SessionStore: ObservableObject {
     private var sortedSessionsByProjectID: [String: [AgentSession]] = [:]
     private var previewSessionsByProjectID: [String: [AgentSession]] = [:]
     private var hiddenSessionCountByProjectID: [String: Int] = [:]
+    @Published private var sessionVisibleLimitByProjectID: [String: Int] = [:]
     private var sessionListSnapshotsByProjectID: [String: ProjectSessionListSnapshot] = [:]
     private var frozenAllSessionOrder: [SessionID] = []
     private var frozenSessionOrderByProjectID: [String: [SessionID]] = [:]
@@ -702,10 +703,11 @@ final class SessionStore: ObservableObject {
     private let historyPageLimit = 120
     private static let optimisticSessionSource = "local"
     static let sessionPreviewLimit = 3
+    static let sessionExpansionStep = 5
     // 远程/VPS 中转链路下，thread/list 的响应会经过 WebSocket + SSH 隧道。
     // 首屏先拿较小窗口，避免弱网下为了预览历史会话而卡住整个工作台。
     private static let initialSessionPageLimit = 20
-    private static let expandedSessionPageLimit = 50
+    private static let expandedSessionPageLimit = 20
     private static let commandActionHistoryLimit = 10
 
     init(
@@ -986,7 +988,7 @@ final class SessionStore: ObservableObject {
     }
 
     func isShowingAllSessions(projectID: String) -> Bool {
-        showingAllSessionProjectIDs.contains(projectID)
+        sessionVisibleLimit(forProjectID: projectID) > Self.sessionPreviewLimit
     }
 
     func sessions(forProjectID projectID: String) -> [AgentSession] {
@@ -1002,14 +1004,14 @@ final class SessionStore: ObservableObject {
     }
 
     func visibleSessions(forProjectID projectID: String) -> [AgentSession] {
-        guard !isShowingAllSessions(projectID: projectID) else {
-            return sessions(forProjectID: projectID)
-        }
-        return previewSessionsByProjectID[projectID] ?? []
+        let sessions = sessions(forProjectID: projectID)
+        let limit = min(sessionVisibleLimit(forProjectID: projectID), sessions.count)
+        return Array(sessions.prefix(limit))
     }
 
     func hiddenSessionCount(forProjectID projectID: String) -> Int {
-        hiddenSessionCountByProjectID[projectID] ?? 0
+        let sessions = sessions(forProjectID: projectID)
+        return max(0, sessions.count - min(sessionVisibleLimit(forProjectID: projectID), sessions.count))
     }
 
     func canLoadMoreSessions(projectID: String) -> Bool {
@@ -2006,13 +2008,21 @@ final class SessionStore: ObservableObject {
     }
 
     func toggleSessionListExpansion(projectID: String) async {
-        if showingAllSessionProjectIDs.contains(projectID) {
-            removeShowingAllSessionProjectID(projectID)
-        } else {
-            insertShowingAllSessionProjectID(projectID)
-            if canLoadMoreSessions(projectID: projectID) {
-                await loadMoreSessions(projectID: projectID)
-            }
+        let currentLimit = sessionVisibleLimit(forProjectID: projectID)
+        let loadedCount = sessions(forProjectID: projectID).count
+        let isFullyExpanded = currentLimit > Self.sessionPreviewLimit &&
+            currentLimit >= loadedCount &&
+            !canLoadMoreSessions(projectID: projectID)
+
+        if isFullyExpanded {
+            setSessionVisibleLimit(nil, forProjectID: projectID)
+            return
+        }
+
+        let nextLimit = currentLimit + Self.sessionExpansionStep
+        setSessionVisibleLimit(nextLimit, forProjectID: projectID)
+        if canLoadMoreSessions(projectID: projectID), nextLimit >= loadedCount {
+            await loadMoreSessions(projectID: projectID)
         }
     }
 
@@ -3352,8 +3362,9 @@ final class SessionStore: ObservableObject {
         }
 
         let allSessions = baseSessions
-        let isShowingAll = isShowingAllSessions(projectID: projectID)
-        let visibleSessions = isShowingAll ? allSessions : previewSessionsByProjectID[projectID] ?? []
+        let visibleLimit = sessionVisibleLimit(forProjectID: projectID)
+        let visibleSessions = Array(allSessions.prefix(min(visibleLimit, allSessions.count)))
+        let isShowingAll = visibleLimit > Self.sessionPreviewLimit
 
         return ProjectSessionListSnapshot(
             projectID: projectID,
@@ -3361,7 +3372,7 @@ final class SessionStore: ObservableObject {
             isShowingAll: isShowingAll,
             visibleSessions: visibleSessions,
             allSessionCount: allSessions.count,
-            hiddenCount: hiddenSessionCountByProjectID[projectID] ?? 0,
+            hiddenCount: max(0, allSessions.count - visibleSessions.count),
             canLoadMore: canLoadMoreSessions(projectID: projectID),
             isLoadingMore: sessionPageLoadingTokenByProjectID[projectID] != nil,
             hasCollapsedPreview: allSessions.count > Self.sessionPreviewLimit
@@ -4502,23 +4513,37 @@ final class SessionStore: ObservableObject {
             return
         }
         showingAllSessionProjectIDs = value
+        sessionVisibleLimitByProjectID = sessionVisibleLimitByProjectID.filter { value.contains($0.key) }
         rebuildProjectSessionListSnapshots()
     }
 
     private func insertShowingAllSessionProjectID(_ value: String) {
-        guard !showingAllSessionProjectIDs.contains(value) else {
-            return
-        }
-        showingAllSessionProjectIDs.insert(value)
-        rebuildProjectSessionListSnapshot(forProjectID: value)
+        setSessionVisibleLimit(Self.sessionPreviewLimit + Self.sessionExpansionStep, forProjectID: value)
     }
 
     private func removeShowingAllSessionProjectID(_ value: String) {
-        guard showingAllSessionProjectIDs.contains(value) else {
+        setSessionVisibleLimit(nil, forProjectID: value)
+    }
+
+    private func sessionVisibleLimit(forProjectID projectID: String) -> Int {
+        max(Self.sessionPreviewLimit, sessionVisibleLimitByProjectID[projectID] ?? Self.sessionPreviewLimit)
+    }
+
+    private func setSessionVisibleLimit(_ limit: Int?, forProjectID projectID: String) {
+        let normalized = limit.map { max(Self.sessionPreviewLimit, $0) }
+        let current = sessionVisibleLimitByProjectID[projectID]
+        let next = normalized.flatMap { $0 > Self.sessionPreviewLimit ? $0 : nil }
+        guard current != next else {
             return
         }
-        showingAllSessionProjectIDs.remove(value)
-        rebuildProjectSessionListSnapshot(forProjectID: value)
+        if let next {
+            sessionVisibleLimitByProjectID[projectID] = next
+            showingAllSessionProjectIDs.insert(projectID)
+        } else {
+            sessionVisibleLimitByProjectID.removeValue(forKey: projectID)
+            showingAllSessionProjectIDs.remove(projectID)
+        }
+        rebuildProjectSessionListSnapshot(forProjectID: projectID)
     }
 
     private func setSelectedProjectID(_ value: String?) {

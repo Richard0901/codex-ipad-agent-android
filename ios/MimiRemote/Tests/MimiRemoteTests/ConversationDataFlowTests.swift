@@ -4371,11 +4371,11 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(snapshot.allSessionCount, 5)
         XCTAssertEqual(snapshot.hiddenCount, 2)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "展开显示")
+        XCTAssertEqual(snapshot.actionTitle, "显示更多")
 
         await store.toggleSessionListExpansion(projectID: project.id)
         XCTAssertEqual(store.visibleSessions(forProjectID: project.id).count, 5)
-        XCTAssertEqual(store.hiddenSessionCount(forProjectID: project.id), 2)
+        XCTAssertEqual(store.hiddenSessionCount(forProjectID: project.id), 0)
         snapshot = store.sessionListSnapshot(forProjectID: project.id)
         XCTAssertTrue(snapshot.isShowingAll)
         XCTAssertEqual(snapshot.visibleSessions.count, 5)
@@ -4387,6 +4387,44 @@ final class ConversationDataFlowTests: XCTestCase {
         snapshot = store.sessionListSnapshot(forProjectID: project.id)
         XCTAssertFalse(snapshot.isShowingAll)
         XCTAssertEqual(snapshot.visibleSessions.map(\.id), ["codex_0", "codex_1", "codex_2"])
+    }
+
+    func testSessionStoreExpandsProjectSessionsInSmallSteps() async {
+        let project = makeProject(id: "proj_step_expand")
+        let sessions = (0..<12).map { index in
+            makeSession(
+                id: "codex_step_\(index)",
+                projectID: project.id,
+                title: "历史 \(index)",
+                status: "history",
+                source: "codex",
+                resumeID: "history_step_\(index)",
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(100 - index))
+            )
+        }
+        let client = MockSessionStoreClient(projects: [project], sessions: sessions)
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        XCTAssertEqual(store.visibleSessions(forProjectID: project.id).count, SessionStore.sessionPreviewLimit)
+
+        await store.toggleSessionListExpansion(projectID: project.id)
+        var snapshot = store.sessionListSnapshot(forProjectID: project.id)
+        XCTAssertEqual(snapshot.visibleSessions.count, SessionStore.sessionPreviewLimit + SessionStore.sessionExpansionStep)
+        XCTAssertEqual(snapshot.hiddenCount, 4)
+        XCTAssertEqual(snapshot.actionTitle, "显示更多")
+
+        await store.toggleSessionListExpansion(projectID: project.id)
+        snapshot = store.sessionListSnapshot(forProjectID: project.id)
+        XCTAssertEqual(snapshot.visibleSessions.count, 12)
+        XCTAssertEqual(snapshot.hiddenCount, 0)
+        XCTAssertEqual(snapshot.actionTitle, "收起显示")
     }
 
     func testSessionStoreLoadsNextSessionPageWhenExpanded() async {
@@ -4438,7 +4476,7 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertFalse(snapshot.isShowingAll)
         XCTAssertTrue(snapshot.canLoadMore)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "展开显示")
+        XCTAssertEqual(snapshot.actionTitle, "显示更多")
 
         await store.toggleSessionListExpansion(projectID: project.id)
 
@@ -4483,7 +4521,7 @@ final class ConversationDataFlowTests: XCTestCase {
         var snapshot = store.sessionListSnapshot(forProjectID: project.id)
         XCTAssertTrue(snapshot.canLoadMore)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "展开显示")
+        XCTAssertEqual(snapshot.actionTitle, "显示更多")
 
         client.page = SessionsPage(sessions: firstPage, hasMore: false)
         await store.refreshAll(autoAttach: false)

@@ -127,57 +127,85 @@ final class ThemeStoreTests: XCTestCase {
         XCTAssertEqual(store.tokens(for: .light).resolvedScheme, .dark)
     }
 
-    func testDefaultCodexPresetUsesWhitePurplePalette() {
+    func testDefaultCodexPresetUsesWarmWorkbenchPalette() {
         let store = ThemeStore(defaults: defaults)
 
         let lightTokens = store.tokens(for: .light)
         let darkTokens = store.tokens(for: .dark)
         let lightBackground = rgba(lightTokens.background)
         let lightSurface = rgba(lightTokens.surface)
+        let lightElevatedSurface = rgba(lightTokens.elevatedSurface)
         let lightAccent = rgba(lightTokens.accent)
         let lightSuccess = rgba(lightTokens.success)
         let lightUserBubble = rgba(lightTokens.userBubble)
+        let lightSidebarBackground = rgba(lightTokens.sidebarBackground)
+        let lightSidebarHoverFill = rgba(lightTokens.sidebarHoverFill)
+        let lightInputBackground = rgba(lightTokens.inputBackground)
+        let lightPlanCardBackground = rgba(lightTokens.planCardBackground)
+        let lightPlanCardBorder = rgba(lightTokens.planCardBorder)
+        let lightBorder = rgba(lightTokens.border)
+        let lightSelectionFill = rgba(lightTokens.selectionFill)
+        let lightSecondaryText = rgba(lightTokens.secondaryText)
+        let codexSwatchForeground = rgba(ThemePreset.codex.swatchForeground)
+        let codexSwatchBackground = rgba(ThemePreset.codex.swatchBackground)
         let darkBackground = rgba(darkTokens.background)
+        let darkSurface = rgba(darkTokens.surface)
+        let darkElevatedSurface = rgba(darkTokens.elevatedSurface)
         let darkAccent = rgba(darkTokens.accent)
         let darkSuccess = rgba(darkTokens.success)
         let darkUserBubble = rgba(darkTokens.userBubble)
 
-        XCTAssertEqual(ThemePreset.codex.subtitle, "白色界面配紫色重点，适合长时间对话")
+        XCTAssertEqual(ThemePreset.codex.subtitle, "暖白工作界面配紫色消息，适合长时间对话")
 
-        XCTAssertGreaterThan(lightBackground.red, 0.97)
-        XCTAssertGreaterThan(lightBackground.green, 0.96)
-        XCTAssertGreaterThan(lightBackground.blue, 0.97)
+        assertRGB(lightBackground, red: 252, green: 251, blue: 248)
+        assertRGB(lightSidebarBackground, red: 247, green: 246, blue: 242)
+        assertRGB(lightSelectionFill, red: 236, green: 234, blue: 228)
+        assertRGB(lightSidebarHoverFill, red: 243, green: 242, blue: 238)
+        assertRGB(lightInputBackground, red: 245, green: 244, blue: 241)
+        assertRGB(lightPlanCardBackground, red: 255, green: 248, blue: 234)
+        assertRGB(lightPlanCardBorder, red: 233, green: 221, blue: 199)
+        assertRGB(lightBorder, red: 231, green: 228, blue: 221)
+        assertRGB(lightSecondaryText, red: 110, green: 106, blue: 99)
         XCTAssertGreaterThan(lightSurface.red, 0.99)
         XCTAssertGreaterThan(lightSurface.green, 0.99)
         XCTAssertGreaterThan(lightSurface.blue, 0.99)
+        XCTAssertEqual(lightTokens.assistantBubble, .white)
+        XCTAssertLessThan(abs(lightElevatedSurface.red - lightElevatedSurface.blue), 0.03)
 
-        XCTAssertGreaterThan(lightAccent.red, 0.30)
-        XCTAssertLessThan(lightAccent.green, 0.20)
-        XCTAssertGreaterThan(lightAccent.blue, 0.35)
-        XCTAssertGreaterThan(lightAccent.blue, lightAccent.red)
-        XCTAssertGreaterThan(lightSuccess.blue, 0.70)
-        XCTAssertGreaterThan(lightSuccess.red, 0.25)
-        XCTAssertLessThan(lightSuccess.green, lightSuccess.blue)
+        XCTAssertEqual(lightAccent.red, lightUserBubble.red, accuracy: 0.001)
+        XCTAssertEqual(lightAccent.green, lightUserBubble.green, accuracy: 0.001)
+        XCTAssertEqual(lightAccent.blue, lightUserBubble.blue, accuracy: 0.001)
+        XCTAssertEqual(codexSwatchBackground.red, lightBackground.red, accuracy: 0.001)
+        XCTAssertEqual(codexSwatchBackground.green, lightBackground.green, accuracy: 0.001)
+        XCTAssertEqual(codexSwatchBackground.blue, lightBackground.blue, accuracy: 0.001)
+        XCTAssertGreaterThan(lightSuccess.green, lightSuccess.red)
+        XCTAssertGreaterThan(lightSuccess.green, lightSuccess.blue)
 
-        XCTAssertEqual(lightUserBubble.red, 0.25, accuracy: 0.01)
-        XCTAssertEqual(lightUserBubble.green, 0.13, accuracy: 0.01)
-        XCTAssertEqual(lightUserBubble.blue, 0.42, accuracy: 0.01)
+        // 用户发送气泡使用 Slack Aubergine (#4A154B)；其它操作只做少量同色点缀，不再引入蓝色体系。
+        XCTAssertEqual(lightUserBubble.red, 0.29, accuracy: 0.01)
+        XCTAssertEqual(lightUserBubble.green, 0.08, accuracy: 0.01)
+        XCTAssertEqual(lightUserBubble.blue, 0.29, accuracy: 0.01)
         XCTAssertGreaterThan(lightUserBubble.alpha, 0.99)
+        XCTAssertEqual(codexSwatchForeground.red, lightUserBubble.red, accuracy: 0.001)
+        XCTAssertEqual(codexSwatchForeground.green, lightUserBubble.green, accuracy: 0.001)
+        XCTAssertEqual(codexSwatchForeground.blue, lightUserBubble.blue, accuracy: 0.001)
 
         XCTAssertLessThan(darkBackground.red, 0.12)
-        XCTAssertLessThan(darkBackground.green, 0.10)
-        XCTAssertLessThan(darkBackground.blue, 0.13)
-        XCTAssertGreaterThan(darkAccent.red, 0.70)
-        XCTAssertGreaterThan(darkAccent.green, 0.50)
-        XCTAssertGreaterThan(darkAccent.blue, 0.80)
-        XCTAssertGreaterThan(darkAccent.blue, darkAccent.red)
-        XCTAssertGreaterThan(darkSuccess.blue, 0.90)
-        XCTAssertGreaterThan(darkSuccess.red, 0.45)
-        XCTAssertLessThan(darkSuccess.green, darkSuccess.blue)
+        XCTAssertLessThan(darkBackground.green, 0.12)
+        XCTAssertLessThan(darkBackground.blue, 0.12)
+        XCTAssertLessThan(abs(darkBackground.red - darkBackground.blue), 0.03)
+        XCTAssertLessThan(abs(darkSurface.red - darkSurface.blue), 0.04)
+        XCTAssertLessThan(abs(darkElevatedSurface.red - darkElevatedSurface.blue), 0.04)
+        XCTAssertGreaterThan(darkAccent.red, 0.75)
+        XCTAssertGreaterThan(darkAccent.green, 0.65)
+        XCTAssertGreaterThan(darkAccent.blue, 0.85)
+        XCTAssertGreaterThan(darkAccent.blue, darkAccent.green)
+        XCTAssertGreaterThan(darkSuccess.green, darkSuccess.red)
+        XCTAssertGreaterThan(darkSuccess.green, darkSuccess.blue)
 
-        XCTAssertEqual(darkUserBubble.red, 0.25, accuracy: 0.01)
-        XCTAssertEqual(darkUserBubble.green, 0.13, accuracy: 0.01)
-        XCTAssertEqual(darkUserBubble.blue, 0.42, accuracy: 0.01)
+        XCTAssertEqual(darkUserBubble.red, 0.29, accuracy: 0.01)
+        XCTAssertEqual(darkUserBubble.green, 0.08, accuracy: 0.01)
+        XCTAssertEqual(darkUserBubble.blue, 0.29, accuracy: 0.01)
         XCTAssertGreaterThan(darkUserBubble.alpha, 0.99)
     }
 
@@ -266,6 +294,19 @@ final class ThemeStoreTests: XCTestCase {
         var alpha: CGFloat = 0
         XCTAssertTrue(UIColor(color).getRed(&red, green: &green, blue: &blue, alpha: &alpha))
         return (red, green, blue, alpha)
+    }
+
+    private func assertRGB(
+        _ color: (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat),
+        red: CGFloat,
+        green: CGFloat,
+        blue: CGFloat,
+        accuracy: CGFloat = 0.003
+    ) {
+        XCTAssertEqual(color.red, red / 255.0, accuracy: accuracy)
+        XCTAssertEqual(color.green, green / 255.0, accuracy: accuracy)
+        XCTAssertEqual(color.blue, blue / 255.0, accuracy: accuracy)
+        XCTAssertGreaterThan(color.alpha, 0.99)
     }
 
     private func colorDistance(

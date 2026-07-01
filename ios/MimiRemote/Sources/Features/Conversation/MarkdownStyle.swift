@@ -8,6 +8,8 @@ struct MarkdownStyle: Equatable {
     let codeForeground: Color
     let codeBackground: Color
     let tableBackground: Color
+    let planCardBackground: Color
+    let planCardBorder: Color
     let quoteBar: Color
     let dividerColor: Color
     let blockSpacing: CGFloat
@@ -35,6 +37,8 @@ struct MarkdownStyle: Equatable {
             codeForeground: usesDarkUserBubble ? userText : (tokens?.codeText ?? .primary),
             codeBackground: usesDarkUserBubble ? Color.white.opacity(0.16) : (tokens?.codeBlock ?? Color(.tertiarySystemBackground)),
             tableBackground: usesDarkUserBubble ? Color.white.opacity(0.16) : (tokens?.elevatedSurface ?? Color(.secondarySystemBackground)),
+            planCardBackground: usesDarkUserBubble ? Color.white.opacity(0.16) : (tokens?.planCardBackground ?? tokens?.elevatedSurface ?? Color(.secondarySystemBackground)),
+            planCardBorder: usesDarkUserBubble ? Color.white.opacity(0.24) : (tokens?.planCardBorder ?? tokens?.border ?? Color(.separator)),
             quoteBar: usesDarkUserBubble
                 ? Color.white.opacity(0.56)
                 : (tokens?.accent.opacity(colorScheme == .dark ? 0.76 : 0.64)

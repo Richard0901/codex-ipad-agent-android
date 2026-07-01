@@ -81,7 +81,7 @@ enum ThemePreset: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .codex:
-            return "白色界面配紫色重点，适合长时间对话"
+            return "暖白工作界面配紫色消息，适合长时间对话"
         case .github:
             return "接近 GitHub Primer 的代码审阅配色"
         case .xcode:
@@ -94,7 +94,8 @@ enum ThemePreset: String, CaseIterable, Identifiable {
     var swatchForeground: Color {
         switch self {
         case .codex:
-            return Color(red: 0.38, green: 0.12, blue: 0.41)
+            // Default 的主视觉只让用户消息保持 Slack aubergine，设置页色卡也跟随这个重点色。
+            return Color(red: 0.29, green: 0.08, blue: 0.29)
         case .github:
             return Color(red: 0.03, green: 0.41, blue: 0.85)
         case .xcode:
@@ -107,7 +108,7 @@ enum ThemePreset: String, CaseIterable, Identifiable {
     var swatchBackground: Color {
         switch self {
         case .codex:
-            return Color(red: 0.97, green: 0.94, blue: 0.98)
+            return Color(red: 0.988, green: 0.984, blue: 0.973)
         case .github:
             return Color(red: 0.96, green: 0.97, blue: 0.98)
         case .xcode:
@@ -199,6 +200,41 @@ struct ThemeTokens {
 }
 
 extension ThemeTokens {
+    var sidebarBackground: Color {
+        guard preset == .codex, resolvedScheme == .light else {
+            return background
+        }
+        return Color(red: 0.969, green: 0.965, blue: 0.949)
+    }
+
+    var sidebarHoverFill: Color {
+        guard preset == .codex, resolvedScheme == .light else {
+            return elevatedSurface
+        }
+        return Color(red: 0.953, green: 0.949, blue: 0.933)
+    }
+
+    var inputBackground: Color {
+        guard preset == .codex, resolvedScheme == .light else {
+            return elevatedSurface
+        }
+        return Color(red: 0.961, green: 0.957, blue: 0.945)
+    }
+
+    var planCardBackground: Color {
+        guard preset == .codex, resolvedScheme == .light else {
+            return elevatedSurface
+        }
+        return Color(red: 1.000, green: 0.973, blue: 0.918)
+    }
+
+    var planCardBorder: Color {
+        guard preset == .codex, resolvedScheme == .light else {
+            return border
+        }
+        return Color(red: 0.914, green: 0.867, blue: 0.780)
+    }
+
     func tint(for tone: AgentSessionStatusTone) -> Color {
         switch tone {
         case .active:
@@ -392,62 +428,64 @@ final class ThemeStore: ObservableObject {
     }
 
     private var codexLightTokens: ThemeTokens {
+        // Default 主题面向长时间工作台：暖白/中性灰做底，只把品牌紫用于用户气泡和必要操作点缀。
         ThemeTokens(
             preset: .codex,
             resolvedScheme: .light,
-            background: Color(red: 0.99, green: 0.98, blue: 0.99),
+            background: Color(red: 0.988, green: 0.984, blue: 0.973),
             surface: Color(red: 1.00, green: 1.00, blue: 1.00),
-            elevatedSurface: Color(red: 0.96, green: 0.94, blue: 0.97),
-            userBubble: Color(red: 0.25, green: 0.13, blue: 0.42),
+            elevatedSurface: Color(red: 0.961, green: 0.957, blue: 0.945),
+            userBubble: Color(red: 0.29, green: 0.08, blue: 0.29),
             assistantBubble: .white,
-            systemBubble: Color(red: 0.95, green: 0.93, blue: 0.96),
-            codeBlock: Color(red: 0.11, green: 0.13, blue: 0.16),
+            systemBubble: Color(red: 0.953, green: 0.949, blue: 0.933),
+            codeBlock: Color(red: 0.10, green: 0.11, blue: 0.13),
             codeText: Color(red: 0.94, green: 0.96, blue: 0.98),
-            primaryText: Color(red: 0.11, green: 0.10, blue: 0.11),
-            secondaryText: Color(red: 0.38, green: 0.36, blue: 0.38),
-            tertiaryText: Color(red: 0.53, green: 0.49, blue: 0.54),
-            accent: Color(red: 0.38, green: 0.12, blue: 0.41),
-            warning: Color(red: 0.88, green: 0.48, blue: 0.08),
-            success: Color(red: 0.30, green: 0.31, blue: 0.78),
-            goalActive: Color(red: 0.48, green: 0.18, blue: 0.52),
-            voiceRecording: Color(red: 0.56, green: 0.24, blue: 0.61),
+            primaryText: Color(red: 0.12, green: 0.11, blue: 0.10),
+            secondaryText: Color(red: 0.431, green: 0.416, blue: 0.388),
+            tertiaryText: Color(red: 0.604, green: 0.580, blue: 0.545),
+            accent: Color(red: 0.29, green: 0.08, blue: 0.29),
+            warning: Color(red: 0.84, green: 0.43, blue: 0.05),
+            success: Color(red: 0.14, green: 0.50, blue: 0.32),
+            goalActive: Color(red: 0.29, green: 0.08, blue: 0.29),
+            voiceRecording: Color(red: 0.29, green: 0.08, blue: 0.29),
             voiceWaveformGradient: [
-                Color(red: 0.38, green: 0.12, blue: 0.41),
-                Color(red: 0.56, green: 0.24, blue: 0.61),
-                Color(red: 0.77, green: 0.56, blue: 0.84)
+                Color(red: 0.29, green: 0.08, blue: 0.29),
+                Color(red: 0.56, green: 0.29, blue: 0.54),
+                Color(red: 0.78, green: 0.66, blue: 0.76),
             ],
-            border: Color(red: 0.88, green: 0.84, blue: 0.90),
-            selectionFill: Color(red: 0.38, green: 0.12, blue: 0.41).opacity(0.12)
+            border: Color(red: 0.906, green: 0.894, blue: 0.867),
+            selectionFill: Color(red: 0.925, green: 0.918, blue: 0.894)
         )
     }
 
     private var codexDarkTokens: ThemeTokens {
+        // 深色同样避免紫色铺底，保留石墨色层级，降低侧栏和工具栏的整体噪声。
         ThemeTokens(
             preset: .codex,
             resolvedScheme: .dark,
-            background: Color(red: 0.07, green: 0.05, blue: 0.08),
-            surface: Color(red: 0.12, green: 0.09, blue: 0.13),
-            elevatedSurface: Color(red: 0.17, green: 0.13, blue: 0.19),
-            userBubble: Color(red: 0.25, green: 0.13, blue: 0.42),
-            assistantBubble: Color(red: 0.10, green: 0.08, blue: 0.11),
-            systemBubble: Color(red: 0.15, green: 0.11, blue: 0.17),
-            codeBlock: Color(red: 0.02, green: 0.02, blue: 0.03),
-            codeText: Color(red: 0.92, green: 0.90, blue: 0.94),
-            primaryText: Color(red: 0.95, green: 0.93, blue: 0.96),
-            secondaryText: Color(red: 0.78, green: 0.72, blue: 0.80),
-            tertiaryText: Color(red: 0.59, green: 0.53, blue: 0.62),
-            accent: Color(red: 0.77, green: 0.56, blue: 0.84),
-            warning: Color(red: 1.00, green: 0.66, blue: 0.22),
-            success: Color(red: 0.55, green: 0.60, blue: 1.00),
-            goalActive: Color(red: 0.83, green: 0.64, blue: 0.90),
-            voiceRecording: Color(red: 0.85, green: 0.65, blue: 0.91),
+            background: Color(red: 0.07, green: 0.08, blue: 0.09),
+            surface: Color(red: 0.11, green: 0.12, blue: 0.14),
+            elevatedSurface: Color(red: 0.16, green: 0.17, blue: 0.19),
+            userBubble: Color(red: 0.29, green: 0.08, blue: 0.29),
+            assistantBubble: Color(red: 0.11, green: 0.12, blue: 0.14),
+            systemBubble: Color(red: 0.15, green: 0.16, blue: 0.18),
+            codeBlock: Color(red: 0.04, green: 0.04, blue: 0.05),
+            codeText: Color(red: 0.91, green: 0.92, blue: 0.94),
+            primaryText: Color(red: 0.93, green: 0.94, blue: 0.96),
+            secondaryText: Color(red: 0.72, green: 0.74, blue: 0.78),
+            tertiaryText: Color(red: 0.52, green: 0.55, blue: 0.60),
+            accent: Color(red: 0.82, green: 0.70, blue: 0.94),
+            warning: Color(red: 0.95, green: 0.61, blue: 0.18),
+            success: Color(red: 0.32, green: 0.72, blue: 0.48),
+            goalActive: Color(red: 0.82, green: 0.70, blue: 0.94),
+            voiceRecording: Color(red: 0.82, green: 0.70, blue: 0.94),
             voiceWaveformGradient: [
-                Color(red: 0.93, green: 0.74, blue: 0.98),
-                Color(red: 0.77, green: 0.56, blue: 0.84),
-                Color(red: 0.56, green: 0.24, blue: 0.61)
+                Color(red: 0.56, green: 0.29, blue: 0.54),
+                Color(red: 0.82, green: 0.70, blue: 0.94),
+                Color(red: 0.93, green: 0.82, blue: 0.98)
             ],
-            border: Color(red: 0.30, green: 0.23, blue: 0.33),
-            selectionFill: Color(red: 0.77, green: 0.56, blue: 0.84).opacity(0.18)
+            border: Color(red: 0.25, green: 0.27, blue: 0.31),
+            selectionFill: Color(red: 0.19, green: 0.20, blue: 0.23)
         )
     }
 
