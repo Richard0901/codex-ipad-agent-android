@@ -325,6 +325,8 @@ struct SessionContextSidebarView: View {
             return "运行中"
         case "idle":
             return "空闲"
+        case "completed":
+            return "完成"
         case "notLoaded", "history":
             return "历史"
         case "systemError", "failed":

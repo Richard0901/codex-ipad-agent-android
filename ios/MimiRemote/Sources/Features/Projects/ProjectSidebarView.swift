@@ -760,7 +760,7 @@ private struct SessionRow: View, Equatable {
         let tokens = themeStore.tokens(for: colorScheme)
 
         VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+            HStack(alignment: .center, spacing: 6) {
                 Circle()
                     .fill(statusDotColor)
                     .frame(width: 6, height: 6)
@@ -829,11 +829,13 @@ private struct SessionRow: View, Equatable {
                 ProgressView()
                     .controlSize(.mini)
                     .tint(tint(for: statusSummary.tone))
+                    .frame(width: 16, height: 16, alignment: .center)
                     .accessibilityLabel(statusSummary.title)
             } else {
                 Image(systemName: statusSummary.systemImage)
                     .font(themeStore.uiFont(size: 13, weight: .semibold))
                     .foregroundStyle(tint(for: statusSummary.tone))
+                    .frame(width: 16, height: 16, alignment: .center)
                     .accessibilityLabel(statusSummary.title)
             }
         } else if let updatedAt = session.updatedAt {

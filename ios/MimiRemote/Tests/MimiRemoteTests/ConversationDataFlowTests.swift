@@ -6109,6 +6109,108 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(sockets[0].sentTurns.first?.payload.textPrompt, "修复 iPad 目标入口")
     }
 
+    func testTurnCompletionFinishesActiveGoalAndIgnoresStaleActiveGoalRefresh() async throws {
+        let project = makeProject(id: "proj_goal_complete")
+        let goal = ThreadGoal(
+            threadID: "thread_goal_complete",
+            objective: "修复完成后仍显示运行中",
+            status: .active,
+            tokenBudget: 80_000,
+            tokensUsed: 12_000,
+            timeUsedSeconds: 420
+        )
+        let running = AgentSession(
+            id: "sess_goal_complete",
+            projectID: project.id,
+            project: project.name,
+            dir: project.path,
+            title: "目标会话",
+            status: "running",
+            source: "codex",
+            resumeID: goal.threadID,
+            createdAt: Date(timeIntervalSince1970: 1),
+            updatedAt: Date(timeIntervalSince1970: 2),
+            activeTurnID: "turn-goal-complete",
+            goal: goal
+        )
+        let reactivatedGoal = ThreadGoal(
+            threadID: goal.threadID,
+            objective: goal.objective,
+            status: .active,
+            tokenBudget: goal.tokenBudget,
+            tokensUsed: goal.tokensUsed,
+            timeUsedSeconds: goal.timeUsedSeconds
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [running],
+            threadGoalSetResults: [
+                running.id: .success(reactivatedGoal)
+            ]
+        )
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        sockets[0].emitEvent(.turnCompleted(AgentEventMetadata(
+            seq: 1,
+            sessionID: running.id,
+            turnID: "turn-goal-complete",
+            itemID: nil,
+            messageID: nil,
+            clientMessageID: nil,
+            revision: nil,
+            createdAt: nil
+        )))
+
+        try await waitForSelectedThreadGoalStatus(.complete, store: store)
+        try await waitForSelectedSessionStatus(SessionStatus.completed.rawValue, store: store)
+        try await waitForSelectedActiveTurnID(nil, store: store)
+        XCTAssertEqual(store.selectedSession?.status, SessionStatus.completed.rawValue)
+        XCTAssertNil(store.selectedSession?.activeTurnID)
+
+        sockets[0].emitEvent(.goalUpdated(goal, AgentEventMetadata(
+            seq: 2,
+            sessionID: running.id,
+            turnID: nil,
+            itemID: nil,
+            messageID: nil,
+            clientMessageID: nil,
+            revision: nil,
+            createdAt: nil
+        )))
+        sockets[0].emitEvent(.session(running))
+
+        try await waitForSelectedThreadGoalStatus(.complete, store: store)
+
+        await store.updateSelectedThreadGoalStatus(.active)
+
+        try await waitForSelectedThreadGoalStatus(.active, store: store)
+        XCTAssertEqual(client.requestedThreadGoalSets.last, RequestedThreadGoalSet(
+            threadID: running.id,
+            objective: nil,
+            status: .active,
+            tokenBudget: nil
+        ))
+    }
+
     func testSelectedThreadGoalStaysScopedToSelectedThread() async throws {
         let project = makeProject(id: "proj_goal_scope")
         let goal = ThreadGoal(
@@ -8906,6 +9008,28 @@ private func waitForSelectedActiveTurnID(_ expected: TurnID?, store: SessionStor
         try await Task.sleep(nanoseconds: 10_000_000)
     }
     XCTFail("activeTurnID 未在超时前变为 \(expected ?? "nil")，当前为 \(store.selectedSession?.activeTurnID ?? "nil")")
+}
+
+@MainActor
+private func waitForSelectedSessionStatus(_ expected: String, store: SessionStore) async throws {
+    for _ in 0..<80 {
+        if store.selectedSession?.status == expected {
+            return
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("session status 未在超时前变为 \(expected)，当前为 \(store.selectedSession?.status ?? "nil")")
+}
+
+@MainActor
+private func waitForSelectedThreadGoalStatus(_ expected: ThreadGoalStatus, store: SessionStore) async throws {
+    for _ in 0..<80 {
+        if store.selectedThreadGoal?.status == expected {
+            return
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("目标状态未在超时前变为 \(expected.rawValue)，当前为 \(store.selectedThreadGoal?.status.rawValue ?? "nil")")
 }
 
 @MainActor

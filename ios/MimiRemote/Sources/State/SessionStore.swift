@@ -671,6 +671,8 @@ final class SessionStore: ObservableObject {
     private var runtimeEventFlushTasks: [SessionID: Task<Void, Never>] = [:]
     private var foregroundActivityClearTasks: [SessionID: Task<Void, Never>] = [:]
     private var deliveredRuntimeNotificationIDs: Set<String> = []
+    private var locallyCompletedSessionIDs: Set<SessionID> = []
+    private var locallyCompletedGoalThreadIDs: Set<SessionID> = []
     private var listProjectionBySessionID: [SessionID: SessionListProjection] = [:]
     private var queuedCommandActionRuns: [QueuedCommandActionRun] = []
     private var projectsByID: [String: AgentProject] = [:]
@@ -2578,7 +2580,10 @@ final class SessionStore: ObservableObject {
                 status: status,
                 tokenBudget: tokenBudget
             )
-            applyThreadGoal(goal, fallbackSessionID: threadID)
+            if let status, status != .complete {
+                clearLocalCompletedGoalMark(goal, sessionID: threadID)
+            }
+            applyThreadGoal(goal, fallbackSessionID: threadID, respectsLocalCompletion: false)
             setStatusMessage("目标已更新")
             return true
         } catch {
@@ -3111,7 +3116,13 @@ final class SessionStore: ObservableObject {
     }
 
     private func sessionPreparedForStorage(_ incoming: AgentSession) -> AgentSession {
-        sessionApplyingListProjection(sessionPreservingActiveApproval(incoming))
+        sessionApplyingListProjection(
+            sessionPreservingLocalCompletedGoal(
+                sessionPreservingLocalCompletedStatus(
+                    sessionPreservingActiveApproval(incoming)
+                )
+            )
+        )
     }
 
     private func sessionApplyingListProjection(_ incoming: AgentSession) -> AgentSession {
@@ -3947,10 +3958,18 @@ final class SessionStore: ObservableObject {
             updateSession(id) { item in
                 item.status = status
             }
+            if status == SessionStatus.completed.rawValue {
+                locallyCompletedSessionIDs.insert(id)
+            } else if Self.isRunningStatus(status) {
+                locallyCompletedSessionIDs.remove(id)
+            }
             if !Self.isRunningStatus(status) {
                 clearRuntimeActivity(sessionID: id)
             }
             contextStore.updateStatus(sessionID: id, status: status)
+            if status == SessionStatus.completed.rawValue {
+                completeActiveThreadGoalIfNeeded(sessionID: id)
+            }
         }
         for mutation in output.activeTurnMutations {
             applyActiveTurnMutation(mutation)
@@ -4608,6 +4627,8 @@ final class SessionStore: ObservableObject {
         reloadSessionControlStates()
         foregroundActivityBySessionID = [:]
         runtimeActivityBySessionID = [:]
+        locallyCompletedSessionIDs = []
+        locallyCompletedGoalThreadIDs = []
         runtimeEventFlushTasks.values.forEach { $0.cancel() }
         runtimeEventFlushTasks = [:]
         foregroundActivityClearTasks.values.forEach { $0.cancel() }
@@ -4658,8 +4679,13 @@ final class SessionStore: ObservableObject {
         sessions = next
     }
 
-    private func applyThreadGoal(_ goal: ThreadGoal, fallbackSessionID: SessionID? = nil) {
+    private func applyThreadGoal(
+        _ goal: ThreadGoal,
+        fallbackSessionID: SessionID? = nil,
+        respectsLocalCompletion: Bool = true
+    ) {
         let sessionID = fallbackSessionID ?? goal.threadID
+        let goal = normalizedThreadGoalForApply(goal, sessionID: sessionID, respectsLocalCompletion: respectsLocalCompletion)
         updateSession(sessionID) { item in
             item.goal = goal
         }
@@ -4680,10 +4706,109 @@ final class SessionStore: ObservableObject {
     }
 
     private func clearThreadGoal(sessionID: SessionID) {
+        locallyCompletedGoalThreadIDs.remove(sessionID)
         updateSession(sessionID) { item in
+            if let goal = item.goal {
+                clearLocalCompletedGoalMark(goal, sessionID: sessionID)
+            }
             item.goal = nil
         }
         contextStore.clearGoal(sessionID: sessionID)
+    }
+
+    private func sessionPreservingLocalCompletedStatus(_ incoming: AgentSession) -> AgentSession {
+        var next = incoming
+        if next.status == SessionStatus.completed.rawValue {
+            locallyCompletedSessionIDs.insert(next.id)
+            return next
+        }
+        guard Self.isRunningStatus(next.status),
+              locallyCompletedSessionIDs.contains(next.id)
+        else {
+            return next
+        }
+        // 列表刷新可能落后于实时 turn/completed；这时不要让旧 running 快照把 UI 拉回运行态。
+        next.status = SessionStatus.completed.rawValue
+        next.activeTurnID = nil
+        next.pendingApproval = nil
+        next.pendingUserInput = nil
+        return next
+    }
+
+    private func sessionPreservingLocalCompletedGoal(_ incoming: AgentSession) -> AgentSession {
+        guard let goal = incoming.goal else {
+            return incoming
+        }
+        var next = incoming
+        next.goal = normalizedThreadGoalForApply(goal, sessionID: incoming.id, respectsLocalCompletion: true)
+        return next
+    }
+
+    private func completeActiveThreadGoalIfNeeded(sessionID: SessionID) {
+        guard let session = sessionsByID[sessionID],
+              let goal = Self.matchingThreadGoal(for: session, context: contextStore.context(for: session.id)),
+              goal.status == .active
+        else {
+            return
+        }
+        // turn/completed 是本地实时链路看到的权威完成信号；目标元数据刷新可能稍晚，
+        // 先把 UI 收敛到完成态，避免任务结束后 composer 仍显示“运行中”。
+        applyThreadGoal(completedGoal(from: goal), fallbackSessionID: sessionID, respectsLocalCompletion: false)
+    }
+
+    private func normalizedThreadGoalForApply(
+        _ goal: ThreadGoal,
+        sessionID: SessionID,
+        respectsLocalCompletion: Bool
+    ) -> ThreadGoal {
+        if respectsLocalCompletion,
+           goal.status == .active,
+           hasLocalCompletedGoalMark(goal, sessionID: sessionID) {
+            return completedGoal(from: goal)
+        }
+        if goal.status == .complete {
+            markLocalCompletedGoal(goal, sessionID: sessionID)
+        } else if respectsLocalCompletion, goal.status != .active {
+            clearLocalCompletedGoalMark(goal, sessionID: sessionID)
+        } else if !respectsLocalCompletion {
+            clearLocalCompletedGoalMark(goal, sessionID: sessionID)
+        }
+        return goal
+    }
+
+    private func completedGoal(from goal: ThreadGoal) -> ThreadGoal {
+        ThreadGoal(
+            threadID: goal.threadID,
+            objective: goal.objective,
+            status: .complete,
+            tokenBudget: goal.tokenBudget,
+            tokensUsed: goal.tokensUsed,
+            timeUsedSeconds: goal.timeUsedSeconds,
+            createdAt: goal.createdAt,
+            updatedAt: Date()
+        )
+    }
+
+    private func markLocalCompletedGoal(_ goal: ThreadGoal, sessionID: SessionID) {
+        locallyCompletedGoalThreadIDs.formUnion(goalIdentityCandidates(goal, sessionID: sessionID))
+    }
+
+    private func clearLocalCompletedGoalMark(_ goal: ThreadGoal, sessionID: SessionID) {
+        locallyCompletedGoalThreadIDs.subtract(goalIdentityCandidates(goal, sessionID: sessionID))
+    }
+
+    private func hasLocalCompletedGoalMark(_ goal: ThreadGoal, sessionID: SessionID) -> Bool {
+        !locallyCompletedGoalThreadIDs.isDisjoint(with: goalIdentityCandidates(goal, sessionID: sessionID))
+    }
+
+    private func goalIdentityCandidates(_ goal: ThreadGoal, sessionID: SessionID) -> Set<SessionID> {
+        var candidates: Set<SessionID> = []
+        for value in [sessionID, goal.threadID, sessionsByID[sessionID]?.resumeID, contextStore.context(for: sessionID)?.threadID] {
+            if let identity = Self.nonEmptyThreadIdentity(value) {
+                candidates.insert(identity)
+            }
+        }
+        return candidates
     }
 
     private func markApprovalDecisionPending(_ approvalID: String, sessionID: SessionID) {

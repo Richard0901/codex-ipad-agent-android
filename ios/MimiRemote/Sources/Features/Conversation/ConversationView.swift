@@ -130,14 +130,16 @@ struct ConversationView: View {
 
     private func statusChip(_ status: AgentSessionDisplayStatus, runtimeDisplay: RuntimeActivityDisplay?) -> some View {
         let displayTone = runtimeDisplay?.tone ?? status.tone
-        return HStack(spacing: 7) {
+        return HStack(alignment: .center, spacing: 7) {
             if status.showsSpinner {
                 ProgressView()
                     .controlSize(.small)
                     .tint(tint(for: displayTone))
+                    .frame(width: 16, height: 16, alignment: .center)
             } else {
                 Image(systemName: runtimeDisplay?.systemImage ?? status.systemImage)
                     .font(themeStore.uiFont(.caption, weight: .semibold))
+                    .frame(width: 16, height: 16, alignment: .center)
             }
             Text(statusText(status, runtimeDisplay: runtimeDisplay))
         }

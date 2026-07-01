@@ -213,7 +213,10 @@ struct RootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    AgentWorkbenchTitle(maxWidth: layout.titleMaxWidth)
+                    AgentWorkbenchTitle(
+                        maxWidth: layout.titleMaxWidth,
+                        horizontalOffset: titleHorizontalOffset(layout: layout)
+                    )
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     // 仅在侧栏收起时，在主界面提供展开按钮；展开时由侧栏自带的开关负责收起，避免两个图标同时出现。
@@ -267,6 +270,15 @@ struct RootView: View {
                 }
             }
             .sessionInspectorPresentation(isPresented: $showingLogInspector, layout: layout)
+    }
+
+    private func titleHorizontalOffset(layout: WorkbenchLayout) -> CGFloat {
+        guard showingLogInspector, layout.usesAttachedInspector else {
+            return 0
+        }
+        // SwiftUI inspector 会附着在 detail 右侧；系统 principal 默认按 detail+inspector 总宽居中。
+        // 标题左移半个右栏宽度后，视觉中心重新落回中间对话区。
+        return -(layout.inspectorColumn.ideal / 2)
     }
 
     // 刷新属于维护动作，不参与主定位信息；放在 trailing 并弱化颜色，减少顶部抢眼控件。
@@ -457,6 +469,7 @@ private struct AgentWorkbenchTitle: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     let maxWidth: CGFloat
+    let horizontalOffset: CGFloat
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -474,6 +487,7 @@ private struct AgentWorkbenchTitle: View {
                 .minimumScaleFactor(0.76)
         }
         .frame(maxWidth: maxWidth)
+        .offset(x: horizontalOffset)
         .accessibilityElement(children: .combine)
     }
 
