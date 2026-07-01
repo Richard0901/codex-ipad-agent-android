@@ -3012,10 +3012,12 @@ final class ConversationDataFlowTests: XCTestCase {
             pendingUserInput: request
         )
         let client = MockSessionStoreClient(projects: [project], sessions: [running])
+        let conversationStore = ConversationStore()
+        conversationStore.appendSystem("等待补充信息：\(request.title)", sessionID: running.id, kind: .userInput)
         var sockets: [MockWebSocketClient] = []
         let store = SessionStore(
             appStore: AppStore(),
-            conversationStore: ConversationStore(),
+            conversationStore: conversationStore,
             logStore: LogStore(),
             clientFactory: { client },
             webSocketFactory: {
@@ -3041,6 +3043,21 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(sockets[0].sentUserInputResponses.first?.requestID, "input-1")
         XCTAssertEqual(sockets[0].sentUserInputResponses.first?.answers["scope"], ["后端", "只做最小闭环"])
         XCTAssertTrue(store.isUserInputResponsePending(request))
+        XCTAssertEqual(store.selectedSession?.status, "running")
+        XCTAssertNil(store.selectedSession?.pendingUserInput)
+        XCTAssertEqual(conversationStore.messages(for: running.id).last?.content, "补充信息已提交：范围")
+
+        await store.refreshAll(autoAttach: false)
+
+        XCTAssertEqual(store.selectedSession?.status, "running")
+        XCTAssertNil(store.selectedSession?.pendingUserInput)
+
+        sockets[0].onUserInputResponseFailure?("input-1", "request expired")
+        try await waitForSelectedSessionStatus("waiting_for_input", store: store)
+
+        XCTAssertEqual(store.selectedSession?.pendingUserInput, request)
+        XCTAssertFalse(store.isUserInputResponsePending(request))
+        XCTAssertEqual(conversationStore.messages(for: running.id).last?.content, "等待补充信息：范围")
     }
 
     func testSessionStoreReturnToListDoesNotPublishWhenAlreadyCleared() {

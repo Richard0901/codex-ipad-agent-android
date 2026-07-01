@@ -35,7 +35,7 @@ agentd doctor
 
 `agentd start` 会通过 Homebrew 后台启动服务，并在当前终端输出扫码连接二维码；后台服务本身不会把 Token 写入日志。然后在设置页优先点“扫码连接”，扫描后会自动测试连接。二维码不可用时再手动输入：
 
-- Endpoint，例如 `http://100.x.y.z:8787`、`http://14.103.53.126`
+- Endpoint，例如 `http://100.x.y.z:8787`、`http://65.49.233.70`
 - Token，也就是 `AGENTD_TOKEN`
 - 连接链接，例如 `mimiremote://connect?endpoint=...&token=...`
 - 配对二维码使用 `mimiremote://pair?endpoint=...&issued_at=...&expires_at=...&pair_sig=...`，不直接携带长期 Token

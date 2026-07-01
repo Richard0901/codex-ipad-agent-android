@@ -643,6 +643,7 @@ final class SessionStore: ObservableObject {
     @Published private(set) var isRefreshingPullRequestStatus = false
     @Published private var pendingApprovalDecisionIDsBySessionID: [SessionID: Set<String>] = [:]
     @Published private var pendingUserInputResponseIDsBySessionID: [SessionID: Set<String>] = [:]
+    private var pendingUserInputRequestsBySessionID: [SessionID: [String: AgentUserInputRequest]] = [:]
     @Published private var foregroundActivityBySessionID: [SessionID: SessionForegroundActivity] = [:]
     @Published private var runtimeActivityBySessionID: [SessionID: RuntimeActivitySnapshot] = [:]
     @Published private var sessionControlStateByID: [SessionID: SessionControlState] = [:]
@@ -2192,6 +2193,7 @@ final class SessionStore: ObservableObject {
             && webSocketStatus == .disconnected
             && pendingApprovalDecisionIDsBySessionID.isEmpty
             && pendingUserInputResponseIDsBySessionID.isEmpty
+            && pendingUserInputRequestsBySessionID.isEmpty
         guard !wasAlreadyOnList else {
             return
         }
@@ -2440,12 +2442,13 @@ final class SessionStore: ObservableObject {
             setStatusMessage("补充信息正在发送")
             return
         }
-        markUserInputResponsePending(request.id, sessionID: session.id)
+        markUserInputResponsePending(request, sessionID: session.id)
         guard socket.sendUserInputResponse(requestID: request.id, answers: answers) else {
             clearPendingUserInputResponse(sessionID: session.id, requestID: request.id)
             setErrorMessage("补充信息发送失败：WebSocket 未连接")
             return
         }
+        acceptUserInputResponseLocally(request, sessionID: session.id)
         setStatusMessage("补充信息已发送，等待 Codex 继续")
     }
 
@@ -2954,6 +2957,7 @@ final class SessionStore: ObservableObject {
             usage: item.usage,
             rateLimit: item.rateLimit,
             pendingApproval: item.pendingApproval,
+            pendingUserInput: item.pendingUserInput,
             goal: item.goal,
             context: item.context
         )
@@ -3650,7 +3654,10 @@ final class SessionStore: ObservableObject {
                 guard self?.isCurrentWebSocketConnection(sessionID: session.id, generation: connectionGeneration) == true else {
                     return
                 }
-                self?.clearPendingUserInputResponse(sessionID: session.id, requestID: requestID)
+                let request = self?.clearPendingUserInputResponse(sessionID: session.id, requestID: requestID)
+                if let request {
+                    self?.restoreUserInputRequestAfterFailure(request, sessionID: session.id)
+                }
                 self?.setErrorMessage("补充信息发送失败：\(message)")
             }
         }
@@ -3773,6 +3780,7 @@ final class SessionStore: ObservableObject {
         }
         pendingApprovalDecisionIDsBySessionID.removeAll()
         pendingUserInputResponseIDsBySessionID.removeAll()
+        pendingUserInputRequestsBySessionID.removeAll()
         setWebSocketStatus(.disconnected)
     }
 
@@ -4837,15 +4845,24 @@ final class SessionStore: ObservableObject {
         pendingApprovalDecisionIDsBySessionID[sessionID]?.contains(approval.id) == true
     }
 
-    private func markUserInputResponsePending(_ requestID: String, sessionID: SessionID) {
+    private func markUserInputResponsePending(_ request: AgentUserInputRequest, sessionID: SessionID) {
         var ids = pendingUserInputResponseIDsBySessionID[sessionID] ?? []
-        ids.insert(requestID)
+        ids.insert(request.id)
         pendingUserInputResponseIDsBySessionID[sessionID] = ids
+        var requests = pendingUserInputRequestsBySessionID[sessionID] ?? [:]
+        requests[request.id] = request
+        pendingUserInputRequestsBySessionID[sessionID] = requests
     }
 
-    private func clearPendingUserInputResponse(sessionID: SessionID, requestID: String) {
+    @discardableResult
+    private func clearPendingUserInputResponse(sessionID: SessionID, requestID: String) -> AgentUserInputRequest? {
+        let request = pendingUserInputRequestsBySessionID[sessionID]?[requestID]
+        pendingUserInputRequestsBySessionID[sessionID]?[requestID] = nil
+        if pendingUserInputRequestsBySessionID[sessionID]?.isEmpty == true {
+            pendingUserInputRequestsBySessionID.removeValue(forKey: sessionID)
+        }
         guard var ids = pendingUserInputResponseIDsBySessionID[sessionID] else {
-            return
+            return request
         }
         ids.remove(requestID)
         if ids.isEmpty {
@@ -4853,14 +4870,49 @@ final class SessionStore: ObservableObject {
         } else {
             pendingUserInputResponseIDsBySessionID[sessionID] = ids
         }
+        return request
     }
 
     private func clearPendingUserInputResponses(sessionID: SessionID) {
         pendingUserInputResponseIDsBySessionID.removeValue(forKey: sessionID)
+        pendingUserInputRequestsBySessionID.removeValue(forKey: sessionID)
     }
 
     private func isUserInputResponsePending(_ request: AgentUserInputRequest, sessionID: SessionID) -> Bool {
         pendingUserInputResponseIDsBySessionID[sessionID]?.contains(request.id) == true
+    }
+
+    private func acceptUserInputResponseLocally(_ request: AgentUserInputRequest, sessionID: SessionID) {
+        updateSession(sessionID) { item in
+            if let currentInput = item.pendingUserInput, currentInput.id != request.id {
+                return
+            }
+            // 服务端确认事件可能要等一会；本地先把阻塞点收起，避免用户看到一个置灰的旧表单。
+            item.status = "running"
+            item.pendingUserInput = nil
+        }
+        contextStore.upsert(
+            SessionContextSnapshot(sessionID: sessionID, status: SessionContextStatus(type: "active"), updatedAt: Date()),
+            fallbackSessionID: sessionID
+        )
+        conversationStore.resolveLatestPendingUserInput(sessionID: sessionID, skipped: false)
+    }
+
+    private func restoreUserInputRequestAfterFailure(_ request: AgentUserInputRequest, sessionID: SessionID) {
+        updateSession(sessionID) { item in
+            item.status = "waiting_for_input"
+            item.pendingUserInput = request
+        }
+        contextStore.upsert(
+            SessionContextSnapshot(
+                sessionID: sessionID,
+                status: SessionContextStatus(type: "active", activeFlags: ["waitingOnUserInput"]),
+                tasks: [SessionContextTask(id: request.id, kind: "user_input", title: request.title, subtitle: nil, status: "waiting")],
+                updatedAt: Date()
+            ),
+            fallbackSessionID: sessionID
+        )
+        conversationStore.restorePendingUserInput(request, sessionID: sessionID)
     }
 
     private static func normalizedSession(_ session: AgentSession) -> AgentSession {
@@ -4880,6 +4932,12 @@ final class SessionStore: ObservableObject {
 
     private func sessionPreservingActiveApproval(_ incoming: AgentSession, existing: AgentSession?) -> AgentSession {
         var next = Self.normalizedSession(incoming)
+        if let userInput = next.pendingUserInput,
+           isUserInputResponsePending(userInput, sessionID: next.id) {
+            // 列表刷新可能读到补充信息提交前的旧快照；已在本地提交中的 request 不应重新顶回可见表单。
+            next.status = "running"
+            next.pendingUserInput = nil
+        }
         // goal 是 thread 级元数据；列表刷新或上下文回填时必须按当前 thread 身份校验，
         // 否则同项目内切换对话会短暂显示另一个 thread 的目标状态。
         next.goal = Self.matchingThreadGoal(
@@ -4898,6 +4956,7 @@ final class SessionStore: ObservableObject {
         }
         if next.pendingUserInput == nil,
            let existingInput = existing?.pendingUserInput,
+           !isUserInputResponsePending(existingInput, sessionID: next.id),
            Self.canPreservePendingApproval(whileStatusIs: next.status) {
             next.status = "waiting_for_input"
             next.pendingUserInput = existingInput

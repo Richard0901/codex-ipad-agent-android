@@ -299,11 +299,30 @@ final class ConversationStore: ObservableObject {
             }
             return
         }
-        let title = pendingApprovalTitle(from: list[index].content)
+        let title = pendingUserInputTitle(from: list[index].content)
         let prefix = skipped ? "已跳过补充信息" : "补充信息已提交"
         list[index].content = title.isEmpty ? prefix : "\(prefix)：\(title)"
         list[index].updatedAt = Date()
         replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
+    }
+
+    func restorePendingUserInput(_ request: AgentUserInputRequest, sessionID: String) {
+        let text = "等待补充信息：\(request.title)"
+        guard var list = messagesBySessionID[sessionID] else {
+            appendSystem(text, sessionID: sessionID, kind: .userInput)
+            return
+        }
+        // 补充信息提交是乐观收起 UI；如果发送失败，需要把时间线从“已提交”退回“等待补充信息”。
+        if let index = list.lastIndex(where: { message in
+            message.kind == .userInput
+                && (message.content.hasPrefix("补充信息已提交") || message.content.hasPrefix("引导输入已提交"))
+        }) {
+            list[index].content = text
+            list[index].updatedAt = Date()
+            replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
+            return
+        }
+        appendSystem(text, sessionID: sessionID, kind: .userInput)
     }
 
     func moveLocalEcho(clientMessageID: ClientMessageID, from sourceSessionID: String, to targetSessionID: String) {
@@ -369,6 +388,13 @@ final class ConversationStore: ObservableObject {
             value = String(value[..<range.lowerBound])
         }
         return value
+    }
+
+    private func pendingUserInputTitle(from text: String) -> String {
+        for prefix in ["等待补充信息：", "等待引导输入："] where text.hasPrefix(prefix) {
+            return String(text.dropFirst(prefix.count))
+        }
+        return text
     }
 
     func resetLiveTranscript(sessionID: String) {
