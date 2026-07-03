@@ -149,6 +149,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
         let project = AgentProject(id: "repo", name: "Repo", path: "/Users/me/repo")
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: [project])
         var options = CodexAppServerTurnOptions.default
+        options.runtimeProvider = "claude"
         options.model = "gpt-5-codex"
         options.modelProvider = "openai"
         options.serviceTier = "priority"
@@ -176,6 +177,8 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(threadParams["baseInstructions"]?.stringValue, "base")
         XCTAssertEqual(threadParams["developerInstructions"]?.stringValue, "dev")
         XCTAssertEqual(threadParams["serviceName"]?.stringValue, "ios")
+        XCTAssertNil(threadParams["runtimeProvider"])
+        XCTAssertNil(threadParams["runtime_provider"])
 
         let payload = CodexAppServerTurnPayload(input: [
             .text("看图并检查引用"),
@@ -193,6 +196,8 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(turnParams["approvalPolicy"]?.stringValue, "on-failure")
         XCTAssertEqual(turnParams["clientUserMessageId"]?.stringValue, "client-rich")
         XCTAssertNil(turnParams["modelProvider"])
+        XCTAssertNil(turnParams["runtimeProvider"])
+        XCTAssertNil(turnParams["runtime_provider"])
         XCTAssertNil(turnParams["config"])
         XCTAssertNil(turnParams["baseInstructions"])
         let input = try XCTUnwrap(turnParams["input"]?.arrayValue)
@@ -205,6 +210,18 @@ final class CodexAppServerProtocolTests: XCTestCase {
         let sandbox = try XCTUnwrap(turnParams["sandboxPolicy"]?.objectValue)
         XCTAssertEqual(sandbox["type"]?.stringValue, "readOnly")
         XCTAssertEqual(sandbox["networkAccess"]?.boolValue, false)
+    }
+
+    func testGatewayURLIncludesRuntimeOnlyForNonCodexChannels() throws {
+        let codex = try CodexAppServerSessionRuntime.gatewayURL(endpoint: "http://127.0.0.1:8787", sessionID: "thr_codex")
+        XCTAssertEqual(codex.path, "/api/app-server/ws")
+        XCTAssertNil(URLComponents(url: codex, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "runtime" }))
+
+        let claude = try CodexAppServerSessionRuntime.gatewayURL(endpoint: "http://127.0.0.1:8787", sessionID: "thr_claude", runtimeProvider: "claude")
+        let queryItems = URLComponents(url: claude, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(claude.path, "/api/app-server/ws")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "runtime" })?.value, "claude")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "thread_id" })?.value, "thr_claude")
     }
 
     func testRequestBuilderAllowsFullAccessSandboxWithApproval() throws {

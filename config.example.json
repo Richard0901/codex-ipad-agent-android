@@ -26,6 +26,16 @@
       "TERM": "xterm-256color"
     }
   },
+  "claude": {
+    "enabled": false,
+    "bridge_bin": "/opt/homebrew/bin/alleycat-claude-bridge",
+    "args": [],
+    "max_concurrent_bridges": 3,
+    "env": {
+      "TERM": "xterm-256color",
+      "CLAUDE_BRIDGE_BYPASS_PERMISSIONS": "false"
+    }
+  },
   "session": {
     "output_buffer_bytes": 131072
   },

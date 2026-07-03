@@ -148,6 +148,58 @@ agentd serve
 
 `brew services start mimi-remote` 本身不会把服务 stdout 回传到当前终端，所以想要“后台运行但终端显示二维码”时请用 `agentd start`。为避免 Token 留在后台服务日志里，Homebrew service 模式不会打印二维码。`agentd serve` 默认读取当前系统的用户配置目录；也可以用 `AGENTD_CONFIG=/path/to/config.json` 覆盖。在 `app_server.transport=ws` 且 `app_server.managed=true` 时，`agentd` 会自动启动并托管本机 loopback `codex app-server`，用户不需要手动再开一个终端。
 
+### Claude Code 实验通道
+
+目标：在同一个 iPad 客户端、同一个项目目录里，同时查看和进入 Codex / Claude Code 会话；Codex 仍是默认通道，Claude v1 默认关闭。
+
+方案：`agentd` 通过外部 `alleycat-claude-bridge` 子进程把 iPad 的 app-server JSON-RPC WebSocket 转成 Claude bridge 的 stdio JSONL。bridge 不并入本仓库，属于可选依赖；launchd/Homebrew service 的 `PATH` 很窄，建议 `claude.bridge_bin` 写绝对路径。
+
+配置示例：
+
+```json
+{
+  "claude": {
+    "enabled": false,
+    "bridge_bin": "/opt/homebrew/bin/alleycat-claude-bridge",
+    "args": [],
+    "max_concurrent_bridges": 3,
+    "env": {
+      "TERM": "xterm-256color"
+    }
+  }
+}
+```
+
+启用后先验证：
+
+```bash
+# 检查 bridge 二进制、版本探测和配置
+agentd doctor
+
+# 只验证 Claude channel 能否连上并返回模型
+go run ./scripts/ipad-ws-probe.go \
+  -endpoint http://127.0.0.1:8787 \
+  -token "$AGENTD_TOKEN" \
+  -cwd "$PWD" \
+  -runtime claude \
+  -models-only
+
+# 真实发一轮探测消息
+go run ./scripts/ipad-ws-probe.go \
+  -endpoint http://127.0.0.1:8787 \
+  -token "$AGENTD_TOKEN" \
+  -cwd "$PWD" \
+  -runtime claude
+```
+
+实现边界：
+
+- `/api/app-server/config.channels[]` 会暴露 `runtime_id=claude`、`experimental=true`、`lifecycle=per_connection`、bridge 状态和能力声明。
+- v1 是每个 WebSocket 一个 bridge 进程；iPad 锁屏、切后台或网络断开会结束 Claude bridge，正在跑的 Claude turn 可能中断。iOS 侧会落到失败/中断状态，用户可以重新发送。
+- Claude v1 只声明并放行基础会话、历史、流式输出、审批、文件 diff、模型列表；目标任务、archive、fork、rate limits 不作为 v1 能力。
+- `approvalPolicy=never`、`networkAccess=true`、`danger-full-access` 不会写入 Claude bridge；默认 sandbox 会降到 `workspace-write`。
+- 关闭方式：把 `claude.enabled` 改回 `false` 并重启 `agentd`。
+
 ### 1.1 语音输入
 
 `/api/voice/transcribe` 默认使用 `voice.transcription_provider=auto`：
@@ -610,7 +662,7 @@ go run github.com/goreleaser/goreleaser/v2@v2.9.0 release --snapshot --clean --s
 - direct 模式下，`agentd` 只做 app-server 启动、鉴权、安全校验和转发，不做业务协议转换。
 - direct gateway 到 app-server upstream 使用独立 capability token file，不暴露给 iPad。
 - 审批请求默认应 fail closed：超时、断线、未知类型都拒绝。
-- 移动端默认使用用户批准下的 `dangerFullAccess`；仍不允许 `approvalPolicy=never`，网络访问默认关闭。
+- Codex 通道默认使用用户批准下的 `dangerFullAccess`；Claude 实验通道默认降到 `workspace-write`。两者都不允许 `approvalPolicy=never`，网络访问默认关闭。
 - 结构化 runtime 展示 token usage / rate limit，便于控制成本和排查配额。
 
 当前 MVP 限制：

@@ -40,7 +40,14 @@ final class SessionContextStore: ObservableObject {
             sessionID: session.id,
             threadID: session.resumeID,
             status: SessionContextStatus(type: Self.statusType(from: session.status)),
-            environment: SessionContextEnvironment(id: "local", kind: "local", label: "本地", cwd: session.dir, provider: session.source),
+            environment: SessionContextEnvironment(
+                id: "local",
+                kind: "local",
+                label: "本地",
+                cwd: session.dir,
+                provider: session.runtimeProvider ?? session.source,
+                runtimeProvider: session.runtimeProvider
+            ),
             goal: session.goal,
             tasks: [],
             sources: [SessionContextSource(id: "session_source", kind: "session", label: session.source, subtitle: nil)],

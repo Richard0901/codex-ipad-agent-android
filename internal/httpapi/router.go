@@ -38,6 +38,9 @@ type Router struct {
 
 	gatewayThreadsMu   sync.Mutex
 	gatewayThreads     map[string]appServerGatewayAllowedThread
+	claudeMu           sync.Mutex
+	claudeProbe        appServerBridgeProbe
+	activeClaudeBridge int
 	managedWorktreesMu sync.Mutex
 	managedWorktrees   map[string]managedWorktree
 }
@@ -64,6 +67,7 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 		gatewayThreads:   map[string]appServerGatewayAllowedThread{},
 		managedWorktrees: map[string]managedWorktree{},
 	}
+	r.refreshClaudeBridgeProbe(false)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", r.healthz)

@@ -57,6 +57,7 @@ enum CodexAppServerBufferedEventReplayPolicy {
 actor CodexAppServerSessionRuntime {
     private let endpoint: String
     private let token: String
+    private let runtimeProvider: String
     private let transportFactory: () -> CodexAppServerTransport
     private let configProvider: () async throws -> CodexAppServerConfigResponse
     private var config: CodexAppServerConfigResponse?
@@ -106,6 +107,7 @@ actor CodexAppServerSessionRuntime {
     init(
         endpoint: String,
         token: String,
+        runtimeProvider: String = "codex",
         transportFactory: @escaping () -> CodexAppServerTransport = { URLSessionCodexAppServerTransport() },
         requestTimeout: TimeInterval = 20,
         configProvider: (() async throws -> CodexAppServerConfigResponse)? = nil
@@ -113,6 +115,7 @@ actor CodexAppServerSessionRuntime {
         let normalizedEndpoint = AgentAPIClient.normalizedEndpoint(endpoint)
         self.endpoint = normalizedEndpoint
         self.token = token
+        self.runtimeProvider = Self.normalizedRuntimeProvider(runtimeProvider)
         self.transportFactory = transportFactory
         self.requestTimeout = requestTimeout
         self.configProvider = configProvider ?? {
@@ -135,7 +138,9 @@ actor CodexAppServerSessionRuntime {
         let result = try await sendRecoveringFromStaleInitialization(
             CodexAppServerRequestBuilder(allowlistedProjects: try await projects()).modelList()
         )
-        return CodexAppServerModelOption.parseListResult(result)
+        return CodexAppServerModelOption.parseListResult(result).map {
+            $0.withRuntimeProvider($0.runtimeProvider ?? runtimeProvider)
+        }
     }
 
     func capabilities(path: String?) async throws -> CapabilityListResponse {
@@ -156,13 +161,26 @@ actor CodexAppServerSessionRuntime {
 
     func validateDirectGateway() async throws {
         let config = try await ensureConfig(forceRefresh: true)
-        guard config.runtime.gatewayAvailable, !config.gatewayWSURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard runtimeGatewayAvailable(in: config) else {
             throw CodexAppServerSessionRuntimeError.gatewayUnavailable
         }
         let gatewayURL = try gatewayURL(from: config)
         let probe = CodexAppServerConnection(transport: transportFactory())
         try await probe.connect(url: gatewayURL, token: token)
         await probe.disconnect()
+    }
+
+    func channelAvailable(runtimeProvider raw: String) async throws -> Bool {
+        let runtime = Self.normalizedRuntimeProvider(raw)
+        let config = try await ensureConfig()
+        if runtime == "codex" {
+            return true
+        }
+        return config.channels.contains { channel in
+            (Self.normalizedRuntimeProvider(channel.runtimeID ?? channel.id) == runtime ||
+                Self.normalizedRuntimeProvider(channel.provider) == runtime) &&
+                channel.gatewayAvailable
+        }
     }
 
     func sessionsPage(projectID: String?, cursor: String?, limit: Int?) async throws -> SessionsPage {
@@ -381,8 +399,9 @@ actor CodexAppServerSessionRuntime {
         }
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: projects)
         var threadOptions = payload.turnOptions
-        // thread/start 和 thread/resume 只负责把当前连接绑定到工作目录/线程；
-        // model 属于 turn/start 的本次发送参数，放在线程请求上会触发部分 app-server 版本校验失败。
+        // 线程级请求只负责创建/恢复会话；模型由随后的 turn/start 携带。
+        // 部分 app-server 版本会拒绝 thread/start/resume 上的 model/modelProvider，
+        // 所以这里必须保持主线兼容行为，不能让纯 Codex 用户回归。
         threadOptions.model = nil
         threadOptions.modelProvider = nil
         let spec: CodexAppServerRequestSpec
@@ -434,7 +453,7 @@ actor CodexAppServerSessionRuntime {
 
         return CreateSessionResponse(
             session: session,
-            wsURL: try Self.gatewayURL(endpoint: endpoint, sessionID: session.id).absoluteString
+            wsURL: try Self.gatewayURL(endpoint: endpoint, sessionID: session.id, runtimeProvider: runtimeProvider).absoluteString
         )
     }
 
@@ -1148,7 +1167,7 @@ actor CodexAppServerSessionRuntime {
         try await ensureConnection().respond(to: request, result: userInputResponse(answers: answers))
     }
 
-    static func gatewayURL(endpoint: String, sessionID: SessionID) throws -> URL {
+    static func gatewayURL(endpoint: String, sessionID: SessionID, runtimeProvider: String = "codex") throws -> URL {
         guard var components = URLComponents(string: AgentAPIClient.normalizedEndpoint(endpoint)) else {
             throw AgentAPIError.invalidEndpoint
         }
@@ -1161,11 +1180,28 @@ actor CodexAppServerSessionRuntime {
             throw AgentAPIError.invalidEndpoint
         }
         components.path = "/api/app-server/ws"
-        components.queryItems = [URLQueryItem(name: "thread_id", value: sessionID)]
+        var queryItems = [URLQueryItem(name: "thread_id", value: sessionID)]
+        let runtime = normalizedRuntimeProvider(runtimeProvider)
+        if runtime != "codex" {
+            queryItems.append(URLQueryItem(name: "runtime", value: runtime))
+        }
+        components.queryItems = queryItems
         guard let url = components.url else {
             throw AgentAPIError.invalidEndpoint
         }
         return url
+    }
+
+    static func normalizedRuntimeProvider(_ raw: String?) -> String {
+        let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        switch value {
+        case "", "codex", "openai", "codex_app_server", "codex-app-server":
+            return "codex"
+        case "claude", "anthropic", "claude_code", "claude-code", "claude_code_bridge", "claude-code-bridge":
+            return "claude"
+        default:
+            return value
+        }
     }
 
     private func detachEvents(sessionID: SessionID) {
@@ -1192,7 +1228,7 @@ actor CodexAppServerSessionRuntime {
             return try await installPreparedConnectionIfNeeded(from: connectionTask)
         }
         let config = try await connectionConfig()
-        guard config.runtime.gatewayAvailable else {
+        guard runtimeGatewayAvailable(in: config) else {
             throw CodexAppServerSessionRuntimeError.gatewayUnavailable
         }
         let gatewayURL = try gatewayURL(from: config)
@@ -1237,12 +1273,16 @@ actor CodexAppServerSessionRuntime {
 
     private func connectionConfig() async throws -> CodexAppServerConfigResponse {
         let cached = try await ensureConfig()
-        if cached.runtime.gatewayAvailable {
+        if runtimeGatewayAvailable(in: cached) {
             return cached
         }
         // 首次冷启动时 agentd 可能先返回项目列表，但 app-server gateway 仍在启动。
         // 这种不可用 config 不能长期缓存，否则 bootstrap 重试会一直复用旧状态，直到用户杀掉 APP。
-        return try await ensureConfig(forceRefresh: true)
+        let fresh = try await ensureConfig(forceRefresh: true)
+        if runtimeGatewayAvailable(in: fresh) {
+            return fresh
+        }
+        throw CodexAppServerSessionRuntimeError.gatewayUnavailable
     }
 
     private func installConnection(_ prepared: CodexAppServerPreparedConnection) {
@@ -1381,13 +1421,36 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func gatewayURL(from config: CodexAppServerConfigResponse) throws -> URL {
+        if let channel = runtimeGatewayChannel(in: config),
+           channel.gatewayAvailable,
+           let url = URL(string: channel.gatewayWSURL),
+           !channel.gatewayWSURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return url
+        }
+        if runtimeProvider != "codex" {
+            throw CodexAppServerSessionRuntimeError.gatewayUnavailable
+        }
         if let url = URL(string: config.gatewayWSURL), !config.gatewayWSURL.isEmpty {
             return url
         }
-        guard let url = URL(string: try Self.gatewayURL(endpoint: endpoint, sessionID: "").absoluteString) else {
+        guard let url = URL(string: try Self.gatewayURL(endpoint: endpoint, sessionID: "", runtimeProvider: runtimeProvider).absoluteString) else {
             throw CodexAppServerSessionRuntimeError.invalidGatewayURL
         }
         return url
+    }
+
+    private func runtimeGatewayAvailable(in config: CodexAppServerConfigResponse) -> Bool {
+        if runtimeProvider == "codex" {
+            return runtimeGatewayChannel(in: config)?.gatewayAvailable ?? config.runtime.gatewayAvailable
+        }
+        return runtimeGatewayChannel(in: config)?.gatewayAvailable == true
+    }
+
+    private func runtimeGatewayChannel(in config: CodexAppServerConfigResponse) -> CodexAppServerChannelMetadata? {
+        config.channels.first { channel in
+            Self.normalizedRuntimeProvider(channel.runtimeID ?? channel.id) == runtimeProvider ||
+                Self.normalizedRuntimeProvider(channel.provider) == runtimeProvider
+        }
     }
 
     private func handle(_ notification: CodexAppServerNotification) {
@@ -1901,7 +1964,8 @@ actor CodexAppServerSessionRuntime {
             dir: cwd,
             title: title.isEmpty ? "未命名会话" : title,
             status: effectiveStatus,
-            source: "codex",
+            source: runtimeProvider,
+            runtimeProvider: runtimeProvider,
             resumeID: id,
             createdAt: date(from: thread["createdAt"]),
             updatedAt: date(from: thread["updatedAt"]),
@@ -1935,7 +1999,8 @@ actor CodexAppServerSessionRuntime {
                 kind: "local",
                 label: "本地",
                 cwd: cwd,
-                provider: nonEmpty(thread["modelProvider"]?.stringValue, "openai")
+                provider: runtimeProvider == "codex" ? nonEmpty(thread["modelProvider"]?.stringValue, "openai") : nonEmpty(thread["modelProvider"]?.stringValue, "anthropic"),
+                runtimeProvider: runtimeProvider
             ),
             git: gitInfo(from: thread["gitInfo"]?.objectValue),
             goal: goal,
@@ -3151,6 +3216,390 @@ final class CodexAppServerSessionAPIClient: SessionStoreAPIClient {
         loadMode: HistoryMessagesPage.LoadMode
     ) async throws -> HistoryMessagesPage {
         try await runtime.messagesPage(sessionID: sessionID, before: before, limit: limit, loadMode: loadMode)
+    }
+}
+
+final class AppServerRuntimeRouteStore {
+    private var lock = NSLock()
+    private var runtimeBySessionID: [SessionID: String] = [:]
+
+    func remember(_ session: AgentSession) {
+        remember(session.runtimeProvider ?? session.source, for: session.id)
+    }
+
+    func remember(_ sessions: [AgentSession]) {
+        for session in sessions {
+            remember(session)
+        }
+    }
+
+    func remember(_ runtimeProvider: String?, for sessionID: SessionID) {
+        let runtime = CodexAppServerSessionRuntime.normalizedRuntimeProvider(runtimeProvider)
+        lock.lock()
+        runtimeBySessionID[sessionID] = runtime.isEmpty ? "codex" : runtime
+        lock.unlock()
+    }
+
+    func runtimeProvider(for sessionID: SessionID) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return runtimeBySessionID[sessionID]
+    }
+
+    func remove(sessionID: SessionID) {
+        lock.lock()
+        runtimeBySessionID.removeValue(forKey: sessionID)
+        lock.unlock()
+    }
+}
+
+final class AppServerRuntimeBundle {
+    let codex: CodexAppServerSessionRuntime
+    let claude: CodexAppServerSessionRuntime
+    let routes = AppServerRuntimeRouteStore()
+
+    init(endpoint: String, token: String) {
+        codex = CodexAppServerSessionRuntime(endpoint: endpoint, token: token, runtimeProvider: "codex")
+        claude = CodexAppServerSessionRuntime(endpoint: endpoint, token: token, runtimeProvider: "claude")
+    }
+
+    init(codexRuntime: CodexAppServerSessionRuntime, claudeRuntime: CodexAppServerSessionRuntime) {
+        codex = codexRuntime
+        claude = claudeRuntime
+    }
+
+    func runtime(for provider: String?) -> CodexAppServerSessionRuntime {
+        CodexAppServerSessionRuntime.normalizedRuntimeProvider(provider) == "claude" ? claude : codex
+    }
+
+    func runtime(forSessionID sessionID: SessionID) -> CodexAppServerSessionRuntime {
+        runtime(for: routes.runtimeProvider(for: sessionID))
+    }
+}
+
+private struct MultiRuntimeSessionsCursor: Codable {
+    var codex: String?
+    var claude: String?
+    var codexBuffer: [AgentSession] = []
+    var claudeBuffer: [AgentSession] = []
+
+    static func decode(_ raw: String?) -> MultiRuntimeSessionsCursor {
+        guard let raw,
+              let data = Data(base64Encoded: raw),
+              let decoded = try? Self.decoder.decode(MultiRuntimeSessionsCursor.self, from: data) else {
+            return MultiRuntimeSessionsCursor(codex: raw, claude: nil)
+        }
+        return decoded
+    }
+
+    func encodedIfNeeded() -> String? {
+        guard codex != nil || claude != nil || !codexBuffer.isEmpty || !claudeBuffer.isEmpty else {
+            return nil
+        }
+        guard let data = try? Self.encoder.encode(self) else {
+            return nil
+        }
+        return data.base64EncodedString()
+    }
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+}
+
+final class MultiRuntimeSessionAPIClient: SessionStoreAPIClient {
+    private let bundle: AppServerRuntimeBundle
+    private let codexClient: CodexAppServerSessionAPIClient
+
+    init(bundle: AppServerRuntimeBundle) {
+        self.bundle = bundle
+        self.codexClient = CodexAppServerSessionAPIClient(runtime: bundle.codex)
+    }
+
+    convenience init(codexRuntime: CodexAppServerSessionRuntime, claudeRuntime: CodexAppServerSessionRuntime) {
+        self.init(bundle: AppServerRuntimeBundle(codexRuntime: codexRuntime, claudeRuntime: claudeRuntime))
+    }
+
+    func projects() async throws -> [AgentProject] { try await codexClient.projects() }
+    func capabilities(path: String?) async throws -> CapabilityListResponse { try await codexClient.capabilities(path: path) }
+    func resolveWorkspace(path: String) async throws -> AgentWorkspace { try await codexClient.resolveWorkspace(path: path) }
+    func createWorktree(path: String, name: String?, base: String?, branch: String?) async throws -> WorktreeCreateResponse { try await codexClient.createWorktree(path: path, name: name, base: base, branch: branch) }
+    func worktreeBranches(path: String) async throws -> WorktreeBranchListResponse { try await codexClient.worktreeBranches(path: path) }
+    func listWorktrees() async throws -> [WorktreeListItem] { try await codexClient.listWorktrees() }
+    func deleteWorktree(path: String, force: Bool) async throws -> WorktreeDeleteResponse { try await codexClient.deleteWorktree(path: path, force: force) }
+    func pruneMissingWorktrees() async throws -> WorktreePruneResponse { try await codexClient.pruneMissingWorktrees() }
+    func listDirectories(path: String) async throws -> DirectoryListResponse { try await codexClient.listDirectories(path: path) }
+    func readFile(path: String) async throws -> FileReadResponse { try await codexClient.readFile(path: path) }
+    func commandActions(path: String) async throws -> [AgentCommandAction] { try await codexClient.commandActions(path: path) }
+    func runCommandAction(path: String, id: String, confirmed: Bool) async throws -> CommandActionRunResponse { try await codexClient.runCommandAction(path: path, id: id, confirmed: confirmed) }
+    func gitStatus(path: String) async throws -> GitStatusResponse { try await codexClient.gitStatus(path: path) }
+    func gitAction(path: String, action: GitActionKind, files: [String]) async throws -> GitStatusResponse { try await codexClient.gitAction(path: path, action: action, files: files) }
+    func gitPatchAction(path: String, action: GitActionKind, patch: String) async throws -> GitStatusResponse { try await codexClient.gitPatchAction(path: path, action: action, patch: patch) }
+    func gitCommit(path: String, message: String) async throws -> GitStatusResponse { try await codexClient.gitCommit(path: path, message: message) }
+    func gitPush(path: String, remote: String?) async throws -> GitPushResponse { try await codexClient.gitPush(path: path, remote: remote) }
+    func gitCreatePullRequest(path: String, title: String, body: String, draft: Bool) async throws -> GitPullRequestResponse { try await codexClient.gitCreatePullRequest(path: path, title: title, body: body, draft: draft) }
+    func gitPullRequestStatus(path: String) async throws -> GitPullRequestStatusResponse { try await codexClient.gitPullRequestStatus(path: path) }
+    func transcribeVoice(filename: String, contentType: String, audioData: Data, language: String?, prompt: String?) async throws -> VoiceTranscriptionResponse {
+        try await codexClient.transcribeVoice(filename: filename, contentType: contentType, audioData: audioData, language: language, prompt: prompt)
+    }
+
+    func modelOptions() async throws -> [CodexAppServerModelOption] {
+        var options = try await bundle.codex.modelOptions()
+        if try await bundle.codex.channelAvailable(runtimeProvider: "claude") {
+            do {
+                options.append(contentsOf: try await bundle.claude.modelOptions())
+            } catch {
+                // Claude 是 experimental runtime；模型列表失败不能拖垮 Codex 主路径。
+                // config/channel metadata 会继续暴露 bridge 状态，菜单这里优先保持可用。
+                print("Claude model/list unavailable: \(error.localizedDescription)")
+            }
+        }
+        var seen: Set<String> = []
+        return options.filter { option in
+            guard !seen.contains(option.id) else { return false }
+            seen.insert(option.id)
+            return true
+        }
+    }
+
+    func sessions(projectID: String?, cursor: String?, limit: Int?) async throws -> [AgentSession] {
+        try await sessionsPage(projectID: projectID, cursor: cursor, limit: limit).sessions
+    }
+
+    func sessionsPage(projectID: String?, cursor: String?, limit: Int?) async throws -> SessionsPage {
+        let decoded = MultiRuntimeSessionsCursor.decode(cursor)
+        let codexPage = try await page(runtime: bundle.codex, projectID: projectID, cursor: decoded.codex, limit: limit, buffer: decoded.codexBuffer)
+        let claudeAvailable = try await bundle.codex.channelAvailable(runtimeProvider: "claude")
+        let claudePage = claudeAvailable
+            ? try await page(runtime: bundle.claude, projectID: projectID, cursor: decoded.claude, limit: limit, buffer: decoded.claudeBuffer)
+            : preservedPage(cursor: decoded.claude, buffer: decoded.claudeBuffer)
+        return mergedPage(codex: codexPage, claude: claudePage, limit: limit)
+    }
+
+    func sessionsPage(workspace: AgentWorkspace, cursor: String?, limit: Int?) async throws -> SessionsPage {
+        let decoded = MultiRuntimeSessionsCursor.decode(cursor)
+        let codexPage = try await page(runtime: bundle.codex, workspace: workspace, cursor: decoded.codex, limit: limit, buffer: decoded.codexBuffer)
+        let claudeAvailable = try await bundle.codex.channelAvailable(runtimeProvider: "claude")
+        let claudePage = claudeAvailable
+            ? try await page(runtime: bundle.claude, workspace: workspace, cursor: decoded.claude, limit: limit, buffer: decoded.claudeBuffer)
+            : preservedPage(cursor: decoded.claude, buffer: decoded.claudeBuffer)
+        return mergedPage(codex: codexPage, claude: claudePage, limit: limit)
+    }
+
+    func session(id: String, afterSeq: EventSequence?) async throws -> SessionResponse {
+        let response = try await bundle.runtime(forSessionID: id).session(id: id, afterSeq: afterSeq)
+        bundle.routes.remember(response.session)
+        return response
+    }
+
+    func threadGoal(threadID: String) async throws -> ThreadGoal? {
+        try await bundle.runtime(forSessionID: threadID).threadGoal(threadID: threadID)
+    }
+
+    func setThreadGoal(threadID: String, objective: String?, status: ThreadGoalStatus?, tokenBudget: Int64?) async throws -> ThreadGoal {
+        try await bundle.runtime(forSessionID: threadID).setThreadGoal(threadID: threadID, objective: objective, status: status, tokenBudget: tokenBudget)
+    }
+
+    func clearThreadGoal(threadID: String) async throws {
+        try await bundle.runtime(forSessionID: threadID).clearThreadGoal(threadID: threadID)
+    }
+
+    func createSession(_ payload: CreateSessionRequest) async throws -> CreateSessionResponse {
+        let runtime = bundle.runtime(for: payload.turnOptions.runtimeProvider)
+        let response = try await runtime.createSession(payload)
+        bundle.routes.remember(response.session)
+        return response
+    }
+
+    func forkSession(threadID: String, workspace: AgentWorkspace) async throws -> AgentSession {
+        let session = try await bundle.runtime(forSessionID: threadID).forkSession(threadID: threadID, workspace: workspace)
+        bundle.routes.remember(session)
+        return session
+    }
+
+    func stopSession(id: String) async throws {
+        try await bundle.runtime(forSessionID: id).stopSession(id: id)
+    }
+
+    func setSessionArchived(id: String, archived: Bool) async throws {
+        try await bundle.runtime(forSessionID: id).setSessionArchived(id: id, archived: archived)
+        if archived {
+            bundle.routes.remove(sessionID: id)
+        }
+    }
+
+    func messages(sessionID: String, before: String?, limit: Int?) async throws -> [CodexHistoryMessage] {
+        try await messagesPage(sessionID: sessionID, before: before, limit: limit).messages
+    }
+
+    func messagesPage(sessionID: String, before: String?, limit: Int?) async throws -> HistoryMessagesPage {
+        try await bundle.runtime(forSessionID: sessionID).messagesPage(sessionID: sessionID, before: before, limit: limit)
+    }
+
+    private struct RuntimePage {
+        var sessions: [AgentSession]
+        var nextCursor: String?
+    }
+
+    private func page(runtime: CodexAppServerSessionRuntime, projectID: String?, cursor: String?, limit: Int?, buffer: [AgentSession]) async throws -> RuntimePage {
+        if !buffer.isEmpty {
+            return RuntimePage(sessions: buffer, nextCursor: cursor)
+        }
+        let page = try await runtime.sessionsPage(projectID: projectID, cursor: cursor, limit: limit)
+        return RuntimePage(sessions: page.sessions, nextCursor: page.hasMore ? page.nextCursor : nil)
+    }
+
+    private func page(runtime: CodexAppServerSessionRuntime, workspace: AgentWorkspace, cursor: String?, limit: Int?, buffer: [AgentSession]) async throws -> RuntimePage {
+        if !buffer.isEmpty {
+            return RuntimePage(sessions: buffer, nextCursor: cursor)
+        }
+        let page = try await runtime.sessionsPage(workspace: workspace, cursor: cursor, limit: limit)
+        return RuntimePage(sessions: page.sessions, nextCursor: page.hasMore ? page.nextCursor : nil)
+    }
+
+    private func preservedPage(cursor: String?, buffer: [AgentSession]) -> RuntimePage {
+        RuntimePage(sessions: buffer, nextCursor: cursor)
+    }
+
+    private func mergedPage(codex: RuntimePage, claude: RuntimePage, limit: Int?) -> SessionsPage {
+        var sessions = codex.sessions + claude.sessions
+        bundle.routes.remember(sessions)
+        sessions.sort { lhs, rhs in
+            switch (lhs.updatedAt, rhs.updatedAt) {
+            case let (l?, r?):
+                return l > r
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.id < rhs.id
+            }
+        }
+        let bounded: [AgentSession]
+        if let limit, limit > 0, sessions.count > limit {
+            bounded = Array(sessions.prefix(limit))
+        } else {
+            bounded = sessions
+        }
+        let emittedIDs = Set(bounded.map(\.id))
+        let next = MultiRuntimeSessionsCursor(
+            codex: codex.nextCursor,
+            claude: claude.nextCursor,
+            codexBuffer: codex.sessions.filter { !emittedIDs.contains($0.id) },
+            claudeBuffer: claude.sessions.filter { !emittedIDs.contains($0.id) }
+        )
+        return SessionsPage(sessions: bounded, nextCursor: next.encodedIfNeeded(), hasMore: next.encodedIfNeeded() != nil)
+    }
+}
+
+typealias CodexAppServerRuntimeRoutingSessionAPIClient = MultiRuntimeSessionAPIClient
+
+final class MultiRuntimeSessionWebSocketClient: SessionWebSocketClient {
+    var onEvent: ((AgentEvent) -> Void)?
+    var onStatus: ((WebSocketStatus) -> Void)?
+    var onSendAccepted: ((ClientMessageID?) -> Void)?
+    var onSendFailure: ((ClientMessageID?, String) -> Void)?
+    var onApprovalDecisionFailure: ((String, String) -> Void)?
+    var onUserInputResponseFailure: ((String, String) -> Void)?
+    var onControlFailure: ((String) -> Void)?
+
+    private let bundle: AppServerRuntimeBundle
+    private var activeClient: CodexAppServerSessionWebSocketClient?
+
+    init(bundle: AppServerRuntimeBundle) {
+        self.bundle = bundle
+    }
+
+    func connect(sessionID: SessionID) {
+        connect(sessionID: sessionID, replayBufferedEvents: true)
+    }
+
+    func connect(sessionID: SessionID, replayBufferedEvents: Bool) {
+        let client = CodexAppServerSessionWebSocketClient(runtime: bundle.runtime(forSessionID: sessionID))
+        activeClient?.disconnect()
+        activeClient = client
+        wireHandlers(to: client)
+        client.connect(sessionID: sessionID, replayBufferedEvents: replayBufferedEvents)
+    }
+
+    func disconnect() {
+        activeClient?.disconnect()
+        activeClient = nil
+    }
+
+    @discardableResult
+    func sendInput(_ text: String, clientMessageID: ClientMessageID?) -> Bool {
+        activeClient?.sendInput(text, clientMessageID: clientMessageID) ?? false
+    }
+
+    @discardableResult
+    func sendTurn(_ payload: CodexAppServerTurnPayload, clientMessageID: ClientMessageID?) -> Bool {
+        activeClient?.sendTurn(payload, clientMessageID: clientMessageID) ?? false
+    }
+
+    @discardableResult
+    func sendGuidance(_ payload: CodexAppServerTurnPayload, clientMessageID: ClientMessageID?, expectedTurnID: TurnID) -> Bool {
+        activeClient?.sendGuidance(payload, clientMessageID: clientMessageID, expectedTurnID: expectedTurnID) ?? false
+    }
+
+    @discardableResult
+    func sendCtrlC() -> Bool {
+        activeClient?.sendCtrlC() ?? false
+    }
+
+    @discardableResult
+    func sendApprovalDecision(approvalID: String, decision: String, message: String?) -> Bool {
+        activeClient?.sendApprovalDecision(approvalID: approvalID, decision: decision, message: message) ?? false
+    }
+
+    @discardableResult
+    func sendUserInputResponse(requestID: String, answers: [String: [String]]) -> Bool {
+        activeClient?.sendUserInputResponse(requestID: requestID, answers: answers) ?? false
+    }
+
+    private func wireHandlers(to client: CodexAppServerSessionWebSocketClient) {
+        client.onStatus = { [weak self] status in
+            self?.onStatus?(status)
+        }
+        client.onEvent = { [weak self] event in
+            self?.rememberRoute(from: event)
+            self?.onEvent?(event)
+        }
+        client.onSendAccepted = { [weak self] clientMessageID in
+            self?.onSendAccepted?(clientMessageID)
+        }
+        client.onSendFailure = { [weak self] clientMessageID, message in
+            self?.onSendFailure?(clientMessageID, message)
+        }
+        client.onApprovalDecisionFailure = { [weak self] approvalID, message in
+            self?.onApprovalDecisionFailure?(approvalID, message)
+        }
+        client.onUserInputResponseFailure = { [weak self] requestID, message in
+            self?.onUserInputResponseFailure?(requestID, message)
+        }
+        client.onControlFailure = { [weak self] message in
+            self?.onControlFailure?(message)
+        }
+    }
+
+    private func rememberRoute(from event: AgentEvent) {
+        switch event {
+        case .session(let session):
+            bundle.routes.remember(session)
+        case .sessionRow(let row, _):
+            bundle.routes.remember(row.runtimeProvider ?? row.source, for: row.id)
+        default:
+            break
+        }
     }
 }
 

@@ -10,8 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -76,6 +78,62 @@ func TestAppServerConfigRequiresAuthAndReturnsSanitizedMetadata(t *testing.T) {
 	}
 }
 
+func TestAppServerConfigIncludesClaudeChannelWhenEnabled(t *testing.T) {
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, _ := appServerGatewayRouterFixtureWithConfig(t, upstreamURL, func(cfg *config.Config) {
+		cfg.Claude.Enabled = true
+		cfg.Claude.BridgeBin = "/bin/cat"
+		cfg.Claude.MaxConcurrentBridges = 3
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/app-server/config", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config metadata 应返回 200，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeJSON(t, rec)
+	channels, ok := body["channels"].([]any)
+	if !ok || len(channels) != 2 {
+		t.Fatalf("enabled Claude 时应返回 Codex + Claude channels：%v", body)
+	}
+	claude := channels[1].(map[string]any)
+	if claude["runtime_id"] != "claude" || claude["experimental"] != true || claude["lifecycle"] != "per_connection" {
+		t.Fatalf("Claude channel metadata 异常：%v", claude)
+	}
+	if claude["gateway_available"] != true {
+		t.Fatalf("Claude bridge 可执行时 gateway_available 应为 true：%v", claude)
+	}
+	bridge := claude["bridge"].(map[string]any)
+	if bridge["status"] != "ready" || bridge["healthy"] != true {
+		t.Fatalf("Claude bridge metadata 异常：%v", bridge)
+	}
+}
+
+func TestAppServerConfigMarksClaudeChannelUnavailableWhenBridgeMissing(t *testing.T) {
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, _ := appServerGatewayRouterFixtureWithConfig(t, upstreamURL, func(cfg *config.Config) {
+		cfg.Claude.Enabled = true
+		cfg.Claude.BridgeBin = filepath.Join(t.TempDir(), "missing-bridge")
+		cfg.Claude.MaxConcurrentBridges = 3
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, authedRequest(t, http.MethodGet, "/api/app-server/config", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config metadata 应返回 200，got=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeJSON(t, rec)
+	channels := body["channels"].([]any)
+	claude := channels[1].(map[string]any)
+	if claude["gateway_available"] != false {
+		t.Fatalf("missing bridge 时 gateway_available 应为 false：%v", claude)
+	}
+	bridge := claude["bridge"].(map[string]any)
+	if bridge["status"] != "missing_command" || bridge["healthy"] != false {
+		t.Fatalf("missing bridge metadata 异常：%v", bridge)
+	}
+}
+
 func TestAppServerGatewayRejectsMissingBearerTokenBeforeUpstreamDial(t *testing.T) {
 	upstreamURL, _, connections := fakeAppServerUpstream(t, nil)
 	handler, _ := appServerGatewayRouterFixture(t, upstreamURL)
@@ -92,6 +150,234 @@ func TestAppServerGatewayRejectsMissingBearerTokenBeforeUpstreamDial(t *testing.
 	}
 	if connections.Load() != 0 {
 		t.Fatalf("未授权请求必须在连接 upstream 前被拒绝，connections=%d", connections.Load())
+	}
+}
+
+func TestAppServerGatewayRejectsUnknownRuntime(t *testing.T) {
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, _ := appServerGatewayRouterFixture(t, upstreamURL)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL(server.URL, appServerGatewayPath)+"?runtime=bad", http.Header{
+		"Authorization": []string{"Bearer " + testToken},
+	})
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("unknown runtime 不应连接成功")
+	}
+	if resp == nil || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown runtime 应返回 400，resp=%v err=%v", resp, err)
+	}
+}
+
+func TestClaudeGatewayStartsBridgeAndProxiesJSONLines(t *testing.T) {
+	receivedPath := filepath.Join(t.TempDir(), "received.jsonl")
+	bridge := writeTestBridge(t, fmt.Sprintf(`#!/bin/sh
+IFS= read -r line
+printf '%%s\n' "$line" > %q
+printf '{"jsonrpc":"2.0","id":99,"result":{"models":[]}}\n'
+while IFS= read -r line; do :; done
+`, receivedPath))
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, _ := appServerGatewayRouterFixtureWithConfig(t, upstreamURL, func(cfg *config.Config) {
+		cfg.Claude.Enabled = true
+		cfg.Claude.BridgeBin = bridge
+		cfg.Claude.MaxConcurrentBridges = 3
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGatewayRuntime(t, server.URL, "claude")
+	defer conn.Close()
+	pretty := []byte("{\n  \"jsonrpc\":\"2.0\",\n  \"id\":99,\n  \"method\":\"model/list\",\n  \"params\":{\"unsafe\":\"field\"}\n}")
+	if err := conn.WriteMessage(websocket.TextMessage, pretty); err != nil {
+		t.Fatal(err)
+	}
+	raw := readGatewayRaw(t, conn)
+	if !bytes.Contains(raw, []byte(`"id":99`)) || !bytes.Contains(raw, []byte(`"models":[]`)) {
+		t.Fatalf("Claude bridge stdout 应转发给 client：%s", raw)
+	}
+	received, err := os.ReadFile(receivedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bytes.TrimSpace(received), []byte("\n")) {
+		t.Fatalf("stdio bridge 输入必须是单行 JSONL，got=%q", received)
+	}
+	if !bytes.Contains(received, []byte(`"params":{}`)) {
+		t.Fatalf("model/list 应按 gateway policy 清空 params 后写入 bridge，got=%s", received)
+	}
+}
+
+func TestClaudeGatewayLimitReturnsJSONRPCErrorFrame(t *testing.T) {
+	bridge := writeTestBridge(t, `#!/bin/sh
+while IFS= read -r line; do sleep 10; done
+`)
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, _ := appServerGatewayRouterFixtureWithConfig(t, upstreamURL, func(cfg *config.Config) {
+		cfg.Claude.Enabled = true
+		cfg.Claude.BridgeBin = bridge
+		cfg.Claude.MaxConcurrentBridges = 1
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	first := dialAuthedGatewayRuntime(t, server.URL, "claude")
+	defer first.Close()
+	second := dialAuthedGatewayRuntime(t, server.URL, "claude")
+	defer second.Close()
+	raw := readGatewayRaw(t, second)
+	if !bytes.Contains(raw, []byte("CLAUDE_BRIDGE_LIMIT_EXCEEDED")) {
+		t.Fatalf("超出 Claude bridge 并发上限应返回 JSON-RPC error frame，got=%s", raw)
+	}
+}
+
+func TestClaudeGatewayDisconnectTerminatesBridgeProcessGroup(t *testing.T) {
+	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
+	bridge := writeTestBridge(t, fmt.Sprintf(`#!/bin/sh
+sleep 30 &
+echo $! > %q
+while IFS= read -r line; do sleep 30; done
+`, childPIDPath))
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, _ := appServerGatewayRouterFixtureWithConfig(t, upstreamURL, func(cfg *config.Config) {
+		cfg.Claude.Enabled = true
+		cfg.Claude.BridgeBin = bridge
+		cfg.Claude.MaxConcurrentBridges = 3
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGatewayRuntime(t, server.URL, "claude")
+	childPID := parseTestPID(t, string(readTestFileEventually(t, childPIDPath)))
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessExit(t, childPID)
+}
+
+func TestClaudeGatewayRejectsUnsupportedMethodAndDangerSandbox(t *testing.T) {
+	receivedPath := filepath.Join(t.TempDir(), "received.jsonl")
+	bridge := writeTestBridge(t, fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+  printf '%%s\n' "$line" >> %q
+done
+`, receivedPath))
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, projectDir := appServerGatewayRouterFixtureWithConfig(t, upstreamURL, func(cfg *config.Config) {
+		cfg.Claude.Enabled = true
+		cfg.Claude.BridgeBin = bridge
+		cfg.Claude.MaxConcurrentBridges = 3
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGatewayRuntime(t, server.URL, "claude")
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"id":77,"method":"thread/goal/get","params":{"threadId":"thr"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readGatewayError(t, conn); !strings.Contains(got.message, "method 不允许") {
+		t.Fatalf("Claude 未声明 method 应被 gateway 拒绝：%+v", got)
+	}
+
+	conn2 := dialAuthedGatewayRuntime(t, server.URL, "claude")
+	defer conn2.Close()
+	payload := fmt.Sprintf(
+		`{"id":78,"method":"turn/start","params":{"threadId":"thr","cwd":%q,"input":[{"type":"text","text":"hi"}],"approvalPolicy":"on-request","sandboxPolicy":{"type":"dangerFullAccess","networkAccess":false}}}`,
+		projectDir,
+	)
+	if err := conn2.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readGatewayError(t, conn2); !strings.Contains(got.message, "dangerFullAccess") {
+		t.Fatalf("Claude dangerFullAccess 应被 gateway 拒绝：%+v", got)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if raw, err := os.ReadFile(receivedPath); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+		t.Fatalf("被拒绝的 Claude frame 不应写入 bridge stdin：%s", raw)
+	}
+}
+
+func TestClaudeGatewayDefaultsSandboxToWorkspaceWrite(t *testing.T) {
+	receivedPath := filepath.Join(t.TempDir(), "received.jsonl")
+	bridge := writeTestBridge(t, fmt.Sprintf(`#!/bin/sh
+IFS= read -r line
+printf '%%s\n' "$line" > %q
+sleep 1
+`, receivedPath))
+	upstreamURL, _, _ := fakeAppServerUpstream(t, nil)
+	handler, projectDir := appServerGatewayRouterFixtureWithConfig(t, upstreamURL, func(cfg *config.Config) {
+		cfg.Claude.Enabled = true
+		cfg.Claude.BridgeBin = bridge
+		cfg.Claude.MaxConcurrentBridges = 3
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGatewayRuntime(t, server.URL, "claude")
+	defer conn.Close()
+	payload := fmt.Sprintf(`{"id":79,"method":"thread/start","params":{"cwd":%q,"approvalPolicy":"on-request"}}`, projectDir)
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	received := readTestFileEventually(t, receivedPath)
+	params := decodeGatewayParamsForTest(t, received)
+	if params["sandbox"] != "workspace-write" {
+		t.Fatalf("Claude thread/start 默认 sandbox 应降到 workspace-write，got=%s params=%v", received, params)
+	}
+	if bytes.Contains(received, []byte("danger-full-access")) {
+		t.Fatalf("Claude 默认 sandbox 不应写入 danger-full-access：%s", received)
+	}
+}
+
+func TestClaudeGatewaySanitizersForceClaudeWorkspaceWrite(t *testing.T) {
+	threadParams := sanitizedGatewayThreadParams("claude", "thread/start", map[string]any{
+		"cwd":            "/tmp/repo",
+		"model":          "claude-explicit",
+		"modelProvider":  "anthropic",
+		"approvalPolicy": "on-request",
+		"sandbox":        "danger-full-access",
+	})
+	assertGatewayParamsOnly(t, threadParams, "cwd", "approvalPolicy", "approvalsReviewer", "sandbox")
+	if threadParams["sandbox"] != "workspace-write" {
+		t.Fatalf("Claude thread sanitizer 应把危险 sandbox 压到 workspace-write：%v", threadParams)
+	}
+
+	turnSandbox := sanitizedGatewaySandboxPolicy("claude", map[string]any{
+		"type":          "dangerFullAccess",
+		"networkAccess": true,
+	}, "/tmp/repo")
+	if turnSandbox["type"] != "workspaceWrite" || turnSandbox["networkAccess"] != false {
+		t.Fatalf("Claude turn sanitizer 应做 defense-in-depth 降权：%v", turnSandbox)
+	}
+}
+
+func TestClaudeBridgeProbeRefreshesCheapResultWhenStale(t *testing.T) {
+	bridgePath := filepath.Join(t.TempDir(), "fake-claude-bridge")
+	router := &Router{cfg: config.Config{Claude: config.ClaudeConfig{
+		Enabled:   true,
+		BridgeBin: bridgePath,
+	}}}
+	first := router.refreshClaudeBridgeProbe(false)
+	if first.Healthy || first.Status != "missing_command" {
+		t.Fatalf("缺失 bridge 应标记为不可用：%+v", first)
+	}
+	if err := os.WriteFile(bridgePath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	router.refreshClaudeBridgeProbeIfStale()
+	if got := router.claudeBridgeProbe(); got.Healthy {
+		t.Fatalf("未过期 probe 不应被 config cheap path 立即刷新：%+v", got)
+	}
+	router.claudeMu.Lock()
+	router.claudeProbe.CheckedAt = time.Now().Add(-claudeBridgeProbeCacheTTL - time.Millisecond)
+	router.claudeMu.Unlock()
+	router.refreshClaudeBridgeProbeIfStale()
+	if got := router.claudeBridgeProbe(); !got.Healthy || got.Status != "ready" {
+		t.Fatalf("过期 probe 应通过 cheap stat/LookPath 刷新：%+v", got)
 	}
 }
 
@@ -886,7 +1172,7 @@ func TestAppServerGatewayBindsBrowseWorkspaceToExactCWD(t *testing.T) {
 func TestAppServerGatewayThreadCachePrunesExpiredEntries(t *testing.T) {
 	router := &Router{gatewayThreads: map[string]appServerGatewayAllowedThread{}}
 	expiredAt := time.Now().Add(-appServerGatewayThreadCacheTTL - time.Second)
-	router.gatewayThreads["thread-expired"] = appServerGatewayAllowedThread{
+	router.gatewayThreads[gatewayThreadCacheKey("codex", "thread-expired")] = appServerGatewayAllowedThread{
 		id:       "thread-expired",
 		scopeID:  "demo",
 		lastSeen: expiredAt,
@@ -894,10 +1180,10 @@ func TestAppServerGatewayThreadCachePrunesExpiredEntries(t *testing.T) {
 
 	router.allowGatewayThread(appServerGatewayAllowedThread{id: "thread-fresh", scopeID: "demo"})
 
-	if _, ok := router.gatewayThreads["thread-expired"]; ok {
+	if _, ok := router.gatewayThreads[gatewayThreadCacheKey("codex", "thread-expired")]; ok {
 		t.Fatal("过期 gateway thread 授权应在写入新授权时被裁剪")
 	}
-	if _, ok := router.gatewayThread("thread-fresh"); !ok {
+	if _, ok := router.gatewayThread("codex", "thread-fresh"); !ok {
 		t.Fatal("新写入的 gateway thread 授权不应被裁剪")
 	}
 }
@@ -907,7 +1193,7 @@ func TestAppServerGatewayThreadCachePrunesOldestWhenFull(t *testing.T) {
 	baseSeen := time.Now().Add(-time.Hour)
 	for i := 0; i < appServerGatewayThreadCacheMax; i++ {
 		id := fmt.Sprintf("thread-%04d", i)
-		router.gatewayThreads[id] = appServerGatewayAllowedThread{
+		router.gatewayThreads[gatewayThreadCacheKey("codex", id)] = appServerGatewayAllowedThread{
 			id:       id,
 			scopeID:  "demo",
 			lastSeen: baseSeen.Add(time.Duration(i) * time.Second),
@@ -919,10 +1205,10 @@ func TestAppServerGatewayThreadCachePrunesOldestWhenFull(t *testing.T) {
 	if len(router.gatewayThreads) > appServerGatewayThreadCacheMax {
 		t.Fatalf("gateway thread 授权缓存应有容量上限，got=%d max=%d", len(router.gatewayThreads), appServerGatewayThreadCacheMax)
 	}
-	if _, ok := router.gatewayThreads["thread-0000"]; ok {
+	if _, ok := router.gatewayThreads[gatewayThreadCacheKey("codex", "thread-0000")]; ok {
 		t.Fatal("容量超限时应裁剪最久未使用的 gateway thread 授权")
 	}
-	if _, ok := router.gatewayThread("thread-new"); !ok {
+	if _, ok := router.gatewayThread("codex", "thread-new"); !ok {
 		t.Fatal("新写入的 gateway thread 授权应保留")
 	}
 }
@@ -947,7 +1233,7 @@ func TestAppServerGatewayObservesThreadResponseOnlyWithPendingRequest(t *testing
 	if forward, policyErr := policy.observeUpstreamFrame(websocket.TextMessage, payload); !forward || policyErr != nil {
 		t.Fatalf("普通上游响应应继续转发：forward=%v err=%+v", forward, policyErr)
 	}
-	if _, ok := router.gatewayThread("thread-pending"); ok {
+	if _, ok := router.gatewayThread("codex", "thread-pending"); ok {
 		t.Fatal("没有 pending thread 请求时，上游业务帧不应创建授权")
 	}
 
@@ -958,7 +1244,7 @@ func TestAppServerGatewayObservesThreadResponseOnlyWithPendingRequest(t *testing
 	if forward, policyErr := policy.observeUpstreamFrame(websocket.TextMessage, payload); !forward || policyErr != nil {
 		t.Fatalf("thread/list 响应应继续转发：forward=%v err=%+v", forward, policyErr)
 	}
-	if _, ok := router.gatewayThread("thread-pending"); !ok {
+	if _, ok := router.gatewayThread("codex", "thread-pending"); !ok {
 		t.Fatal("存在 pending thread 请求时，上游响应仍必须创建授权")
 	}
 }
@@ -1858,16 +2144,14 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	threadStartParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
-	assertGatewayParamsOnly(t, threadStartParams, "cwd", "model", "modelProvider", "serviceTier", "personality", "approvalPolicy", "approvalsReviewer", "sandbox")
+	assertGatewayParamsOnly(t, threadStartParams, "cwd", "serviceTier", "personality", "approvalPolicy", "approvalsReviewer", "sandbox")
 	if threadStartParams["cwd"] != projectDir ||
-		threadStartParams["model"] != "gpt-explicit" ||
-		threadStartParams["modelProvider"] != "openai" ||
 		threadStartParams["serviceTier"] != "priority" ||
 		threadStartParams["personality"] != "friendly" ||
 		threadStartParams["approvalPolicy"] != "on-request" ||
 		threadStartParams["approvalsReviewer"] != "user" ||
 		threadStartParams["sandbox"] != "workspace-write" {
-		t.Fatalf("thread/start 显式模型和安全参数应保留：%v", threadStartParams)
+		t.Fatalf("thread/start 应过滤线程级模型并保留安全参数：%v", threadStartParams)
 	}
 
 	threadList := []byte(fmt.Sprintf(
@@ -1913,11 +2197,9 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	threadResumeParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
-	assertGatewayParamsOnly(t, threadResumeParams, "cwd", "model", "modelProvider", "threadId", "excludeTurns", "approvalPolicy", "approvalsReviewer", "sandbox")
+	assertGatewayParamsOnly(t, threadResumeParams, "cwd", "threadId", "excludeTurns", "approvalPolicy", "approvalsReviewer", "sandbox")
 	if threadResumeParams["threadId"] != "thread-sanitize" ||
 		threadResumeParams["cwd"] != projectDir ||
-		threadResumeParams["model"] != "gpt-resume" ||
-		threadResumeParams["modelProvider"] != "openai" ||
 		threadResumeParams["excludeTurns"] != true ||
 		threadResumeParams["approvalPolicy"] != "on-request" ||
 		threadResumeParams["approvalsReviewer"] != "user" ||
@@ -1934,11 +2216,9 @@ func TestAppServerGatewaySanitizesParamsForAllAllowedMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	threadForkParams := decodeGatewayParamsForTest(t, readUpstreamFrame(t, received))
-	assertGatewayParamsOnly(t, threadForkParams, "cwd", "model", "modelProvider", "threadId", "approvalPolicy", "approvalsReviewer", "sandbox")
+	assertGatewayParamsOnly(t, threadForkParams, "cwd", "threadId", "approvalPolicy", "approvalsReviewer", "sandbox")
 	if threadForkParams["threadId"] != "thread-sanitize" ||
 		threadForkParams["cwd"] != projectDir ||
-		threadForkParams["model"] != "gpt-fork" ||
-		threadForkParams["modelProvider"] != "openai" ||
 		threadForkParams["approvalPolicy"] != "on-request" ||
 		threadForkParams["approvalsReviewer"] != "user" ||
 		threadForkParams["sandbox"] != "danger-full-access" {
@@ -2684,6 +2964,30 @@ func dialAuthedGateway(t *testing.T, serverURL string) *websocket.Conn {
 	return conn
 }
 
+func dialAuthedGatewayRuntime(t *testing.T, serverURL string, runtimeID string) *websocket.Conn {
+	t.Helper()
+	target := wsURL(serverURL, appServerGatewayPath)
+	if strings.TrimSpace(runtimeID) != "" {
+		target += "?runtime=" + url.QueryEscape(runtimeID)
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(target, http.Header{
+		"Authorization": []string{"Bearer " + testToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+func writeTestBridge(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fake-claude-bridge")
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 type gatewayErrorFrame struct {
 	id      json.RawMessage
 	message string
@@ -2717,6 +3021,42 @@ func readUpstreamFrame(t *testing.T, received <-chan []byte) []byte {
 		t.Fatal("fake upstream 未收到帧")
 	}
 	return nil
+}
+
+func readTestFileEventually(t *testing.T, path string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil && len(bytes.TrimSpace(raw)) > 0 {
+			return raw
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等待测试文件写入超时：%s", path)
+	return nil
+}
+
+func parseTestPID(t *testing.T, raw string) int {
+	t.Helper()
+	pid, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || pid <= 0 {
+		t.Fatalf("测试 PID 无效：raw=%q err=%v", raw, err)
+	}
+	return pid
+}
+
+func waitForProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		err := syscall.Kill(pid, 0)
+		if err == syscall.ESRCH {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("进程组关闭后子进程仍在运行 pid=%d", pid)
 }
 
 func decodeGatewayParamsForTest(t *testing.T, payload []byte) map[string]any {

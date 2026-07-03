@@ -74,9 +74,24 @@ var appServerAllowedMethods = map[string]struct{}{
 	"account/rateLimits/read": {},
 }
 
+var appServerClaudeAllowedMethods = map[string]struct{}{
+	"initialize":        {},
+	"initialized":       {},
+	"thread/list":       {},
+	"thread/start":      {},
+	"thread/resume":     {},
+	"thread/read":       {},
+	"thread/turns/list": {},
+	"turn/start":        {},
+	"turn/steer":        {},
+	"turn/interrupt":    {},
+	"model/list":        {},
+}
+
 type appServerConfigResponse struct {
 	GatewayWSURL string                   `json:"gateway_ws_url"`
 	Runtime      appServerRuntimeMetadata `json:"runtime"`
+	Channels     []appServerChannel       `json:"channels,omitempty"`
 	Projects     []projects.Project       `json:"projects"`
 	Policy       appServerPolicyMetadata  `json:"policy"`
 }
@@ -90,6 +105,51 @@ type appServerRuntimeMetadata struct {
 	Running            bool   `json:"running"`
 	Initialized        bool   `json:"initialized"`
 	PendingRequests    int    `json:"pending_requests"`
+}
+
+type appServerChannel struct {
+	ID               string                     `json:"id"`
+	RuntimeID        string                     `json:"runtime_id"`
+	Title            string                     `json:"title"`
+	Provider         string                     `json:"provider"`
+	Type             string                     `json:"type"`
+	Protocol         string                     `json:"protocol"`
+	GatewayWSURL     string                     `json:"gateway_ws_url"`
+	GatewayAvailable bool                       `json:"gateway_available"`
+	Managed          bool                       `json:"managed"`
+	Experimental     bool                       `json:"experimental,omitempty"`
+	Lifecycle        string                     `json:"lifecycle,omitempty"`
+	Bridge           *appServerBridgeMetadata   `json:"bridge,omitempty"`
+	Methods          []string                   `json:"methods,omitempty"`
+	Capabilities     appServerChannelCapability `json:"capabilities,omitempty"`
+	Policy           appServerChannelPolicy     `json:"policy,omitempty"`
+}
+
+type appServerBridgeMetadata struct {
+	Name           string `json:"name"`
+	Version        string `json:"version,omitempty"`
+	Path           string `json:"path,omitempty"`
+	Status         string `json:"status"`
+	Healthy        bool   `json:"healthy"`
+	LastProbeError string `json:"last_probe_error,omitempty"`
+}
+
+type appServerChannelCapability struct {
+	Streaming        bool `json:"streaming"`
+	History          bool `json:"history"`
+	ApprovalRequests bool `json:"approval_requests"`
+	FileDiffs        bool `json:"file_diffs"`
+	Goals            bool `json:"goals"`
+	Archive          bool `json:"archive"`
+	Fork             bool `json:"fork"`
+	RateLimits       bool `json:"rate_limits"`
+}
+
+type appServerChannelPolicy struct {
+	ApprovalPolicies []string `json:"approval_policies,omitempty"`
+	SandboxModes     []string `json:"sandbox_modes,omitempty"`
+	NetworkAccess    bool     `json:"network_access"`
+	CWDScope         string   `json:"cwd_scope"`
 }
 
 type appServerPolicyMetadata struct {
@@ -118,8 +178,9 @@ type appServerGatewayPolicyError struct {
 }
 
 type appServerGatewayPolicy struct {
-	router *Router
-	mu     sync.Mutex
+	router    *Router
+	runtimeID string
+	mu        sync.Mutex
 
 	pendingThreads        map[string]appServerGatewayPendingThreadRequest
 	pendingServerRequests map[string]appServerGatewayPendingServerRequest
@@ -175,10 +236,11 @@ type gatewayScope struct {
 }
 
 type appServerGatewayAllowedThread struct {
-	id       string
-	cwd      string
-	scopeID  string
-	lastSeen time.Time
+	id        string
+	runtimeID string
+	cwd       string
+	scopeID   string
+	lastSeen  time.Time
 }
 
 type appServerGatewayThreadWire struct {
@@ -194,12 +256,14 @@ func (r *Router) appServerConfigHandler(w http.ResponseWriter, req *http.Request
 		methodNotAllowed(w)
 		return
 	}
+	r.refreshClaudeBridgeProbeIfStale()
 	projectList := r.projects.List()
 	runtimeMeta := r.appServerRuntimeMetadata()
 	log.Printf("app-server config response remote=%s host=%s projects=%d transport=%s gateway_available=%t", requestRemoteHost(req), req.Host, len(projectList), runtimeMeta.Transport, runtimeMeta.GatewayAvailable)
 	writeJSON(w, http.StatusOK, appServerConfigResponse{
 		GatewayWSURL: r.appServerGatewayURL(req),
 		Runtime:      runtimeMeta,
+		Channels:     r.appServerChannels(req),
 		Projects:     projectList,
 		Policy: appServerPolicyMetadata{
 			AllowedMethods: appServerAllowedMethodList(),
@@ -228,15 +292,31 @@ func (r *Router) appServerRuntimeMetadata() appServerRuntimeMetadata {
 }
 
 func appServerAllowedMethodList() []string {
-	methods := make([]string, 0, len(appServerAllowedMethods))
-	for method := range appServerAllowedMethods {
+	return appServerAllowedMethodListForRuntime("codex")
+}
+
+func appServerAllowedMethodListForRuntime(runtimeID string) []string {
+	allowed := appServerAllowedMethodsForRuntime(runtimeID)
+	methods := make([]string, 0, len(allowed))
+	for method := range allowed {
 		methods = append(methods, method)
 	}
 	sort.Strings(methods)
 	return methods
 }
 
+func appServerAllowedMethodsForRuntime(runtimeID string) map[string]struct{} {
+	if normalizeAppServerRuntimeID(runtimeID) == "claude" {
+		return appServerClaudeAllowedMethods
+	}
+	return appServerAllowedMethods
+}
+
 func (r *Router) appServerGatewayURL(req *http.Request) string {
+	return r.appServerGatewayURLForRuntime(req, "codex")
+}
+
+func (r *Router) appServerGatewayURLForRuntime(req *http.Request, runtimeID string) string {
 	scheme := "ws"
 	if req.TLS != nil || strings.EqualFold(req.Header.Get("X-Forwarded-Proto"), "https") {
 		scheme = "wss"
@@ -245,7 +325,93 @@ func (r *Router) appServerGatewayURL(req *http.Request) string {
 	if strings.TrimSpace(host) == "" {
 		host = r.cfg.Listen
 	}
-	return (&url.URL{Scheme: scheme, Host: host, Path: appServerGatewayPath}).String()
+	values := url.Values{}
+	if runtimeID = normalizeAppServerRuntimeID(runtimeID); runtimeID != "" && runtimeID != "codex" {
+		values.Set("runtime", runtimeID)
+	}
+	return (&url.URL{Scheme: scheme, Host: host, Path: appServerGatewayPath, RawQuery: values.Encode()}).String()
+}
+
+func (r *Router) appServerChannels(req *http.Request) []appServerChannel {
+	codexUpstream, _ := r.appServerUpstreamWebSocketURL()
+	channels := []appServerChannel{{
+		ID:               "codex",
+		RuntimeID:        "codex",
+		Title:            "Codex",
+		Provider:         "openai",
+		Type:             "codex_app_server",
+		Protocol:         "app_server_jsonrpc_ws",
+		GatewayWSURL:     r.appServerGatewayURLForRuntime(req, "codex"),
+		GatewayAvailable: codexUpstream != "",
+		Managed:          r.cfg.AppServer.Managed,
+		Methods:          appServerAllowedMethodList(),
+		Capabilities: appServerChannelCapability{
+			Streaming:        true,
+			History:          true,
+			ApprovalRequests: true,
+			FileDiffs:        true,
+			Goals:            true,
+			Archive:          true,
+			Fork:             true,
+			RateLimits:       true,
+		},
+		Policy: appServerChannelPolicy{
+			ApprovalPolicies: []string{"on-request", "on-failure"},
+			SandboxModes:     []string{"read-only", "workspace-write", "danger-full-access"},
+			NetworkAccess:    false,
+			CWDScope:         "agentd_allowlist",
+		},
+	}}
+	if r.cfg.Claude.Enabled {
+		probe := r.claudeBridgeProbe()
+		channels = append(channels, appServerChannel{
+			ID:               "claude",
+			RuntimeID:        "claude",
+			Title:            "Claude Code",
+			Provider:         "anthropic",
+			Type:             "claude_code_bridge",
+			Protocol:         "app_server_jsonrpc_stdio_v1",
+			GatewayWSURL:     r.appServerGatewayURLForRuntime(req, "claude"),
+			GatewayAvailable: probe.Healthy,
+			Managed:          false,
+			Experimental:     true,
+			Lifecycle:        "per_connection",
+			Bridge: &appServerBridgeMetadata{
+				Name:           "alleycat-claude-bridge",
+				Version:        probe.Version,
+				Path:           probe.Path,
+				Status:         probe.Status,
+				Healthy:        probe.Healthy,
+				LastProbeError: probe.Error,
+			},
+			Methods: appServerAllowedMethodListForRuntime("claude"),
+			Capabilities: appServerChannelCapability{
+				Streaming:        true,
+				History:          true,
+				ApprovalRequests: true,
+				FileDiffs:        true,
+			},
+			Policy: appServerChannelPolicy{
+				ApprovalPolicies: []string{"on-request", "on-failure"},
+				SandboxModes:     []string{"read-only", "workspace-write"},
+				NetworkAccess:    false,
+				CWDScope:         "agentd_allowlist",
+			},
+		})
+	}
+	return channels
+}
+
+func normalizeAppServerRuntimeID(raw string) string {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	switch value {
+	case "", "codex", "openai", "codex_app_server", "codex-app-server":
+		return "codex"
+	case "claude", "anthropic", "claude_code", "claude-code", "claude_code_bridge", "claude-code-bridge":
+		return "claude"
+	default:
+		return value
+	}
 }
 
 func (r *Router) appServerGatewayWS(w http.ResponseWriter, req *http.Request) {
@@ -257,6 +423,18 @@ func (r *Router) appServerGatewayWS(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusForbidden, "Origin 不允许访问 app-server gateway")
 		return
 	}
+	runtimeID := normalizeAppServerRuntimeID(req.URL.Query().Get("runtime"))
+	switch runtimeID {
+	case "codex":
+		r.appServerCodexGatewayWS(w, req)
+	case "claude":
+		r.appServerClaudeGatewayWS(w, req)
+	default:
+		writeError(w, http.StatusBadRequest, "未知 app-server runtime："+runtimeID)
+	}
+}
+
+func (r *Router) appServerCodexGatewayWS(w http.ResponseWriter, req *http.Request) {
 	upstreamURL, err := r.appServerUpstreamWebSocketURL()
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
@@ -371,6 +549,7 @@ func (r *Router) proxyAppServerGateway(ctx context.Context, client *websocket.Co
 	configureGatewayReadConn(upstream)
 	policy := &appServerGatewayPolicy{
 		router:                r,
+		runtimeID:             "codex",
 		pendingThreads:        map[string]appServerGatewayPendingThreadRequest{},
 		pendingServerRequests: map[string]appServerGatewayPendingServerRequest{},
 		pendingHistory:        map[string]appServerGatewayPendingHistoryRequest{},
@@ -537,14 +716,14 @@ func (p *appServerGatewayPolicy) validateClientFrame(messageType int, payload []
 	if method != "initialized" && frame.ID == nil {
 		return nil, &appServerGatewayPolicyError{message: "app-server request 必须包含 id"}
 	}
-	if _, ok := appServerAllowedMethods[method]; !ok {
+	if !p.methodAllowed(method) {
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: "app-server method 不允许：" + method}
 	}
 	params, err := decodeGatewayParams(frame.Params)
 	if err != nil {
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 	}
-	validated, err := p.router.validateGatewayPolicyParams(method, params)
+	validated, err := p.router.validateGatewayPolicyParams(normalizeAppServerRuntimeID(p.runtimeID), method, params)
 	if err != nil {
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 	}
@@ -554,12 +733,17 @@ func (p *appServerGatewayPolicy) validateClientFrame(messageType int, payload []
 	if err := p.reserveHistoryRequest(frame.ID, method, params, len(payload)); err != nil {
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error(), historyBudgetRejected: true}
 	}
-	rewritten, err := rewriteGatewaySafeDefaults(payload, method, params, validated)
+	rewritten, err := rewriteGatewaySafeDefaults(payload, normalizeAppServerRuntimeID(p.runtimeID), method, params, validated)
 	if err != nil {
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 	}
 	logGatewayForwardedClientTurnSummary(method, rewritten)
 	return rewritten, nil
+}
+
+func (p *appServerGatewayPolicy) methodAllowed(method string) bool {
+	_, ok := appServerAllowedMethodsForRuntime(p.runtimeID)[method]
+	return ok
 }
 
 func (p *appServerGatewayPolicy) validateThreadCapability(frame *appServerGatewayFrame, method string, params map[string]any, validated appServerGatewayValidatedParams) error {
@@ -748,7 +932,7 @@ func isPermissionsApprovalMethod(method string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(method)), "permissions/requestapproval")
 }
 
-func rewriteGatewaySafeDefaults(payload []byte, method string, params map[string]any, validated appServerGatewayValidatedParams) ([]byte, error) {
+func rewriteGatewaySafeDefaults(payload []byte, runtimeID string, method string, params map[string]any, validated appServerGatewayValidatedParams) ([]byte, error) {
 	var sanitized map[string]any
 	switch method {
 	case "initialize":
@@ -768,9 +952,9 @@ func rewriteGatewaySafeDefaults(payload []byte, method string, params map[string
 	case "thread/archive", "thread/unarchive":
 		sanitized = copyGatewayParams(params, "threadId")
 	case "thread/start", "thread/resume", "thread/fork":
-		sanitized = sanitizedGatewayThreadParams(method, params)
+		sanitized = sanitizedGatewayThreadParams(runtimeID, method, params)
 	case "turn/start":
-		sanitized = sanitizedGatewayTurnParams(params, validated.cwd)
+		sanitized = sanitizedGatewayTurnParams(runtimeID, params, validated.cwd)
 	case "turn/steer":
 		sanitized = sanitizedGatewayTurnSteerParams(params)
 	case "turn/interrupt":
@@ -1015,8 +1199,8 @@ func sanitizedGatewayInitializeParams(params map[string]any) map[string]any {
 	return safe
 }
 
-func sanitizedGatewayThreadParams(method string, params map[string]any) map[string]any {
-	safe := copyGatewayParams(params, "cwd", "model", "modelProvider", "serviceTier", "personality")
+func sanitizedGatewayThreadParams(runtimeID string, method string, params map[string]any) map[string]any {
+	safe := copyGatewayParams(params, "cwd", "serviceTier", "personality")
 	if method == "thread/resume" || method == "thread/fork" {
 		copyGatewayParam(safe, params, "threadId")
 	}
@@ -1024,11 +1208,17 @@ func sanitizedGatewayThreadParams(method string, params map[string]any) map[stri
 		safe["excludeTurns"] = true
 	}
 	safe["approvalPolicy"], safe["approvalsReviewer"] = sanitizedGatewayApproval(params)
-	safe["sandbox"] = sanitizedGatewayThreadSandbox(params)
+	safe["sandbox"] = sanitizedGatewayThreadSandbox(runtimeID, params)
 	return safe
 }
 
-func sanitizedGatewayThreadSandbox(params map[string]any) string {
+func sanitizedGatewayThreadSandbox(runtimeID string, params map[string]any) string {
+	if normalizeAppServerRuntimeID(runtimeID) == "claude" {
+		if sandbox, ok := gatewayStringParam(params, "sandbox"); ok && normalizePolicyValue(sandbox) == "readonly" {
+			return "read-only"
+		}
+		return "workspace-write"
+	}
 	if sandbox, ok := gatewayStringParam(params, "sandbox"); ok && normalizePolicyValue(sandbox) == "readonly" {
 		return "read-only"
 	}
@@ -1041,13 +1231,13 @@ func sanitizedGatewayThreadSandbox(params map[string]any) string {
 	return "danger-full-access"
 }
 
-func sanitizedGatewayTurnParams(params map[string]any, cwd string) map[string]any {
+func sanitizedGatewayTurnParams(runtimeID string, params map[string]any, cwd string) map[string]any {
 	safe := copyGatewayParams(params, "threadId", "cwd", "input", "clientUserMessageId", "model", "serviceTier", "effort", "summary", "personality")
 	if collaborationMode, ok := sanitizedGatewayCollaborationMode(params["collaborationMode"]); ok {
 		safe["collaborationMode"] = collaborationMode
 	}
 	safe["approvalPolicy"], safe["approvalsReviewer"] = sanitizedGatewayApproval(params)
-	safe["sandboxPolicy"] = sanitizedGatewaySandboxPolicy(params["sandboxPolicy"], cwd)
+	safe["sandboxPolicy"] = sanitizedGatewaySandboxPolicy(runtimeID, params["sandboxPolicy"], cwd)
 	// 默认模型必须交给 app-server 按账号 rollout 决定；gateway 只透传用户显式选择的 model。
 	if effort, ok := gatewayStringParam(safe, "effort"); !ok || strings.TrimSpace(effort) == "" {
 		safe["effort"] = defaultCodexReasoningEffort
@@ -1224,10 +1414,23 @@ func sanitizedGatewayApproval(params map[string]any) (string, string) {
 	return "on-request", "user"
 }
 
-func sanitizedGatewaySandboxPolicy(raw any, cwd string) map[string]any {
+func sanitizedGatewaySandboxPolicy(runtimeID string, raw any, cwd string) map[string]any {
 	sandbox, _ := raw.(map[string]any)
 	sandboxType, _ := gatewayStringParam(sandbox, "type")
 	normalizedType := normalizePolicyValue(sandboxType)
+	if normalizeAppServerRuntimeID(runtimeID) == "claude" {
+		if normalizedType == "readonly" {
+			return map[string]any{
+				"type":          "readOnly",
+				"networkAccess": false,
+			}
+		}
+		return map[string]any{
+			"type":          "workspaceWrite",
+			"writableRoots": []any{cwd},
+			"networkAccess": false,
+		}
+	}
 	if normalizedType == "readonly" {
 		return map[string]any{
 			"type":          "readOnly",
@@ -1449,28 +1652,33 @@ func (p *appServerGatewayPolicy) allowedThread(threadID string) (appServerGatewa
 	if ok {
 		return thread, true
 	}
-	return p.router.gatewayThread(threadID)
+	return p.router.gatewayThread(p.runtimeID, threadID)
 }
 
-func (r *Router) gatewayThread(threadID string) (appServerGatewayAllowedThread, bool) {
+func (r *Router) gatewayThread(runtimeID string, threadID string) (appServerGatewayAllowedThread, bool) {
+	runtimeID = normalizeAppServerRuntimeID(runtimeID)
+	if runtimeID == "" {
+		runtimeID = "codex"
+	}
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {
 		return appServerGatewayAllowedThread{}, false
 	}
+	key := gatewayThreadCacheKey(runtimeID, threadID)
 	now := time.Now()
 	r.gatewayThreadsMu.Lock()
 	defer r.gatewayThreadsMu.Unlock()
-	thread, ok := r.gatewayThreads[threadID]
+	thread, ok := r.gatewayThreads[key]
 	if !ok {
 		return appServerGatewayAllowedThread{}, false
 	}
 	if gatewayThreadCacheExpired(thread, now) {
-		delete(r.gatewayThreads, threadID)
+		delete(r.gatewayThreads, key)
 		return appServerGatewayAllowedThread{}, false
 	}
 	// 全局授权表只服务断线重连的短期恢复；命中时刷新 lastSeen，让活跃 thread 不被容量裁剪误删。
 	thread.lastSeen = now
-	r.gatewayThreads[threadID] = thread
+	r.gatewayThreads[key] = thread
 	return thread, ok
 }
 
@@ -1636,7 +1844,8 @@ func (p *appServerGatewayPolicy) threadsFromResult(raw json.RawMessage, pending 
 			continue
 		}
 		out = append(out, appServerGatewayAllowedThread{
-			id: strings.TrimSpace(id),
+			id:        strings.TrimSpace(id),
+			runtimeID: normalizeAppServerRuntimeID(p.runtimeID),
 			// browse 作用域用 canonical 路径绑定，避免同一目录的不同写法绕过精确匹配。
 			cwd:     scope.realPath,
 			scopeID: scope.id,
@@ -1649,6 +1858,9 @@ func (p *appServerGatewayPolicy) allowThread(thread appServerGatewayAllowedThrea
 	if strings.TrimSpace(thread.id) == "" || strings.TrimSpace(thread.scopeID) == "" {
 		return
 	}
+	if strings.TrimSpace(thread.runtimeID) == "" {
+		thread.runtimeID = normalizeAppServerRuntimeID(p.runtimeID)
+	}
 	thread.lastSeen = time.Now()
 	p.mu.Lock()
 	p.allowedThreads[thread.id] = thread
@@ -1660,12 +1872,20 @@ func (r *Router) allowGatewayThread(thread appServerGatewayAllowedThread) {
 	if strings.TrimSpace(thread.id) == "" || strings.TrimSpace(thread.scopeID) == "" {
 		return
 	}
+	if strings.TrimSpace(thread.runtimeID) == "" {
+		thread.runtimeID = "codex"
+	}
+	thread.runtimeID = normalizeAppServerRuntimeID(thread.runtimeID)
 	now := time.Now()
 	thread.lastSeen = now
 	r.gatewayThreadsMu.Lock()
-	r.gatewayThreads[thread.id] = thread
+	r.gatewayThreads[gatewayThreadCacheKey(thread.runtimeID, thread.id)] = thread
 	r.pruneGatewayThreadsLocked(now)
 	r.gatewayThreadsMu.Unlock()
+}
+
+func gatewayThreadCacheKey(runtimeID string, threadID string) string {
+	return normalizeAppServerRuntimeID(runtimeID) + "\x00" + strings.TrimSpace(threadID)
 }
 
 func (r *Router) pruneGatewayThreadsLocked(now time.Time) {
@@ -1722,13 +1942,16 @@ func decodeGatewayParams(raw json.RawMessage) (map[string]any, error) {
 	return params, nil
 }
 
-func (r *Router) validateGatewayPolicyParams(method string, params map[string]any) (appServerGatewayValidatedParams, error) {
+func (r *Router) validateGatewayPolicyParams(runtimeID string, method string, params map[string]any) (appServerGatewayValidatedParams, error) {
 	validated := appServerGatewayValidatedParams{}
 	if hasApprovalPolicyNever(params) {
 		return validated, fmt.Errorf("approvalPolicy=never 不允许远程使用")
 	}
 	if hasDangerousConfigSandbox(params["config"]) {
 		return validated, fmt.Errorf("dangerFullAccess 不允许通过 config 使用")
+	}
+	if normalizeAppServerRuntimeID(runtimeID) == "claude" && hasDangerFullAccessPolicy(params) {
+		return validated, fmt.Errorf("dangerFullAccess 不允许用于 Claude experimental runtime")
 	}
 	if hasNetworkAccessEnabled(params) {
 		return validated, fmt.Errorf("networkAccess=true 不允许远程使用")
@@ -2102,6 +2325,37 @@ func hasNetworkAccessEnabled(value any) bool {
 
 func hasDangerousConfigSandbox(value any) bool {
 	return hasDangerousConfigSandboxValue(value, "")
+}
+
+func hasDangerFullAccessPolicy(value any) bool {
+	return hasDangerFullAccessPolicyValue(value, "")
+}
+
+func hasDangerFullAccessPolicyValue(value any, parentKey string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			normalizedKey := normalizePolicyValue(key)
+			if normalizedKey == "dangerfullaccess" {
+				return true
+			}
+			if normalizedKey == "sandbox" || normalizedKey == "sandboxmode" || (parentKey == "sandboxpolicy" && normalizedKey == "type") {
+				if text, ok := child.(string); ok && normalizePolicyValue(text) == "dangerfullaccess" {
+					return true
+				}
+			}
+			if hasDangerFullAccessPolicyValue(child, normalizedKey) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if hasDangerFullAccessPolicyValue(child, parentKey) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasDangerousConfigSandboxValue(value any, parentKey string) bool {

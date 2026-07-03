@@ -98,6 +98,16 @@ struct SessionContextEnvironment: Codable, Hashable {
     var label: String?
     var cwd: String?
     var provider: String?
+    var runtimeProvider: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case label
+        case cwd
+        case provider
+        case runtimeProvider = "runtime_provider"
+    }
 }
 
 struct SessionContextGitInfo: Codable, Hashable {

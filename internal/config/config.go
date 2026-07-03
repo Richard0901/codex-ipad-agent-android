@@ -21,6 +21,7 @@ type Config struct {
 	AppServer     AppServerConfig `json:"app_server"`
 	Voice         VoiceConfig     `json:"voice"`
 	Codex         CodexConfig     `json:"codex"`
+	Claude        ClaudeConfig    `json:"claude"`
 	Session       SessionConfig   `json:"session"`
 	Debug         DebugConfig     `json:"debug"`
 	Projects      []ProjectConfig `json:"projects"`
@@ -40,6 +41,14 @@ type CodexConfig struct {
 	Bin         string            `json:"bin"`
 	DefaultArgs []string          `json:"default_args"`
 	Env         map[string]string `json:"env"`
+}
+
+type ClaudeConfig struct {
+	Enabled              bool              `json:"enabled"`
+	BridgeBin            string            `json:"bridge_bin"`
+	Args                 []string          `json:"args,omitempty"`
+	Env                  map[string]string `json:"env,omitempty"`
+	MaxConcurrentBridges int               `json:"max_concurrent_bridges"`
 }
 
 type RuntimeConfig struct {
@@ -187,6 +196,14 @@ func defaults() Config {
 				"TERM": "xterm-256color",
 			},
 		},
+		Claude: ClaudeConfig{
+			Enabled:              false,
+			BridgeBin:            "alleycat-claude-bridge",
+			MaxConcurrentBridges: 3,
+			Env: map[string]string{
+				"TERM": "xterm-256color",
+			},
+		},
 		Session: SessionConfig{
 			OutputBufferBytes: 128 * 1024,
 		},
@@ -220,6 +237,20 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("AGENTD_CODEX_ARGS"); v != "" {
 		cfg.Codex.DefaultArgs = strings.Fields(v)
+	}
+	if v := os.Getenv("AGENTD_CLAUDE_ENABLED"); v != "" {
+		cfg.Claude.Enabled = truthy(v)
+	}
+	if v := os.Getenv("AGENTD_CLAUDE_BRIDGE_BIN"); v != "" {
+		cfg.Claude.BridgeBin = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("AGENTD_CLAUDE_BRIDGE_ARGS"); v != "" {
+		cfg.Claude.Args = strings.Fields(v)
+	}
+	if v := os.Getenv("AGENTD_CLAUDE_MAX_CONCURRENT_BRIDGES"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.Claude.MaxConcurrentBridges = n
+		}
 	}
 	if v := os.Getenv("AGENTD_APP_SERVER_TRANSPORT"); v != "" {
 		cfg.AppServer.Transport = strings.TrimSpace(strings.ToLower(v))
@@ -454,6 +485,12 @@ func (c Config) Validate() error {
 	}
 	if c.Codex.Bin == "" {
 		return fmt.Errorf("codex.bin 不能为空")
+	}
+	if c.Claude.Enabled && strings.TrimSpace(c.Claude.BridgeBin) == "" {
+		return fmt.Errorf("claude.bridge_bin 不能为空")
+	}
+	if c.Claude.Enabled && c.Claude.MaxConcurrentBridges <= 0 {
+		return fmt.Errorf("claude.max_concurrent_bridges 必须大于 0")
 	}
 	switch normalizeRuntimeType(c.Runtime.Type) {
 	case "codex_app_server":

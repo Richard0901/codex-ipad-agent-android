@@ -814,6 +814,7 @@ final class SessionStore: ObservableObject {
     private let terminalStreamStore = TerminalStreamStore()
     private let clientFactory: () throws -> any SessionStoreAPIClient
     private let webSocketFactory: () -> any SessionWebSocketClient
+    private let sessionWebSocketFactory: ((AgentSession) -> any SessionWebSocketClient)?
     private let webSocketReconnectDelayNanoseconds: (Int) -> UInt64
     private var webSocket: (any SessionWebSocketClient)?
     private var connectedSessionID: String?
@@ -890,6 +891,7 @@ final class SessionStore: ObservableObject {
         sessionReminderScheduler: (any SessionReminderScheduling)? = nil,
         clientFactory: (() throws -> any SessionStoreAPIClient)? = nil,
         webSocketFactory: (() -> any SessionWebSocketClient)? = nil,
+        sessionWebSocketFactory: ((AgentSession) -> any SessionWebSocketClient)? = nil,
         webSocketReconnectDelayNanoseconds: ((Int) -> UInt64)? = nil
     ) {
         self.appStore = appStore
@@ -946,6 +948,13 @@ final class SessionStore: ObservableObject {
         }
         self.clientFactory = clientFactory ?? { try appStore.makeSessionStoreAPIClient() }
         self.webSocketFactory = webSocketFactory ?? { appStore.makeSessionWebSocketClient() }
+        if let sessionWebSocketFactory {
+            self.sessionWebSocketFactory = sessionWebSocketFactory
+        } else if webSocketFactory == nil {
+            self.sessionWebSocketFactory = { appStore.makeSessionWebSocketClient(for: $0) }
+        } else {
+            self.sessionWebSocketFactory = nil
+        }
         self.webSocketReconnectDelayNanoseconds = webSocketReconnectDelayNanoseconds ?? Self.defaultWebSocketReconnectDelayNanoseconds
         self.dismissedHistorySavingsNoticeEndpoints = self.historySavingsNoticeStore.loadDismissedEndpoints()
         reloadSessionListPreferences()
@@ -2355,6 +2364,7 @@ final class SessionStore: ObservableObject {
         var resolved = payload
         if let model = resolved.options.model?.trimmingCharacters(in: .whitespacesAndNewlines),
            !model.isEmpty {
+            resolved.options = resolved.options.sanitizedForRuntimePolicy()
             return resolved
         }
 
@@ -2363,13 +2373,18 @@ final class SessionStore: ObservableObject {
         }
         let options = appServerModelOptions.isEmpty ? CodexAppServerModelOption.builtInFallback : appServerModelOptions
         guard let selected = options.first(where: \.isDefault) ?? options.first else {
+            resolved.options = resolved.options.sanitizedForRuntimePolicy()
             return resolved
         }
 
         // app-server 的 turn/start 目前要求顶层 model 必填；模型来源必须优先使用
         // model/list 的账号默认值，只有列表不可用时才使用内置兜底，避免 iPad 硬编码旧模型踩 rollout。
+        if resolved.options.runtimeProvider?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            resolved.options.runtimeProvider = selected.runtimeProvider
+        }
         resolved.options.model = selected.model
         resolved.options.modelProvider = selected.provider
+        resolved.options = resolved.options.sanitizedForRuntimePolicy()
         return resolved
     }
 
@@ -2948,7 +2963,12 @@ final class SessionStore: ObservableObject {
             // 先做本地回显，网络慢或 create 失败时用户输入仍留在时间线；
             // 服务端确认后再用 client_message_id 合并到真实会话。
             if resume == nil {
-                upsert(makeOptimisticSession(id: optimisticSessionID, projectID: projectID, prompt: prompt))
+                upsert(makeOptimisticSession(
+                    id: optimisticSessionID,
+                    projectID: projectID,
+                    prompt: prompt,
+                    runtimeProvider: payload.options.runtimeProvider
+                ))
             }
             setSelectedProjectID(projectID)
             setSelectedSessionID(optimisticSessionID)
@@ -3553,6 +3573,7 @@ final class SessionStore: ObservableObject {
             title: item.title,
             status: item.status,
             source: item.source,
+            runtimeProvider: item.runtimeProvider,
             resumeID: item.resumeID,
             createdAt: item.createdAt,
             updatedAt: item.updatedAt,
@@ -3775,7 +3796,7 @@ final class SessionStore: ObservableObject {
         return "local:\(projectID):\(clientMessageID)"
     }
 
-    private func makeOptimisticSession(id: SessionID, projectID: String, prompt: String) -> AgentSession {
+    private func makeOptimisticSession(id: SessionID, projectID: String, prompt: String, runtimeProvider: String?) -> AgentSession {
         let project = sidebarProjectsByID[projectID] ?? projectsByID[projectID]
         let title = Self.promptTitle(prompt)
         return AgentSession(
@@ -3786,6 +3807,7 @@ final class SessionStore: ObservableObject {
             title: title,
             status: "running",
             source: Self.optimisticSessionSource,
+            runtimeProvider: runtimeProvider,
             resumeID: nil,
             createdAt: Date(),
             updatedAt: Date(),
@@ -4208,7 +4230,7 @@ final class SessionStore: ObservableObject {
 
         webSocketConnectionGeneration += 1
         let connectionGeneration = webSocketConnectionGeneration
-        let socket = webSocketFactory()
+        let socket = sessionWebSocketFactory?(session) ?? webSocketFactory()
         socket.onStatus = { [weak self] status in
             Task { @MainActor in
                 guard self?.isCurrentWebSocketConnection(sessionID: session.id, generation: connectionGeneration) == true else {

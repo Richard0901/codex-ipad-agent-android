@@ -40,7 +40,24 @@ type appServerConfig struct {
 		Initialized      bool `json:"initialized"`
 		PendingRequests  int  `json:"pending_requests"`
 	} `json:"runtime"`
-	Projects []project `json:"projects"`
+	Channels []appServerChannel `json:"channels"`
+	Projects []project          `json:"projects"`
+}
+
+type appServerChannel struct {
+	ID               string `json:"id"`
+	RuntimeID        string `json:"runtime_id"`
+	Provider         string `json:"provider"`
+	Protocol         string `json:"protocol"`
+	GatewayWSURL     string `json:"gateway_ws_url"`
+	GatewayAvailable bool   `json:"gateway_available"`
+	Experimental     bool   `json:"experimental"`
+	Lifecycle        string `json:"lifecycle"`
+	Bridge           struct {
+		Status         string `json:"status"`
+		Error          string `json:"error"`
+		LastProbeError string `json:"last_probe_error"`
+	} `json:"bridge"`
 }
 
 type project struct {
@@ -123,6 +140,7 @@ func main() {
 	var threadID string
 	var model string
 	var prompt string
+	var runtime string
 	var concurrency int
 	var listLimit int
 	var timeout time.Duration
@@ -141,7 +159,8 @@ func main() {
 	flag.StringVar(&projectID, "project", "", "目标项目 id；为空时按 cwd 或当前目录选择")
 	flag.StringVar(&threadID, "thread", "", "指定已有 thread id；为空时按 -new 决定 thread/start 或 thread/list 最新项")
 	flag.StringVar(&model, "model", "", "显式指定 app-server model；为空时先读 model/list 的默认项")
-	flag.StringVar(&prompt, "prompt", "【ipad-ws-probe】请只回复 ok，用于验证 iPad WebSocket 链路。", "发送给 Codex 的探测消息")
+	flag.StringVar(&prompt, "prompt", "【ipad-ws-probe】请只回复 ok，用于验证 iPad WebSocket 链路。", "发送给目标 runtime 的探测消息")
+	flag.StringVar(&runtime, "runtime", "codex", "目标 runtime：codex 或 claude")
 	flag.IntVar(&concurrency, "concurrency", 1, "并发会话数，每个 worker 使用独立 WebSocket")
 	flag.IntVar(&listLimit, "list-limit", 20, "thread/list limit")
 	flag.DurationVar(&timeout, "timeout", 45*time.Second, "单个 JSON-RPC 请求超时")
@@ -174,24 +193,34 @@ func main() {
 	if err != nil {
 		fatalf("读取 app-server config 失败：%v", err)
 	}
-	if !cfg.Runtime.GatewayAvailable || strings.TrimSpace(cfg.GatewayWSURL) == "" {
-		fatalf("gateway 不可用：runtime=%+v", cfg.Runtime)
+	runtime = normalizeRuntimeID(runtime)
+	gatewayURL, channel, err := gatewayForRuntime(cfg, runtime)
+	if err != nil {
+		fatalf("gateway 不可用：runtime=%s err=%v", runtime, err)
 	}
 	selected, err := selectProject(cfg.Projects, cwd, projectID)
 	if err != nil {
 		fatalf("选择项目失败：%v", err)
 	}
-	fmt.Printf("probe target endpoint=%s gateway=%s projects=%d cwd=%s runtime_running=%t runtime_initialized=%t pending=%d\n",
+	if runtime == "claude" && goalGet {
+		// Claude v1 channel 明确标记 goals=false；probe 不主动调用未声明能力，避免把能力差异误判成链路失败。
+		goalGet = false
+	}
+	fmt.Printf("probe target endpoint=%s runtime=%s gateway=%s projects=%d cwd=%s runtime_running=%t runtime_initialized=%t pending=%d channel_protocol=%s lifecycle=%s experimental=%t\n",
 		endpoint,
-		cfg.GatewayWSURL,
+		runtime,
+		gatewayURL,
 		len(cfg.Projects),
 		selected.Path,
 		cfg.Runtime.Running,
 		cfg.Runtime.Initialized,
 		cfg.Runtime.PendingRequests,
+		channel.Protocol,
+		channel.Lifecycle,
+		channel.Experimental,
 	)
 	if modelsOnly {
-		models, err := listModels(ctx, cfg.GatewayWSURL, token, timeout)
+		models, err := listModels(ctx, gatewayURL, token, timeout)
 		if err != nil {
 			fatalf("model/list 失败：%v", err)
 		}
@@ -199,7 +228,7 @@ func main() {
 		return
 	}
 	if listOnly || strings.TrimSpace(findThreadPrefix) != "" {
-		threads, err := listThreads(ctx, cfg.GatewayWSURL, token, selected, listLimit, timeout)
+		threads, err := listThreads(ctx, gatewayURL, token, selected, listLimit, timeout)
 		if err != nil {
 			fatalf("thread/list 失败：%v", err)
 		}
@@ -224,7 +253,7 @@ func main() {
 	model = strings.TrimSpace(model)
 	var modelProvider string
 	if model == "" {
-		models, err := listModels(ctx, cfg.GatewayWSURL, token, timeout)
+		models, err := listModels(ctx, gatewayURL, token, timeout)
 		if err != nil {
 			fatalf("model/list 失败：%v", err)
 		}
@@ -250,7 +279,7 @@ func main() {
 			if concurrency > 1 {
 				workerPrompt = fmt.Sprintf("%s worker=%d nonce=%s", prompt, worker, shortNonce())
 			}
-			results[worker] = runWorker(ctx, worker, cfg.GatewayWSURL, token, selected, threadID, model, modelProvider, workerPrompt, startNew, goalGet, listLimit, timeout, listenAfterTurn)
+			results[worker] = runWorker(ctx, worker, gatewayURL, token, selected, threadID, model, modelProvider, workerPrompt, startNew, goalGet, listLimit, timeout, listenAfterTurn)
 		}(i)
 	}
 	wg.Wait()
@@ -708,6 +737,59 @@ func fetchAppServerConfig(ctx context.Context, endpoint string, token string) (a
 		return appServerConfig{}, err
 	}
 	return cfg, nil
+}
+
+func gatewayForRuntime(cfg appServerConfig, runtimeID string) (string, appServerChannel, error) {
+	runtimeID = normalizeRuntimeID(runtimeID)
+	for _, channel := range cfg.Channels {
+		if normalizeRuntimeID(firstNonEmpty(channel.RuntimeID, channel.ID, channel.Provider)) != runtimeID {
+			continue
+		}
+		if !channel.GatewayAvailable || strings.TrimSpace(channel.GatewayWSURL) == "" {
+			message := fmt.Sprintf("channel=%s unavailable", runtimeID)
+			if channel.Bridge.Status != "" {
+				message += " bridge_status=" + channel.Bridge.Status
+			}
+			if channel.Bridge.Error != "" {
+				message += " bridge_error=" + channel.Bridge.Error
+			}
+			if channel.Bridge.LastProbeError != "" {
+				message += " bridge_error=" + channel.Bridge.LastProbeError
+			}
+			return "", channel, errors.New(message)
+		}
+		return strings.TrimSpace(channel.GatewayWSURL), channel, nil
+	}
+	if runtimeID == "codex" && cfg.Runtime.GatewayAvailable && strings.TrimSpace(cfg.GatewayWSURL) != "" {
+		return strings.TrimSpace(cfg.GatewayWSURL), appServerChannel{
+			ID:               "codex",
+			RuntimeID:        "codex",
+			Protocol:         "app_server_jsonrpc_ws",
+			GatewayWSURL:     strings.TrimSpace(cfg.GatewayWSURL),
+			GatewayAvailable: true,
+		}, nil
+	}
+	return "", appServerChannel{}, fmt.Errorf("config 未返回 runtime=%s 的可用 channel", runtimeID)
+}
+
+func normalizeRuntimeID(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "codex", "openai", "codex_app_server", "codex-app-server":
+		return "codex"
+	case "claude", "anthropic", "claude_code", "claude-code", "claude_code_bridge", "claude-code-bridge":
+		return "claude"
+	default:
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func normalizedEndpoint(raw string) string {

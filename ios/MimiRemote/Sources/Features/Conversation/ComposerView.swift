@@ -1423,11 +1423,13 @@ struct ComposerView: View {
     private var modelOptionsMenu: some View {
         Menu {
             Button("默认") {
+                composerState.turnOptions.runtimeProvider = nil
                 composerState.turnOptions.model = nil
                 composerState.turnOptions.modelProvider = nil
             }
             ForEach(modelOptionsForMenu) { option in
                 Button(option.menuTitle) {
+                    composerState.turnOptions.runtimeProvider = option.runtimeProvider
                     composerState.turnOptions.model = option.model
                     composerState.turnOptions.modelProvider = option.provider
                 }
@@ -1627,7 +1629,9 @@ struct ComposerView: View {
             return defaultModelSummaryTitle
         }
         if let option = modelOptionsForMenu.first(where: { item in
-            item.model == model && (composerState.turnOptions.modelProvider == nil || item.provider == composerState.turnOptions.modelProvider)
+            item.model == model &&
+                item.runtimeProvider == composerState.turnOptions.runtimeProvider &&
+                (composerState.turnOptions.modelProvider == nil || item.provider == composerState.turnOptions.modelProvider)
         }) {
             return developerModeEnabled ? option.menuTitle : option.title
         }
@@ -1645,13 +1649,22 @@ struct ComposerView: View {
     }
 
     private var hasAdvancedTurnOptions: Bool {
-        composerState.turnOptions.config != nil ||
+        hasCustomRuntimeProvider ||
+            composerState.turnOptions.config != nil ||
             composerState.turnOptions.baseInstructions != nil ||
             composerState.turnOptions.developerInstructions != nil ||
             composerState.turnOptions.outputSchema != nil ||
             composerState.turnOptions.serviceName != nil ||
             composerState.turnOptions.sessionStartSource != nil ||
             composerState.turnOptions.threadSource != nil
+    }
+
+    private var hasCustomRuntimeProvider: Bool {
+        guard let runtime = composerState.turnOptions.runtimeProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !runtime.isEmpty else {
+            return false
+        }
+        return runtime != "codex" && runtime != "claude"
     }
 
     @ViewBuilder
@@ -3430,6 +3443,7 @@ private struct AdvancedTurnOptionsSheet: View {
         NavigationStack {
             Form {
                 Section("模型") {
+                    TextField("Runtime Provider", text: optionalStringBinding(\.runtimeProvider))
                     TextField("Model", text: optionalStringBinding(\.model))
                     TextField("Model Provider", text: optionalStringBinding(\.modelProvider))
                     TextField("Service Name", text: optionalStringBinding(\.serviceName))
@@ -3500,6 +3514,7 @@ private struct AdvancedTurnOptionsSheet: View {
     }
 
     private func clearAdvancedOptions() {
+        draft.runtimeProvider = nil
         draft.modelProvider = nil
         draft.config = nil
         draft.baseInstructions = nil

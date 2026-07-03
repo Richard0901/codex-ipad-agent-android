@@ -59,6 +59,7 @@ func (c *Checker) Run(ctx context.Context, checkPort bool) Results {
 	if c.needsCodexAppServerCheck() {
 		checks = append(checks, c.codexAppServerCheck(ctx))
 	}
+	checks = append(checks, c.claudeBridgeCheck(ctx))
 	if check := c.appServerGatewayCheck(); check.Name != "" {
 		checks = append(checks, check)
 	}
@@ -135,6 +136,25 @@ func (c *Checker) codexAppServerCheck(ctx context.Context) Check {
 		}
 	}
 	return Check{Name: "codex-app-server", OK: true, Message: "Codex app-server WebSocket 能力可用"}
+}
+
+func (c *Checker) claudeBridgeCheck(ctx context.Context) Check {
+	if !c.cfg.Claude.Enabled {
+		return Check{Name: "claude-bridge", OK: true, Message: "Claude Code experimental 通道未启用"}
+	}
+	bin := strings.TrimSpace(c.cfg.Claude.BridgeBin)
+	if bin == "" {
+		return Check{Name: "claude-bridge", OK: false, Message: "Claude bridge 未配置", Fix: "设置 claude.bridge_bin 或 AGENTD_CLAUDE_BRIDGE_BIN"}
+	}
+	if !commandExists(bin) {
+		return Check{Name: "claude-bridge", OK: false, Message: "未找到 Claude bridge", Fix: "安装 alleycat-claude-bridge，并把 claude.bridge_bin 配成绝对路径"}
+	}
+	runCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(runCtx, bin, "--version").Run(); err != nil {
+		return Check{Name: "claude-bridge", OK: true, Message: "Claude bridge 可执行；版本探测未返回标准 --version，跳过版本校验"}
+	}
+	return Check{Name: "claude-bridge", OK: true, Message: "Claude bridge 可执行"}
 }
 
 func isLoopbackListen(raw string) bool {

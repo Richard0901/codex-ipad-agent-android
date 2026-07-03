@@ -88,6 +88,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
     let title: String
     var status: String
     let source: String
+    let runtimeProvider: String?
     let resumeID: String?
     let createdAt: Date?
     var updatedAt: Date?
@@ -122,6 +123,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
         title: String,
         status: String,
         source: String,
+        runtimeProvider: String? = nil,
         resumeID: String?,
         createdAt: Date?,
         updatedAt: Date?,
@@ -143,6 +145,8 @@ struct AgentSession: Identifiable, Codable, Hashable {
         self.title = title
         self.status = status
         self.source = source
+        let normalizedRuntimeProvider = runtimeProvider?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.runtimeProvider = normalizedRuntimeProvider?.isEmpty == false ? normalizedRuntimeProvider : nil
         self.resumeID = resumeID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -170,6 +174,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
             title: row.title,
             status: row.status.rawValue,
             source: row.source,
+            runtimeProvider: row.runtimeProvider,
             resumeID: row.resumeID,
             createdAt: row.createdAt,
             updatedAt: row.updatedAt,
@@ -194,6 +199,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
         case title
         case status
         case source
+        case runtimeProvider = "runtime_provider"
         case resumeID = "resume_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -1726,6 +1732,7 @@ struct DataFlowSessionRow: Identifiable, Codable, Hashable {
     let title: String
     let status: SessionStatus
     let source: String
+    let runtimeProvider: String?
     let resumeID: String?
     let createdAt: Date?
     let updatedAt: Date?
@@ -1746,6 +1753,7 @@ struct DataFlowSessionRow: Identifiable, Codable, Hashable {
         case title
         case status
         case source
+        case runtimeProvider = "runtime_provider"
         case resumeID = "resume_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -1768,6 +1776,7 @@ struct DataFlowSessionRow: Identifiable, Codable, Hashable {
         self.title = try container.decodeIfPresent(String.self, forKey: .title) ?? "未命名会话"
         self.status = try container.decodeIfPresent(SessionStatus.self, forKey: .status) ?? .unknown
         self.source = try container.decodeIfPresent(String.self, forKey: .source) ?? "codex"
+        self.runtimeProvider = try container.decodeIfPresent(String.self, forKey: .runtimeProvider)
         self.resumeID = try container.decodeIfPresent(String.self, forKey: .resumeID)
         self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt)

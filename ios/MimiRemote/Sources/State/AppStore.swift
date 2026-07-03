@@ -220,8 +220,7 @@ final class AppStore: ObservableObject {
     private let defaultEndpoint = "http://127.0.0.1:8787"
     private let maxConnectionTestReportHistory = 20
     private let tokenStore = TokenStore()
-    private var directRuntime: CodexAppServerSessionRuntime?
-    private var directRuntimeIdentity: String?
+    private var runtimeBundlesByIdentity: [String: AppServerRuntimeBundle] = [:]
 
     init() {
         self.endpoint = UserDefaults.standard.string(forKey: endpointKey) ?? defaultEndpoint
@@ -242,14 +241,23 @@ final class AppStore: ObservableObject {
 
     func makeSessionStoreAPIClient() throws -> any SessionStoreAPIClient {
         let endpoint = try Self.validatedEndpoint(endpoint)
-        return CodexAppServerSessionAPIClient(runtime: runtime(endpoint: endpoint, token: token))
+        return CodexAppServerRuntimeRoutingSessionAPIClient(bundle: runtimeBundle(endpoint: endpoint, token: token))
     }
 
     func makeSessionWebSocketClient() -> any SessionWebSocketClient {
-        CodexAppServerSessionWebSocketClient(runtime: runtime(
+        MultiRuntimeSessionWebSocketClient(bundle: runtimeBundle(
             endpoint: AgentAPIClient.normalizedEndpoint(endpoint),
             token: token
         ))
+    }
+
+    func makeSessionWebSocketClient(for session: AgentSession) -> any SessionWebSocketClient {
+        let bundle = runtimeBundle(
+            endpoint: AgentAPIClient.normalizedEndpoint(endpoint),
+            token: token
+        )
+        bundle.routes.remember(session)
+        return MultiRuntimeSessionWebSocketClient(bundle: bundle)
     }
 
     func save(endpoint: String, token: String) throws {
@@ -660,19 +668,17 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func runtime(endpoint: String, token: String) -> CodexAppServerSessionRuntime {
+    private func runtimeBundle(endpoint: String, token: String) -> AppServerRuntimeBundle {
         let identity = "\(endpoint)\n\(token)"
-        if let directRuntime, directRuntimeIdentity == identity {
-            return directRuntime
+        if let bundle = runtimeBundlesByIdentity[identity] {
+            return bundle
         }
-        let runtime = CodexAppServerSessionRuntime(endpoint: endpoint, token: token)
-        directRuntime = runtime
-        directRuntimeIdentity = identity
-        return runtime
+        let bundle = AppServerRuntimeBundle(endpoint: endpoint, token: token)
+        runtimeBundlesByIdentity[identity] = bundle
+        return bundle
     }
 
     private func resetDirectRuntime() {
-        directRuntime = nil
-        directRuntimeIdentity = nil
+        runtimeBundlesByIdentity.removeAll()
     }
 }

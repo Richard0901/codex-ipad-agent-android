@@ -34,14 +34,91 @@ struct VoiceTranscriptionResponse: Decodable, Hashable {
 struct CodexAppServerConfigResponse: Codable {
     let gatewayWSURL: String
     let runtime: CodexAppServerRuntimeMetadata
+    let channels: [CodexAppServerChannelMetadata]
     let projects: [AgentProject]
     let policy: CodexAppServerPolicyMetadata
 
     enum CodingKeys: String, CodingKey {
         case gatewayWSURL = "gateway_ws_url"
         case runtime
+        case channels
         case projects
         case policy
+    }
+
+    init(
+        gatewayWSURL: String,
+        runtime: CodexAppServerRuntimeMetadata,
+        channels: [CodexAppServerChannelMetadata] = [],
+        projects: [AgentProject],
+        policy: CodexAppServerPolicyMetadata
+    ) {
+        self.gatewayWSURL = gatewayWSURL
+        self.runtime = runtime
+        self.channels = channels
+        self.projects = projects
+        self.policy = policy
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.gatewayWSURL = try container.decode(String.self, forKey: .gatewayWSURL)
+        self.runtime = try container.decode(CodexAppServerRuntimeMetadata.self, forKey: .runtime)
+        self.channels = try container.decodeIfPresent([CodexAppServerChannelMetadata].self, forKey: .channels) ?? []
+        self.projects = try container.decode([AgentProject].self, forKey: .projects)
+        self.policy = try container.decode(CodexAppServerPolicyMetadata.self, forKey: .policy)
+    }
+}
+
+struct CodexAppServerChannelMetadata: Codable, Hashable, Identifiable {
+    let id: String
+    let runtimeID: String?
+    let title: String
+    let provider: String
+    let type: String
+    let protocolName: String?
+    let gatewayWSURL: String
+    let gatewayAvailable: Bool
+    let managed: Bool
+    let experimental: Bool?
+    let lifecycle: String?
+    let bridge: CodexAppServerChannelBridgeMetadata?
+    let methods: [String]?
+    let capabilities: [String: Bool]?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case runtimeID = "runtime_id"
+        case title
+        case provider
+        case type
+        case protocolName = "protocol"
+        case gatewayWSURL = "gateway_ws_url"
+        case gatewayAvailable = "gateway_available"
+        case managed
+        case experimental
+        case lifecycle
+        case bridge
+        case methods
+        case capabilities
+    }
+}
+
+struct CodexAppServerChannelBridgeMetadata: Codable, Hashable {
+    let name: String?
+    let version: String?
+    let path: String?
+    let status: String?
+    let healthy: Bool?
+    let lastProbeError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case version
+        case path
+        case status
+        case healthy
+        case lastProbeError = "last_probe_error"
     }
 }
 
@@ -1525,6 +1602,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
         case `default`
     }
 
+    var runtimeProvider: String?
     var model: String?
     var modelProvider: String?
     var serviceTier: String?
@@ -1547,6 +1625,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
     var planGuidanceEnabled: Bool
 
     enum CodingKeys: String, CodingKey {
+        case runtimeProvider = "runtime_provider"
         case model
         case modelProvider = "model_provider"
         case serviceTier = "service_tier"
@@ -1569,6 +1648,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
     }
 
     init(
+        runtimeProvider: String? = nil,
         model: String? = CodexAppServerDefaults.model,
         modelProvider: String? = nil,
         serviceTier: String? = nil,
@@ -1589,6 +1669,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
         collaborationMode: CollaborationMode? = .default,
         planGuidanceEnabled: Bool = false
     ) {
+        self.runtimeProvider = runtimeProvider?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.model = model
         self.modelProvider = modelProvider
         self.serviceTier = serviceTier
@@ -1613,6 +1694,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
+            runtimeProvider: try container.decodeIfPresent(String.self, forKey: .runtimeProvider),
             model: try container.decodeIfPresent(String.self, forKey: .model),
             modelProvider: try container.decodeIfPresent(String.self, forKey: .modelProvider),
             serviceTier: try container.decodeIfPresent(String.self, forKey: .serviceTier),
@@ -1636,6 +1718,7 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
     }
 
     static let `default` = CodexAppServerTurnOptions(
+        runtimeProvider: nil,
         model: CodexAppServerDefaults.model,
         modelProvider: nil,
         serviceTier: nil,
@@ -1673,6 +1756,20 @@ struct CodexAppServerTurnOptions: Codable, Hashable {
         sanitized.threadSource = nil
         sanitized.collaborationMode = .default
         sanitized.planGuidanceEnabled = false
+        return sanitized
+    }
+
+    func sanitizedForRuntimePolicy() -> CodexAppServerTurnOptions {
+        var sanitized = self
+        guard sanitized.runtimeProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "claude" else {
+            return sanitized
+        }
+        // Claude v1 通过 per-connection bridge 执行；移动端必须在发出前把权限压到
+        // workspace-write/read-only，避免默认 fullAccess 被 gateway 拒绝，也避免旧草稿绕过 UI。
+        if sanitized.sandboxMode == .dangerFullAccess {
+            sanitized.sandboxMode = .workspaceWrite
+        }
+        sanitized.networkAccess = false
         return sanitized
     }
 
@@ -1856,6 +1953,7 @@ struct CodexAppServerModelOption: Codable, Hashable, Identifiable {
     let model: String
     let title: String
     let provider: String?
+    let runtimeProvider: String?
     let description: String?
     let isDefault: Bool
 
@@ -1863,6 +1961,7 @@ struct CodexAppServerModelOption: Codable, Hashable, Identifiable {
         id: String,
         title: String? = nil,
         provider: String? = nil,
+        runtimeProvider: String? = nil,
         description: String? = nil,
         isDefault: Bool = false
     ) {
@@ -1870,15 +1969,26 @@ struct CodexAppServerModelOption: Codable, Hashable, Identifiable {
         self.model = trimmedID
         self.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? trimmedID
         self.provider = provider?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        self.runtimeProvider = runtimeProvider?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.description = description?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.isDefault = isDefault
     }
 
     var id: String {
-        guard let provider else {
-            return model
-        }
-        return "\(model)@\(provider)"
+        [runtimeProvider, model, provider]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty }
+            .joined(separator: "@")
+    }
+
+    func withRuntimeProvider(_ runtimeProvider: String) -> CodexAppServerModelOption {
+        CodexAppServerModelOption(
+            id: model,
+            title: title,
+            provider: provider,
+            runtimeProvider: runtimeProvider,
+            description: description,
+            isDefault: isDefault
+        )
     }
 
     var menuTitle: String {
@@ -1963,6 +2073,7 @@ struct CodexAppServerModelOption: Codable, Hashable, Identifiable {
             id: id,
             title: firstString(in: object, keys: ["title", "label", "displayName", "display_name", "name"]),
             provider: firstString(in: object, keys: ["provider", "modelProvider", "model_provider"]),
+            runtimeProvider: firstString(in: object, keys: ["runtimeProvider", "runtime_provider", "runtime"]),
             description: firstString(in: object, keys: ["description", "summary"]),
             // app-server 历史返回里默认标记存在 camelCase 和 snake_case 两种形态。
             isDefault: object["isDefault"]?.boolValue ?? object["is_default"]?.boolValue ?? object["default"]?.boolValue ?? false

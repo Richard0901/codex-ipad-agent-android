@@ -892,6 +892,7 @@ final class ConversationDataFlowTests: XCTestCase {
     func testComposerStateCanSubmitWithStandardModeSanitizedOptions() throws {
         var composerState = ComposerState()
         composerState.draft = "用标准模式提交"
+        composerState.turnOptions.runtimeProvider = "claude"
         composerState.turnOptions.model = "gpt-5-codex"
         composerState.turnOptions.modelProvider = "openai"
         composerState.turnOptions.serviceTier = "priority"
@@ -916,6 +917,7 @@ final class ConversationDataFlowTests: XCTestCase {
         ))
         let options = submitted.payload.options
 
+        XCTAssertEqual(options.runtimeProvider, "claude")
         XCTAssertEqual(options.model, "gpt-5-codex")
         XCTAssertNil(options.modelProvider)
         XCTAssertEqual(options.serviceTier, "priority")
@@ -7470,8 +7472,41 @@ final class ConversationDataFlowTests: XCTestCase {
         // app-server turn/start 必填 model；iPad 发送前必须用 model/list 的默认项补齐，而不是省略。
         XCTAssertEqual(createPayload.turnOptions.model, "gpt-dynamic-default")
         XCTAssertEqual(createPayload.turnOptions.modelProvider, "openai")
+        XCTAssertNil(createPayload.turnOptions.runtimeProvider)
         XCTAssertEqual(createPayload.turnOptions.collaborationMode, .default)
         XCTAssertEqual(client.modelOptionsCallCount, 1)
+    }
+
+    func testDefaultModelResolutionCarriesRuntimeProviderBeforeCreate() async throws {
+        let project = makeProject(id: "proj_default_runtime_create")
+        let created = makeSession(id: "sess_default_runtime_create", projectID: project.id, title: "默认 Claude 模型", status: "running", source: "claude", runtimeProvider: "claude")
+        let options = [
+            CodexAppServerModelOption(id: "claude-sonnet", title: "Claude Sonnet", provider: "anthropic", runtimeProvider: "claude", isDefault: true)
+        ]
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            createSessionResponse: try makeCreateSessionResponse(session: created),
+            modelOptions: options
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.selectedProjectID = project.id
+        let accepted = await store.sendTurn(CodexAppServerTurnPayload(prompt: "检查 Claude 默认模型"))
+
+        XCTAssertTrue(accepted)
+        let createPayload = try XCTUnwrap(client.createPayloads.first)
+        XCTAssertEqual(createPayload.turnOptions.runtimeProvider, "claude")
+        XCTAssertEqual(createPayload.turnOptions.model, "claude-sonnet")
+        XCTAssertEqual(createPayload.turnOptions.modelProvider, "anthropic")
+        XCTAssertEqual(createPayload.turnOptions.sandboxMode, .workspaceWrite)
+        XCTAssertEqual(createPayload.turnOptions.networkAccess, false)
     }
 
     func testExplicitModelBypassesModelListResolutionBeforeCreate() async throws {
@@ -7503,6 +7538,40 @@ final class ConversationDataFlowTests: XCTestCase {
         let createPayload = try XCTUnwrap(client.createPayloads.first)
         XCTAssertEqual(createPayload.turnOptions.model, "gpt-user-selected")
         XCTAssertEqual(createPayload.turnOptions.modelProvider, "custom-provider")
+        XCTAssertEqual(client.modelOptionsCallCount, 0)
+    }
+
+    func testExplicitClaudeModelClampsDangerFullAccessBeforeCreate() async throws {
+        let project = makeProject(id: "proj_explicit_claude_clamp")
+        let created = makeSession(id: "sess_explicit_claude_clamp", projectID: project.id, title: "Claude Clamp", status: "running", source: "claude", runtimeProvider: "claude")
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            createSessionResponse: try makeCreateSessionResponse(session: created)
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.selectedProjectID = project.id
+        var options = CodexAppServerTurnOptions.default
+        options.runtimeProvider = "claude"
+        options.model = "claude-sonnet"
+        options.modelProvider = "anthropic"
+        options.sandboxMode = .dangerFullAccess
+        options.networkAccess = true
+        let accepted = await store.sendTurn(CodexAppServerTurnPayload(prompt: "使用 Claude", options: options))
+
+        XCTAssertTrue(accepted)
+        let createPayload = try XCTUnwrap(client.createPayloads.first)
+        XCTAssertEqual(createPayload.turnOptions.runtimeProvider, "claude")
+        XCTAssertEqual(createPayload.turnOptions.model, "claude-sonnet")
+        XCTAssertEqual(createPayload.turnOptions.sandboxMode, .workspaceWrite)
+        XCTAssertEqual(createPayload.turnOptions.networkAccess, false)
         XCTAssertEqual(client.modelOptionsCallCount, 0)
     }
 
@@ -11029,6 +11098,50 @@ extension ConversationDataFlowTests {
         socket.disconnect()
     }
 
+    func testRuntimeCreateSessionKeepsModelOnTurnOnly() async throws {
+        let project = AgentProject(id: "proj_thread_model_guard", name: "Thread Model Guard", path: "/tmp/thread-model-guard")
+        let transport = FakeCodexAppServerTransport()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { transport },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+        var options = CodexAppServerTurnOptions.default
+        options.model = "gpt-selected"
+        options.modelProvider = "openai"
+
+        let createTask = Task {
+            try await client.createSession(CreateSessionRequest(
+                projectID: project.id,
+                prompt: "模型只属于 turn",
+                input: [.text("模型只属于 turn")],
+                turnOptions: options,
+                resumeID: "",
+                clientMessageID: "client_thread_model_guard"
+            ))
+        }
+
+        let initialize = try await waitForFakeAppServerRequest(transport, method: "initialize")
+        transportResponse(transport, id: initialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+        let threadStart = try await waitForFakeAppServerRequest(transport, method: "thread/start", after: 1)
+        let threadParams = try XCTUnwrap(threadStart.params?.objectValue)
+        XCTAssertNil(threadParams["model"], "thread/start 不应携带 model，避免回归旧 app-server 校验问题")
+        XCTAssertNil(threadParams["modelProvider"])
+        transportResponse(transport, id: threadStart.id, result: #"{"thread":{"id":"thr_thread_model_guard","sessionId":"thr_thread_model_guard","preview":"模型只属于 turn","ephemeral":false,"createdAt":1780491000,"updatedAt":1780491001,"status":{"type":"idle"},"path":null,"cwd":"/tmp/thread-model-guard","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"模型只属于 turn","turns":[]}}"#)
+
+        let turnStart = try await waitForFakeAppServerRequest(transport, method: "turn/start", after: 3)
+        let turnParams = try XCTUnwrap(turnStart.params?.objectValue)
+        XCTAssertEqual(turnParams["model"]?.stringValue, "gpt-selected")
+        XCTAssertNil(turnParams["modelProvider"])
+        transportResponse(transport, id: turnStart.id, result: #"{"turn":{"id":"turn_thread_model_guard","items":[],"itemsView":{"type":"complete"},"status":"inProgress","error":null,"startedAt":1780491002,"completedAt":null,"durationMs":null}}"#)
+
+        let created = try await createTask.value
+        XCTAssertEqual(created.session.id, "thr_thread_model_guard")
+        XCTAssertEqual(created.session.activeTurnID, "turn_thread_model_guard")
+    }
+
     func testDirectRuntimeBackfillsActiveTurnFromDeltaBeforeGuidance() async throws {
         let project = AgentProject(id: "proj_delta_guidance", name: "Delta Guidance", path: "/tmp/delta-guidance")
         let transport = FakeCodexAppServerTransport()
@@ -11136,6 +11249,121 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(options.first?.model, "gpt-stale-default")
         XCTAssertEqual(options.first?.provider, "openai")
         XCTAssertEqual(options.first?.isDefault, true)
+    }
+
+    func testMultiRuntimeModelOptionsKeepCodexWhenClaudeFails() async throws {
+        let project = AgentProject(id: "proj_multi_models", name: "Multi Models", path: "/tmp/multi-models")
+        let config = makeDirectAppServerConfig(project: project, channels: [makeClaudeChannelMetadata()])
+        let codexTransport = FakeCodexAppServerTransport()
+        let claudeTransport = FakeCodexAppServerTransport()
+        let codex = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            runtimeProvider: "codex",
+            transportFactory: { codexTransport },
+            configProvider: { config }
+        )
+        let claude = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            runtimeProvider: "claude",
+            transportFactory: { claudeTransport },
+            configProvider: { config }
+        )
+        let client = MultiRuntimeSessionAPIClient(codexRuntime: codex, claudeRuntime: claude)
+
+        let modelTask = Task { try await client.modelOptions() }
+        let codexInitialize = try await waitForFakeAppServerRequest(codexTransport, method: "initialize")
+        transportResponse(codexTransport, id: codexInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+        let codexModelList = try await waitForFakeAppServerRequest(codexTransport, method: "model/list", after: 1)
+        transportResponse(codexTransport, id: codexModelList.id, result: #"{"models":[{"id":"gpt-live","title":"GPT Live","provider":"openai","isDefault":true}]}"#)
+
+        let claudeInitialize = try await waitForFakeAppServerRequest(claudeTransport, method: "initialize")
+        transportResponse(claudeTransport, id: claudeInitialize.id, result: #"{"userAgent":"fake-claude","platformFamily":"macos"}"#)
+        let claudeModelList = try await waitForFakeAppServerRequest(claudeTransport, method: "model/list", after: 1)
+        transportErrorResponse(claudeTransport, id: claudeModelList.id, code: -32000, message: "Claude CLI not logged in")
+
+        let options = try await modelTask.value
+        XCTAssertEqual(options.map(\.model), ["gpt-live"])
+        XCTAssertEqual(options.first?.runtimeProvider, "codex")
+    }
+
+    func testMultiRuntimeCompositeCursorCarriesBuffersAndContinuesRuntimeCursors() async throws {
+        let project = AgentProject(id: "proj_multi_cursor", name: "Multi Cursor", path: "/tmp/multi-cursor")
+        let config = makeDirectAppServerConfig(project: project, channels: [makeClaudeChannelMetadata()])
+        let codexTransport = FakeCodexAppServerTransport()
+        let claudeTransport = FakeCodexAppServerTransport()
+        let client = MultiRuntimeSessionAPIClient(
+            codexRuntime: CodexAppServerSessionRuntime(
+                endpoint: "http://127.0.0.1:8787",
+                token: "outer-token",
+                runtimeProvider: "codex",
+                transportFactory: { codexTransport },
+                configProvider: { config }
+            ),
+            claudeRuntime: CodexAppServerSessionRuntime(
+                endpoint: "http://127.0.0.1:8787",
+                token: "outer-token",
+                runtimeProvider: "claude",
+                transportFactory: { claudeTransport },
+                configProvider: { config }
+            )
+        )
+
+        let firstTask = Task { try await client.sessionsPage(projectID: project.id, cursor: nil, limit: 2) }
+        let codexInitialize = try await waitForFakeAppServerRequest(codexTransport, method: "initialize")
+        transportResponse(codexTransport, id: codexInitialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+        let codexFirstList = try await waitForFakeAppServerRequest(codexTransport, method: "thread/list", after: 1)
+        let codexFirstParams = try XCTUnwrap(codexFirstList.params?.objectValue)
+        XCTAssertNil(codexFirstParams["cursor"]?.stringValue)
+        XCTAssertEqual(codexFirstParams["limit"]?.intValue, 2)
+        transportResponse(codexTransport, id: codexFirstList.id, result: appServerThreadListResult([
+            appServerThreadJSON(id: "codex-new", cwd: project.path, source: "appServer", updatedAt: 1780493000),
+            appServerThreadJSON(id: "codex-buffer", cwd: project.path, source: "appServer", updatedAt: 1780491000)
+        ], nextCursor: "codex-next"))
+
+        let claudeInitialize = try await waitForFakeAppServerRequest(claudeTransport, method: "initialize")
+        transportResponse(claudeTransport, id: claudeInitialize.id, result: #"{"userAgent":"fake-claude","platformFamily":"macos"}"#)
+        let claudeFirstList = try await waitForFakeAppServerRequest(claudeTransport, method: "thread/list", after: 1)
+        transportResponse(claudeTransport, id: claudeFirstList.id, result: appServerThreadListResult([
+            appServerThreadJSON(id: "claude-new", cwd: project.path, source: "claude", updatedAt: 1780492000),
+            appServerThreadJSON(id: "claude-buffer", cwd: project.path, source: "claude", updatedAt: 1780490000)
+        ], nextCursor: "claude-next"))
+
+        let firstPage = try await firstTask.value
+        XCTAssertEqual(firstPage.sessions.map(\.id), ["codex-new", "claude-new"])
+        let firstCursor = try XCTUnwrap(firstPage.nextCursor)
+
+        // 第二页来自 composite cursor 中的 buffer，不应重复请求任一 runtime。
+        let codexMessageCount = (await codexTransport.sentMessages()).count
+        let claudeMessageCount = (await claudeTransport.sentMessages()).count
+        let secondPage = try await client.sessionsPage(projectID: project.id, cursor: firstCursor, limit: 2)
+        XCTAssertEqual(secondPage.sessions.map(\.id), ["codex-buffer", "claude-buffer"])
+        let codexMessageCountAfterBuffer = (await codexTransport.sentMessages()).count
+        let claudeMessageCountAfterBuffer = (await claudeTransport.sentMessages()).count
+        XCTAssertEqual(codexMessageCountAfterBuffer, codexMessageCount)
+        XCTAssertEqual(claudeMessageCountAfterBuffer, claudeMessageCount)
+        let secondCursor = try XCTUnwrap(secondPage.nextCursor)
+
+        let thirdTask = Task { try await client.sessionsPage(projectID: project.id, cursor: secondCursor, limit: 2) }
+        let codexSecondList = try await waitForFakeAppServerRequest(codexTransport, method: "thread/list", after: codexMessageCount)
+        let codexSecondParams = try XCTUnwrap(codexSecondList.params?.objectValue)
+        XCTAssertEqual(codexSecondParams["cursor"]?.stringValue, "codex-next")
+        transportResponse(codexTransport, id: codexSecondList.id, result: appServerThreadListResult([
+            appServerThreadJSON(id: "codex-old", cwd: project.path, source: "appServer", updatedAt: 1780489000)
+        ], nextCursor: nil))
+
+        let claudeSecondList = try await waitForFakeAppServerRequest(claudeTransport, method: "thread/list", after: claudeMessageCount)
+        let claudeSecondParams = try XCTUnwrap(claudeSecondList.params?.objectValue)
+        XCTAssertEqual(claudeSecondParams["cursor"]?.stringValue, "claude-next")
+        transportResponse(claudeTransport, id: claudeSecondList.id, result: appServerThreadListResult([
+            appServerThreadJSON(id: "claude-old", cwd: project.path, source: "claude", updatedAt: 1780488000)
+        ], nextCursor: nil))
+
+        let thirdPage = try await thirdTask.value
+        XCTAssertEqual(thirdPage.sessions.map(\.id), ["codex-old", "claude-old"])
+        XCTAssertFalse(thirdPage.hasMore)
+        XCTAssertNil(thirdPage.nextCursor)
     }
 
     func testDirectRuntimeRetriesNewSessionAfterStaleInitializationError() async throws {
@@ -11751,7 +11979,7 @@ extension ConversationDataFlowTests {
         let threadStart = try decodeAppServerRequest(threadMessages[2])
         XCTAssertEqual(threadStart.method, "thread/start")
         let threadParams = try XCTUnwrap(threadStart.params?.objectValue)
-        XCTAssertNil(threadParams["model"])
+        XCTAssertNil(threadParams["model"]?.stringValue)
         XCTAssertNil(threadParams["modelProvider"])
         XCTAssertEqual(threadParams["serviceTier"]?.stringValue, "priority")
         XCTAssertEqual(threadParams["approvalPolicy"]?.stringValue, "on-failure")
@@ -11785,6 +12013,62 @@ extension ConversationDataFlowTests {
         let created = try await createTask.value
         XCTAssertEqual(created.session.id, "thr_direct_rich")
         XCTAssertEqual(created.session.activeTurnID, "turn_direct_rich")
+    }
+
+    func testClaudeRuntimeCreateSessionResponseUsesClaudeGatewayURL() async throws {
+        let project = AgentProject(id: "proj_claude_url", name: "Claude URL", path: "/tmp/claude-url")
+        let transport = FakeCodexAppServerTransport()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            runtimeProvider: "claude",
+            transportFactory: { transport },
+            configProvider: {
+                makeDirectAppServerConfig(project: project, channels: [
+                    CodexAppServerChannelMetadata(
+                        id: "claude",
+                        runtimeID: "claude",
+                        title: "Claude Code",
+                        provider: "anthropic",
+                        type: "claude_code_bridge",
+                        protocolName: "app_server_jsonrpc_stdio_v1",
+                        gatewayWSURL: "ws://127.0.0.1:7777/api/app-server/ws?runtime=claude",
+                        gatewayAvailable: true,
+                        managed: false,
+                        experimental: true,
+                        lifecycle: "per_connection",
+                        bridge: nil,
+                        methods: ["initialize", "initialized", "thread/start"],
+                        capabilities: ["history": true]
+                    )
+                ])
+            }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+
+        let createTask = Task {
+            try await client.createSession(CreateSessionRequest(
+                projectID: project.id,
+                prompt: "",
+                input: [],
+                turnOptions: .default,
+                resumeID: "",
+                clientMessageID: nil
+            ))
+        }
+
+        let initializeMessages = try await waitForFakeAppServerMessages(transport, count: 1)
+        let initialize = try decodeAppServerRequest(initializeMessages[0])
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: initialize.id)),"result":{"userAgent":"fake-claude","platformFamily":"macos"}}"#)
+
+        let threadMessages = try await waitForFakeAppServerMessages(transport, count: 3)
+        let threadStart = try decodeAppServerRequest(threadMessages[2])
+        XCTAssertEqual(threadStart.method, "thread/start")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: threadStart.id)),"result":{"thread":{"id":"thr_claude_url","sessionId":"thr_claude_url","preview":"","ephemeral":false,"createdAt":1780490400,"updatedAt":1780490401,"status":{"type":"idle"},"path":null,"cwd":"/tmp/claude-url","cliVersion":"0.0.0","source":"claude","threadSource":"user","name":"Claude URL","turns":[]}}}"#)
+
+        let created = try await createTask.value
+        XCTAssertEqual(created.session.runtimeProvider, "claude")
+        XCTAssertTrue(created.wsURL.contains("runtime=claude"), "Claude create wsURL 应包含 runtime=claude，got \(created.wsURL)")
     }
 
     func testDirectRuntimeClearsApprovalWhenResolvedNotificationOnlyHasRequestID() async throws {
@@ -12843,7 +13127,7 @@ extension ConversationDataFlowTests {
         let threadStartMessages = try await waitForFakeAppServerMessages(transport, count: 5)
         let threadStart = try decodeAppServerRequest(threadStartMessages[4])
         XCTAssertEqual(threadStart.method, "thread/start")
-        XCTAssertNil(threadStart.params?.objectValue?["model"])
+        XCTAssertNil(threadStart.params?.objectValue?["model"]?.stringValue)
         XCTAssertNil(threadStart.params?.objectValue?["modelProvider"])
         transport.enqueue(#"{"id":\#(try jsonFragment(for: threadStart.id)),"result":{"thread":{"id":"thr_store_direct","sessionId":"thr_store_direct","preview":"帮我验收 direct Store","ephemeral":false,"modelProvider":"openai","createdAt":1780490100,"updatedAt":1780490101,"status":{"type":"idle"},"path":null,"cwd":"/tmp/store-direct","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"Store 直连","turns":[]}}}"#)
 
@@ -12977,7 +13261,7 @@ extension ConversationDataFlowTests {
         let resumeRequest = try decodeAppServerRequest(resumeRequestMessages[7])
         XCTAssertEqual(resumeRequest.method, "thread/resume")
         XCTAssertEqual(resumeRequest.params?.objectValue?["threadId"]?.stringValue, "thr_idle_history")
-        XCTAssertNil(resumeRequest.params?.objectValue?["model"])
+        XCTAssertNil(resumeRequest.params?.objectValue?["model"]?.stringValue)
         XCTAssertNil(resumeRequest.params?.objectValue?["modelProvider"])
         transport.enqueue(#"{"id":\#(try jsonFragment(for: resumeRequest.id)),"result":{"thread":{"id":"thr_idle_history","sessionId":"thr_idle_history","preview":"继续排查","ephemeral":false,"modelProvider":"openai","createdAt":1780490300,"updatedAt":1780490302,"status":{"type":"idle"},"path":null,"cwd":"/tmp/direct-history","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"历史 idle","turns":[]}}}"#)
 
@@ -13838,7 +14122,8 @@ private func waitForRuntimeConnectionToBecomeUnavailable(
 private func makeDirectAppServerConfig(
     project: AgentProject,
     gatewayAvailable: Bool = true,
-    allowedMethods: [String]? = nil
+    allowedMethods: [String]? = nil,
+    channels: [CodexAppServerChannelMetadata] = []
 ) -> CodexAppServerConfigResponse {
     let defaultAllowedMethods = ["initialize", "initialized", "thread/list", "thread/start", "thread/read", "turn/start", "turn/interrupt"]
     return CodexAppServerConfigResponse(
@@ -13853,12 +14138,43 @@ private func makeDirectAppServerConfig(
         initialized: false,
         pendingRequests: 0
         ),
+        channels: channels,
         projects: [project],
         policy: CodexAppServerPolicyMetadata(
             allowedMethods: allowedMethods ?? defaultAllowedMethods,
             projectsSource: "agentd_allowlist"
         )
     )
+}
+
+private func makeClaudeChannelMetadata() -> CodexAppServerChannelMetadata {
+    CodexAppServerChannelMetadata(
+        id: "claude",
+        runtimeID: "claude",
+        title: "Claude Code",
+        provider: "anthropic",
+        type: "claude_code_bridge",
+        protocolName: "app_server_jsonrpc_stdio_v1",
+        gatewayWSURL: "ws://127.0.0.1:7777/api/app-server/ws?runtime=claude",
+        gatewayAvailable: true,
+        managed: false,
+        experimental: true,
+        lifecycle: "per_connection",
+        bridge: nil,
+        methods: ["initialize", "initialized", "thread/list", "thread/start", "turn/start", "model/list"],
+        capabilities: ["history": true, "streaming": true]
+    )
+}
+
+private func appServerThreadListResult(_ rows: [String], nextCursor: String?) -> String {
+    let encodedCursor = nextCursor.map { #","nextCursor":"\#($0)""# } ?? #","nextCursor":null"#
+    return #"{"data":[\#(rows.joined(separator: ","))]\#(encodedCursor)}"#
+}
+
+private func appServerThreadJSON(id: String, cwd: String, source: String, updatedAt: Int) -> String {
+    """
+    {"id":"\(id)","sessionId":"\(id)","preview":"\(id)","ephemeral":false,"modelProvider":"openai","createdAt":\(updatedAt - 10),"updatedAt":\(updatedAt),"status":{"type":"idle"},"path":null,"cwd":"\(cwd)","cliVersion":"0.0.0","source":"\(source)","threadSource":"user","name":"\(id)","turns":[]}
+    """
 }
 
 private func decodeAppServerRequest(_ text: String) throws -> CodexAppServerRequest {
@@ -14022,8 +14338,9 @@ private func makeSession(
     projectID: String,
     title: String,
     status: String,
-    source: String,
-    resumeID: String? = nil,
+	source: String,
+	runtimeProvider: String? = nil,
+	resumeID: String? = nil,
     preview: String? = nil,
     activeTurnID: TurnID? = nil,
     updatedAt: Date = Date(timeIntervalSince1970: 2)
@@ -14034,9 +14351,10 @@ private func makeSession(
         project: projectID,
         dir: "/tmp/\(projectID)",
         title: title,
-        status: status,
-        source: source,
-        resumeID: resumeID,
+	status: status,
+	source: source,
+	runtimeProvider: runtimeProvider,
+	resumeID: resumeID,
         createdAt: Date(timeIntervalSince1970: 1),
         updatedAt: updatedAt,
         preview: preview,
