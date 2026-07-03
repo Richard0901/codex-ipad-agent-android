@@ -91,6 +91,10 @@ actor CodexAppServerSessionRuntime {
     // 只给列表请求放宽超时，避免影响 turn/start 等交互命令的失败反馈速度。
     private let threadListRequestTimeout: TimeInterval = 60
     private let requestTimeout: TimeInterval
+    // 每个 thread 最近一次收到上游实时通知的时间。thread/list、thread/read 偶发把正在执行的
+    // turn 误读成 idle/notLoaded；刚收到过实时信号的 thread 在这个时间窗内不接受 history 降级。
+    private var lastLiveSignalAtBySessionID: [SessionID: Date] = [:]
+    private let historyDowngradeGraceInterval: TimeInterval = 15
 
     init(
         endpoint: String,
@@ -1285,6 +1289,7 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func handle(_ notification: CodexAppServerNotification) {
+        recordLiveSignal(from: notification)
         updateContext(from: notification)
         let resolved = clearResolvedServerRequest(from: notification)
         guard let event = projector.project(notification) else {
@@ -1425,6 +1430,30 @@ actor CodexAppServerSessionRuntime {
             return candidate
         }
         return "decline"
+    }
+
+    // 只有仍在活动的通知才算实时信号；表示回合/线程结束或权威状态变化的通知不能算，
+    // 否则会把合法的 history 降级也挡掉。
+    private func recordLiveSignal(from notification: CodexAppServerNotification) {
+        switch notification.method {
+        case "turn/completed", "thread/closed", "thread/status/changed":
+            return
+        default:
+            break
+        }
+        let params = notification.params?.objectValue ?? [:]
+        guard let threadID = params["threadId"]?.stringValue
+            ?? params["thread"]?.objectValue?["id"]?.stringValue else {
+            return
+        }
+        lastLiveSignalAtBySessionID[threadID] = Date()
+    }
+
+    private func hasRecentLiveSignal(sessionID: SessionID) -> Bool {
+        guard let at = lastLiveSignalAtBySessionID[sessionID] else {
+            return false
+        }
+        return Date().timeIntervalSince(at) < historyDowngradeGraceInterval
     }
 
     private func emit(_ event: AgentEvent) {
@@ -1670,10 +1699,13 @@ actor CodexAppServerSessionRuntime {
         } else {
             activeTurnID = cached?.activeTurnID
         }
-        // 列表/历史读偶发把正在执行的 turn 读成 history。只有本地确实记着一个进行中的 turn（activeTurnID
-        // 非空）时，才在这一瞬间保留运行态，避免侧栏角标抖动；没有活跃 turn 的残留态（例如被放弃的审批
-        // 等待）必须允许权威 history 把它降级，否则 stale 审批态会一直挂着清不掉。
-        let effectiveStatus = (activeTurnID != nil && status == "history") ? (cached?.status ?? status) : status
+        // 列表/历史读偶发把正在执行的 turn 读成 history。本地记着进行中的 turn（activeTurnID 非空）、
+        // 或刚在时间窗内收到过该 thread 的实时通知时，才在这一瞬间保留运行态，避免侧栏角标抖动；
+        // 没有活跃迹象的残留态（例如被放弃的审批等待）必须允许权威 history 把它降级，
+        // 否则 stale 审批态会一直挂着清不掉。
+        let shouldKeepCachedStatus = status == "history"
+            && (activeTurnID != nil || hasRecentLiveSignal(sessionID: id))
+        let effectiveStatus = shouldKeepCachedStatus ? (cached?.status ?? status) : status
         let goal = thread["goal"]?.objectValue.flatMap { ThreadGoal(object: $0) } ?? cached?.goal
         let context = sessionContext(
             from: thread,

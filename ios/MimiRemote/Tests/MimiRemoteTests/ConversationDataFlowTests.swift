@@ -3572,15 +3572,28 @@ final class ConversationDataFlowTests: XCTestCase {
         conversationStore.setHistory([
             CodexHistoryMessage(id: "rollout:1", role: "assistant", content: "已加载", createdAt: Date(timeIntervalSince1970: 1))
         ], sessionID: history.id)
+        var sockets: [MockWebSocketClient] = []
         let store = SessionStore(
             appStore: AppStore(),
             conversationStore: conversationStore,
             logStore: LogStore(),
-            clientFactory: { MockSessionStoreClient(projects: [project], sessions: [history]) }
+            clientFactory: { MockSessionStoreClient(projects: [project], sessions: [history]) },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
         )
         store.selectedProjectID = project.id
         store.selectedSessionID = history.id
         await store.toggleProjectExpansion(project)
+        // 历史会话的稳态现在包含事件订阅：先完整选择一次并让 socket 连上，
+        // 再排空静默补拉任务，进入稳态后重复点选才是 no-op。
+        await store.selectSession(history)
+        sockets.last?.emitStatus(.connected)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
         var publishCount = 0
         var cancellables: Set<AnyCancellable> = []
 
@@ -3594,6 +3607,7 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(publishCount, 0)
         XCTAssertEqual(store.selectedProjectID, project.id)
         XCTAssertEqual(store.selectedSessionID, history.id)
+        XCTAssertEqual(sockets.count, 1)
     }
 
     func testSelectingHistorySessionKeepsSelectionWhenMessages404() async {
@@ -5545,8 +5559,10 @@ final class ConversationDataFlowTests: XCTestCase {
 
         XCTAssertTrue(didSend)
         XCTAssertEqual(client.requestedMessageSessionIDs, [resumed.id])
-        XCTAssertEqual(sockets.count, 1)
-        XCTAssertEqual(sockets[0].replayBufferedEventsByConnect, [false])
+        // 选中历史会话时就建立事件订阅（sockets[0]），resume 成功后切到运行连接（sockets[1]）；
+        // 两次连接都已有 canonical 历史快照，都不应要求完整回放。
+        XCTAssertEqual(sockets.count, 2)
+        XCTAssertEqual(sockets.map(\.replayBufferedEventsByConnect), [[false], [false]])
         XCTAssertTrue(conversationStore.hasLoadedHistory(sessionID: resumed.id))
         XCTAssertEqual(conversationStore.messages(for: resumed.id).filter { $0.kind == .reasoningSummary }.map(\.content), ["历史中已有的过程卡"])
     }
@@ -6386,7 +6402,7 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertFalse(conversationStore.messages(for: running.id).contains { $0.content == "已继续这个历史会话。" })
     }
 
-    func testWebSocketReconnectStopsCleanlyWhenSnapshotIsNoLongerRunning() async throws {
+    func testWebSocketReconnectKeepsSubscriptionWhenSnapshotIsNoLongerRunning() async throws {
         let project = makeProject(id: "proj_ws_ended_reconnect")
         let running = makeSession(id: "sess_ws_ended_reconnect", projectID: project.id, title: "运行中", status: "running", source: "codex")
         let ended = makeSession(id: running.id, projectID: project.id, title: "已结束", status: "history", source: "codex", resumeID: running.id)
@@ -6421,13 +6437,16 @@ final class ConversationDataFlowTests: XCTestCase {
         try await waitForWebSocketStatus(.connected, store: store)
         sockets[0].emitStatus(.failed("turn completed while reconnecting"))
 
-        for _ in 0..<80 where store.webSocketStatus != .disconnected {
+        // 快照显示会话不再运行时不能一次性放弃重连：单次 thread/read 可能是上游刚恢复时的
+        // idle 误读。订阅对历史会话同样有效，重连应继续并恢复事件通道。
+        for _ in 0..<80 where sockets.count < 2 {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        XCTAssertEqual(sockets.count, 1)
-        XCTAssertEqual(store.webSocketStatus, .disconnected)
-        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(sockets.count, 2)
         XCTAssertEqual(store.selectedSession?.status, "history")
+        sockets[1].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        XCTAssertNil(store.errorMessage)
     }
 
     func testWebSocketReconnectRefreshesSnapshotWithLatestEventWatermark() async throws {
@@ -12346,22 +12365,35 @@ extension ConversationDataFlowTests {
         transport.enqueue(#"{"id":\#(try jsonFragment(for: historyRead.id)),"result":{"thread":{"id":"thr_idle_history","sessionId":"thr_idle_history","preview":"历史 idle","ephemeral":false,"modelProvider":"openai","createdAt":1780490300,"updatedAt":1780490301,"status":{"type":"idle"},"path":null,"cwd":"/tmp/direct-history","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"历史 idle","turns":[]}}}"#)
         await selectTask.value
 
+        // 选中历史会话现在也会立即建立事件订阅：先在当前连接补一次 thread/resume。
+        let subscriptionResumeMessages = try await waitForFakeAppServerMessages(transport, count: 5)
+        let subscriptionResume = try decodeAppServerRequest(subscriptionResumeMessages[4])
+        XCTAssertEqual(subscriptionResume.method, "thread/resume")
+        XCTAssertEqual(subscriptionResume.params?.objectValue?["threadId"]?.stringValue, "thr_idle_history")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: subscriptionResume.id)),"result":{"thread":{"id":"thr_idle_history","sessionId":"thr_idle_history","preview":"历史 idle","ephemeral":false,"modelProvider":"openai","createdAt":1780490300,"updatedAt":1780490301,"status":{"type":"idle"},"path":null,"cwd":"/tmp/direct-history","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"历史 idle","turns":[]}}}"#)
+
+        // 订阅建立后会异步刷新 thread 目标；回空结果即可。
+        let goalMessages = try await waitForFakeAppServerMessages(transport, count: 6)
+        let goalGet = try decodeAppServerRequest(goalMessages[5])
+        XCTAssertEqual(goalGet.method, "thread/goal/get")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: goalGet.id)),"result":{}}"#)
+
         let sendTask = Task { await store.sendPrompt("继续排查") }
-        let resumeMessages = try await waitForFakeAppServerMessages(transport, count: 5)
-        let modelList = try decodeAppServerRequest(resumeMessages[4])
+        let resumeMessages = try await waitForFakeAppServerMessages(transport, count: 7)
+        let modelList = try decodeAppServerRequest(resumeMessages[6])
         XCTAssertEqual(modelList.method, "model/list")
         transport.enqueue(#"{"id":\#(try jsonFragment(for: modelList.id)),"result":{"models":[{"id":"gpt-history-default","name":"History Default","provider":"openai","isDefault":true}]}}"#)
 
-        let resumeRequestMessages = try await waitForFakeAppServerMessages(transport, count: 6)
-        let resumeRequest = try decodeAppServerRequest(resumeRequestMessages[5])
+        let resumeRequestMessages = try await waitForFakeAppServerMessages(transport, count: 8)
+        let resumeRequest = try decodeAppServerRequest(resumeRequestMessages[7])
         XCTAssertEqual(resumeRequest.method, "thread/resume")
         XCTAssertEqual(resumeRequest.params?.objectValue?["threadId"]?.stringValue, "thr_idle_history")
         XCTAssertNil(resumeRequest.params?.objectValue?["model"])
         XCTAssertNil(resumeRequest.params?.objectValue?["modelProvider"])
         transport.enqueue(#"{"id":\#(try jsonFragment(for: resumeRequest.id)),"result":{"thread":{"id":"thr_idle_history","sessionId":"thr_idle_history","preview":"继续排查","ephemeral":false,"modelProvider":"openai","createdAt":1780490300,"updatedAt":1780490302,"status":{"type":"idle"},"path":null,"cwd":"/tmp/direct-history","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"历史 idle","turns":[]}}}"#)
 
-        let turnMessages = try await waitForFakeAppServerMessages(transport, count: 7)
-        let turnStart = try decodeAppServerRequest(turnMessages[6])
+        let turnMessages = try await waitForFakeAppServerMessages(transport, count: 9)
+        let turnStart = try decodeAppServerRequest(turnMessages[8])
         XCTAssertEqual(turnStart.method, "turn/start")
         XCTAssertEqual(turnStart.params?.objectValue?["threadId"]?.stringValue, "thr_idle_history")
         XCTAssertEqual(turnStart.params?.objectValue?["clientUserMessageId"]?.stringValue?.isEmpty, false)

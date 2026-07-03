@@ -2253,9 +2253,23 @@ final class SessionStore: ObservableObject {
             // 随后的 WebSocket 只回放状态级 backlog，避免消息区把旧 delta 逐条直播。
             let didRefreshHistory = await loadHistory(for: session)
             connectWebSocket(session, replayBufferedEvents: !didRefreshHistory)
-        } else {
+        } else if session.isRunning {
+            // 其他客户端正在运行：只读观察，不建立可发送的事件通道。
             await loadHistoryIfNeeded(for: session)
             disconnectWebSocket()
+        } else {
+            // 非运行会话有两种可能：真历史，或被瞬时 idle 误读降级的运行会话。
+            // 已有缓存时先展示缓存、后台静默补一次最新页；同时仍建立事件订阅——
+            // thread/resume 的权威状态能立即纠正误判，之后的 turn 事件也能直接推进来，
+            // 不再要求手动刷新。
+            let didRefreshHistory: Bool
+            if conversationStore.hasLoadedHistory(sessionID: session.id) {
+                scheduleQuietHistoryRefresh(for: session)
+                didRefreshHistory = true
+            } else {
+                didRefreshHistory = await loadHistoryIfNeeded(for: session)
+            }
+            connectWebSocket(session, replayBufferedEvents: !didRefreshHistory, allowNonRunning: true)
         }
     }
 
@@ -2812,33 +2826,56 @@ final class SessionStore: ObservableObject {
         return await loadHistory(for: session)
     }
 
+    // quiet 模式用于切回已加载会话时的后台补拉：界面继续展示缓存，不出进度条，
+    // 失败也不打扰用户（下一次轮询/手动刷新仍会兜底）。
     @discardableResult
-    private func loadHistory(for session: AgentSession) async -> Bool {
+    private func loadHistory(for session: AgentSession, quiet: Bool = false) async -> Bool {
         let requestToken = beginHistoryPageRequest(sessionID: session.id)
-        setHistoryLoadProgress(sessionID: session.id, title: "准备加载历史", fraction: 0.08)
+        if !quiet {
+            setHistoryLoadProgress(sessionID: session.id, title: "准备加载历史", fraction: 0.08)
+        }
         defer {
-            clearHistoryLoadProgress(sessionID: session.id)
+            if !quiet {
+                clearHistoryLoadProgress(sessionID: session.id)
+            }
         }
         do {
             let client = try clientFactory()
             // 历史文件可能很大，移动端默认只加载最近一段上下文，避免打开会话时卡住 UI。
-            setHistoryLoadProgress(sessionID: session.id, title: "请求最近消息", fraction: 0.32)
+            if !quiet {
+                setHistoryLoadProgress(sessionID: session.id, title: "请求最近消息", fraction: 0.32)
+            }
             let page = try await client.messagesPage(sessionID: session.id, before: nil, limit: historyPageLimit)
             guard isCurrentHistoryPageRequest(sessionID: session.id, token: requestToken) else {
                 return false
             }
-            setHistoryLoadProgress(sessionID: session.id, title: "解析历史消息", fraction: 0.74)
+            if !quiet {
+                setHistoryLoadProgress(sessionID: session.id, title: "解析历史消息", fraction: 0.74)
+            }
             ingestHistoryContext(page.context, fallbackSessionID: session.id)
             conversationStore.setHistory(page.messages, sessionID: session.id)
-            setHistoryLoadProgress(sessionID: session.id, title: "更新界面", fraction: 0.94)
+            if !quiet {
+                setHistoryLoadProgress(sessionID: session.id, title: "更新界面", fraction: 0.94)
+            }
             updateHistoryPageState(sessionID: session.id, page: page, preserveExistingCursorOnEmptyPage: true)
             return true
         } catch {
             guard isCurrentHistoryPageRequest(sessionID: session.id, token: requestToken) else {
                 return false
             }
-            setStatusMessage("历史消息读取失败：\(error.localizedDescription)")
+            if !quiet {
+                setStatusMessage("历史消息读取失败：\(error.localizedDescription)")
+            }
             return false
+        }
+    }
+
+    private func scheduleQuietHistoryRefresh(for session: AgentSession) {
+        Task { [weak self] in
+            guard let self, self.selectedSessionID == session.id else {
+                return
+            }
+            await self.loadHistory(for: session, quiet: true)
         }
     }
 
@@ -2992,6 +3029,11 @@ final class SessionStore: ObservableObject {
             } else if !canControlSession(session) {
                 disconnectWebSocket()
             }
+        } else if autoAttach {
+            // 非运行会话回前台也重新订阅：连接重建后 resume 的权威状态能纠正误判，
+            // 期间完成的输出走状态级回放 + 静默补拉，不再依赖手动刷新。
+            connectWebSocket(session, replayBufferedEvents: false, allowNonRunning: true)
+            scheduleQuietHistoryRefresh(for: session)
         } else if connectedSessionID != nil {
             disconnectWebSocket()
         }
@@ -3656,9 +3698,12 @@ final class SessionStore: ObservableObject {
     private func connectWebSocket(
         _ session: AgentSession,
         isReconnectAttempt: Bool = false,
-        replayBufferedEvents: Bool = true
+        replayBufferedEvents: Bool = true,
+        allowNonRunning: Bool = false
     ) {
-        guard session.isRunning else {
+        // allowNonRunning：非运行会话的订阅同样有价值——thread/resume 会带回权威状态
+        // 纠正被误降级的会话，后续 turn 事件也能实时推进来。
+        guard session.isRunning || allowNonRunning else {
             return
         }
         if !isReconnectAttempt {
@@ -3883,9 +3928,11 @@ final class SessionStore: ObservableObject {
     }
 
     private func shouldAutoReconnectWebSocket(sessionID: SessionID) -> Bool {
+        // 不再要求 isRunning：状态可能刚被瞬时 idle 误读降级，订阅对历史会话同样有效；
+        // 只要还是当前选中的会话就继续自动重连。
         guard connectedSessionID == sessionID,
               selectedSessionID == sessionID,
-              sessionsByID[sessionID]?.isRunning == true,
+              sessionsByID[sessionID] != nil,
               appStore.isConfigured else {
             return false
         }
@@ -3894,8 +3941,7 @@ final class SessionStore: ObservableObject {
 
     private func scheduleWebSocketReconnect(sessionID: SessionID, reason: String) {
         guard selectedSessionID == sessionID,
-              let session = sessionsByID[sessionID],
-              session.isRunning else {
+              sessionsByID[sessionID] != nil else {
             setWebSocketStatus(.failed(reason))
             setErrorMessage(reason)
             return
@@ -3909,7 +3955,7 @@ final class SessionStore: ObservableObject {
         setErrorMessage("WebSocket 断开，正在自动重连：\(reason)")
         setStatusMessage("WebSocket 第 \(attempt) 次重连")
 
-        // 重连任务只服务当前选中的 running session；切项目/停止/返回列表都会取消它。
+        // 重连任务只服务当前选中的会话；切项目/停止/返回列表都会取消它。
         webSocketReconnectTask = Task { [weak self] in
             if delay > 0 {
                 do {
@@ -3940,28 +3986,17 @@ final class SessionStore: ObservableObject {
     private func runScheduledWebSocketReconnect(sessionID: SessionID, attempt: Int) async {
         guard selectedSessionID == sessionID,
               webSocketReconnectAttemptBySessionID[sessionID] == attempt,
-              let latestSession = sessionsByID[sessionID],
-              latestSession.isRunning else {
+              let latestSession = sessionsByID[sessionID] else {
             return
         }
         let refreshedSession = await refreshSessionSnapshotBeforeReconnect(sessionID: sessionID) ?? latestSession
         guard selectedSessionID == sessionID else {
             return
         }
-        guard refreshedSession.isRunning else {
-            finishWebSocketReconnectForEndedSession(sessionID: sessionID)
-            return
-        }
-        connectWebSocket(refreshedSession, isReconnectAttempt: true)
-    }
-
-    private func finishWebSocketReconnectForEndedSession(sessionID: SessionID) {
-        webSocketReconnectAttemptBySessionID.removeValue(forKey: sessionID)
-        clearPendingApprovalDecisions(sessionID: sessionID)
-        clearForegroundActivity(sessionID: sessionID)
-        setWebSocketStatus(.disconnected)
-        setErrorMessage(nil)
-        setStatusMessage("会话已结束，已停止 WebSocket 重连")
+        // 快照可能在上游刚恢复时把运行中的 turn 误读成 idle；不能据此一次性放弃重连。
+        // 订阅对历史会话同样有效：resume 后权威状态自行纠正，turn 真结束也会由
+        // turn/completed 事件如实呈现。
+        connectWebSocket(refreshedSession, isReconnectAttempt: true, allowNonRunning: true)
     }
 
     private func refreshSessionSnapshotBeforeReconnect(sessionID: SessionID) async -> AgentSession? {
@@ -4368,14 +4403,16 @@ final class SessionStore: ObservableObject {
     }
 
     private func isNoOpHistorySelection(_ session: AgentSession) -> Bool {
+        // 历史会话的稳态是"已订阅事件 + 已加载缓存"；重复点选同一会话时不再重建连接、
+        // 也不重复静默刷新（订阅本身会把新内容推进来）。
         selectedSessionID == session.id
             && selectedProjectID == session.projectID
             && !session.isRunning
             && conversationStore.hasLoadedHistory(sessionID: session.id)
             && errorMessage == nil
-            && connectedSessionID == nil
-            && webSocket == nil
-            && webSocketStatus == .disconnected
+            && connectedSessionID == session.id
+            && webSocket != nil
+            && webSocketStatus == .connected
     }
 
     private func setProjectsIfChanged(_ value: [AgentProject]) {
