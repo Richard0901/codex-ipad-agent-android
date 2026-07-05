@@ -161,6 +161,91 @@ final class ConversationSnapshotTests: XCTestCase {
         )
     }
 
+    func testComposerStatusTrayCrowdedState() async {
+        let view = await makeComposerStatusTrayCrowdedView(width: 1024, height: 768)
+
+        assertSnapshot(
+            of: view,
+            as: .image(precision: 0.98, layout: .fixed(width: 1024, height: 768))
+        )
+    }
+
+    func testComposerStatusTrayCrowdedCompactWidth() async {
+        let view = await makeComposerStatusTrayCrowdedView(width: 420, height: 768)
+
+        assertSnapshot(
+            of: view,
+            as: .image(precision: 0.98, layout: .fixed(width: 420, height: 768))
+        )
+    }
+
+    private func makeComposerStatusTrayCrowdedView(width: CGFloat, height: CGFloat) async -> some View {
+        let project = AgentProject(id: "tray-project", name: "tray-project", path: "/Users/me/code/tray-project")
+        let sessionID = "crowded"
+        let threadID = "thread-\(sessionID)"
+        let goal = ThreadGoal(
+            threadID: threadID,
+            objective: "你是 Mimi Remote 的多 Agent 产品研发团队主控，需要把目标、接管和额度状态压缩到输入框上方。",
+            status: .active,
+            tokenBudget: 12_000_000,
+            tokensUsed: 10_200_000,
+            timeUsedSeconds: 25_740,
+            createdAt: snapshotMessageDate,
+            updatedAt: snapshotMessageDate
+        )
+        let session = makeSnapshotSession(
+            id: sessionID,
+            project: project,
+            title: "Composer 状态托盘",
+            status: "running",
+            preview: "验证接管、额度和目标同时出现时的底部 composer 布局。",
+            activeTurnID: "turn-crowded",
+            rateLimit: RateLimitSummary(limitName: "Codex", primaryUsedPercent: 85, primaryResetsAt: 1_782_883_260),
+            goal: goal
+        )
+        let conversationStore = ConversationStore()
+        conversationStore.applyAssistantDelta(
+            AgentDelta(
+                text: "这条消息用于把 composer 推到真实会话底部；状态托盘应该保持紧凑，不要把输入框挤出首屏。",
+                role: .assistant,
+                kind: .message
+            ),
+            metadata: AgentEventMetadata(
+                seq: 1,
+                sessionID: sessionID,
+                turnID: "turn-crowded",
+                itemID: "item-crowded",
+                messageID: nil,
+                clientMessageID: nil,
+                revision: 1,
+                createdAt: snapshotMessageDate
+            ),
+            fallbackSessionID: sessionID
+        )
+        let themeStore = makeThemeStore()
+        let sessionStore = SessionStore(
+            appStore: AppStore(),
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            recentWorkspaceStore: makeRecentWorkspaceStore(
+                workspaces: [AgentWorkspace(project: project, lastOpenedAt: Date(timeIntervalSince1970: 10))],
+                endpoint: AppStore().endpoint
+            ),
+            clientFactory: {
+                SnapshotSessionAPIClient(projects: [project], sessions: [session])
+            }
+        )
+        await sessionStore.refreshAll(autoAttach: false)
+        await sessionStore.toggleProjectExpansion(project)
+        sessionStore.selectedSessionID = sessionID
+
+        return ConversationView()
+            .environmentObject(sessionStore)
+            .environmentObject(conversationStore)
+            .environmentObject(themeStore)
+            .frame(width: width, height: height)
+    }
+
     func testProjectSessionDashboard() async {
         let project = AgentProject(id: "mimi-remote", name: "mimi-remote", path: "/Users/me/code/mimi-remote")
         let themeStore = makeThemeStore()
@@ -275,7 +360,8 @@ final class ConversationSnapshotTests: XCTestCase {
         activeTurnID: TurnID? = nil,
         usage: UsageSummary? = nil,
         rateLimit: RateLimitSummary? = nil,
-        pendingApproval: ApprovalSummary? = nil
+        pendingApproval: ApprovalSummary? = nil,
+        goal: ThreadGoal? = nil
     ) -> AgentSession {
         AgentSession(
             id: id,
@@ -294,7 +380,8 @@ final class ConversationSnapshotTests: XCTestCase {
             revision: 3,
             usage: usage,
             rateLimit: rateLimit,
-            pendingApproval: pendingApproval
+            pendingApproval: pendingApproval,
+            goal: goal
         )
     }
 }

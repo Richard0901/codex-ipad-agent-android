@@ -163,6 +163,112 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertFalse(normal.isTimestampFallback)
     }
 
+    func testStreamingAssistantDeltaRefreshesLatestTimestamp() throws {
+        let store = ConversationStore()
+        let sessionID = "sess_stream_timestamp"
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let latestAt = Date(timeIntervalSince1970: 1_090)
+        let baseMetadata = AgentEventMetadata(
+            seq: 1,
+            sessionID: sessionID,
+            turnID: "turn_stream_timestamp",
+            itemID: "item_stream_timestamp",
+            messageID: "message_stream_timestamp",
+            clientMessageID: nil,
+            revision: 1,
+            createdAt: startedAt
+        )
+        store.applyAssistantDelta(
+            AgentDelta(text: "第一段", role: .assistant, kind: .message),
+            metadata: baseMetadata,
+            fallbackSessionID: sessionID
+        )
+        store.applyAssistantDelta(
+            AgentDelta(text: "第二段", role: .assistant, kind: .message),
+            metadata: AgentEventMetadata(
+                seq: 2,
+                sessionID: sessionID,
+                turnID: "turn_stream_timestamp",
+                itemID: "item_stream_timestamp",
+                messageID: "message_stream_timestamp",
+                clientMessageID: nil,
+                revision: 2,
+                createdAt: latestAt
+            ),
+            fallbackSessionID: sessionID
+        )
+        store.appendSystem("flush pending delta", sessionID: sessionID)
+
+        let assistant = try XCTUnwrap(store.messages(for: sessionID).first { $0.role == .assistant })
+        XCTAssertEqual(assistant.content, "第一段第二段")
+        XCTAssertEqual(assistant.createdAt, startedAt)
+        XCTAssertEqual(assistant.updatedAt, latestAt)
+        XCTAssertTrue(assistant.timestampCaptionText.contains("最近"))
+    }
+
+    func testHistoryHydrationKeepsLiveActivityPayloadWhenSnapshotLacksPayload() throws {
+        let store = ConversationStore()
+        let sessionID = "sess_activity_payload_merge"
+        let turnID = "turn_activity_payload_merge"
+        let itemID = "cmd_activity_payload_merge"
+        let item: [String: CodexAppServerJSONValue] = [
+            "type": .string("commandExecution"),
+            "id": .string(itemID),
+            "command": .string("go test ./..."),
+            "cwd": .string("/tmp/activity"),
+            "status": .string("completed"),
+            "commandActions": .array([.object(["name": .string("search"), "query": .string("ConversationStore")])]),
+            "aggregatedOutput": .string("ok"),
+            "exitCode": .int(0)
+        ]
+        let payload = try XCTUnwrap(ConversationActivityPayload(item: item))
+        let stableID = "appserver:\(turnID):\(itemID)"
+        let createdAt = Date(timeIntervalSince1970: 100)
+        store.completeMessage(
+            AgentMessage(
+                id: stableID,
+                sessionID: sessionID,
+                turnID: turnID,
+                itemID: itemID,
+                role: .system,
+                kind: .commandSummary,
+                content: payload.summaryText,
+                activityPayload: payload,
+                createdAt: createdAt,
+                revision: 1
+            ),
+            metadata: AgentEventMetadata(
+                seq: 1,
+                sessionID: sessionID,
+                turnID: turnID,
+                itemID: itemID,
+                messageID: stableID,
+                clientMessageID: nil,
+                revision: 1,
+                createdAt: createdAt
+            ),
+            fallbackSessionID: sessionID
+        )
+
+        store.setHistory([
+            CodexHistoryMessage(
+                id: stableID,
+                role: "system",
+                kind: .commandSummary,
+                content: payload.summaryText,
+                createdAt: createdAt,
+                turnID: turnID,
+                itemID: itemID,
+                timelineOrdinal: 1
+            )
+        ], sessionID: sessionID)
+
+        let message = try XCTUnwrap(store.messages(for: sessionID).first)
+        XCTAssertEqual(message.activityPayload, payload)
+        XCTAssertEqual(message.activityPayload?.displayTitle, "搜索 ConversationStore")
+        XCTAssertEqual(message.content, payload.summaryText)
+    }
+
     func testSessionDisplayStatusUsesForegroundAndGoalProgress() {
         let goal = ThreadGoal(
             threadID: "session-1",
@@ -6126,7 +6232,7 @@ final class ConversationDataFlowTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 20_000_000)
 
         XCTAssertEqual(client.requestedMessageCursors, [nil])
-        XCTAssertEqual(client.requestedMessageLimits, [120])
+        XCTAssertEqual(client.requestedMessageLimits, [20])
         XCTAssertEqual(client.requestedMessageLoadModes, [.full])
         XCTAssertEqual(store.selectedHistorySavingsNotice?.kind, .loadingFull)
 
@@ -6168,7 +6274,7 @@ final class ConversationDataFlowTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 20_000_000)
 
         XCTAssertEqual(client.requestedMessageCursors, [nil])
-        XCTAssertEqual(client.requestedMessageLimits, [120])
+        XCTAssertEqual(client.requestedMessageLimits, [20])
         XCTAssertEqual(client.requestedMessageLoadModes, [.full])
         XCTAssertEqual(store.selectedHistorySavingsNotice?.kind, .loadingFull)
 
@@ -6259,6 +6365,89 @@ final class ConversationDataFlowTests: XCTestCase {
 
         XCTAssertEqual(conversationStore.messages(for: history.id).map(\.content), ["完整历史"])
         XCTAssertNil(store.selectedHistorySavingsNotice)
+    }
+
+    func testFullHistoryPolicyFailureAutomaticallyLoadsSummaryHistory() async {
+        let project = makeProject(id: "proj_1")
+        let history = makeSession(id: "codex_auto_summary", projectID: project.id, title: "大历史自动降级", status: "history", source: "codex", resumeID: "large")
+        let client = OrderedHistoryPageClient(projects: [project], page: SessionsPage(sessions: [history]))
+        let conversationStore = ConversationStore()
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        let selectTask = Task { await store.selectSession(history) }
+        await client.waitForHistoryRequestCount(1)
+
+        XCTAssertEqual(client.requestedMessageLimits, [20])
+        XCTAssertEqual(client.requestedMessageLoadModes, [.full])
+        client.failHistoryRequest(at: 0, with: historyPolicyError(reason: "history_response_too_large"))
+
+        await client.waitForHistoryRequestCount(2)
+        XCTAssertEqual(client.requestedMessageLimits, [20, 60])
+        XCTAssertEqual(client.requestedMessageLoadModes, [.full, .economy])
+        XCTAssertEqual(store.selectedHistorySavingsNotice?.kind, .loadingSummary)
+
+        client.resolveHistoryRequest(
+            at: 1,
+            with: HistoryMessagesPage(
+                messages: [
+                    CodexHistoryMessage(id: "rollout:auto-summary", role: "assistant", content: "自动缩略历史", createdAt: Date(timeIntervalSince1970: 20))
+                ],
+                loadMode: .economy,
+                notice: "当前显示缩略历史。"
+            )
+        )
+        await selectTask.value
+
+        XCTAssertEqual(conversationStore.messages(for: history.id).map(\.content), ["自动缩略历史"])
+        XCTAssertEqual(store.selectedHistorySavingsNotice?.kind, .summaryLoaded)
+    }
+
+    func testSummaryHistoryPolicyFailureRetriesOnceAfterRetryAfter() async {
+        let project = makeProject(id: "proj_1")
+        let history = makeSession(id: "codex_summary_retry", projectID: project.id, title: "缩略重试", status: "history", source: "codex", resumeID: "summary-retry")
+        let client = OrderedHistoryPageClient(projects: [project], page: SessionsPage(sessions: [history]))
+        let conversationStore = ConversationStore()
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        let selectTask = Task { await store.selectSession(history) }
+        await client.waitForHistoryRequestCount(1)
+
+        client.failHistoryRequest(at: 0, with: historyPolicyError(reason: "history_response_too_large"))
+        await client.waitForHistoryRequestCount(2)
+
+        client.failHistoryRequest(at: 1, with: historyPolicyError(reason: "history_budget_limited", retryAfterMs: 1))
+        await client.waitForHistoryRequestCount(3)
+
+        XCTAssertEqual(client.requestedMessageLoadModes, [.full, .economy, .economy])
+        XCTAssertEqual(client.requestedMessageLimits, [20, 60, 60])
+        XCTAssertEqual(store.selectedHistorySavingsNotice?.kind, .loadingSummary)
+
+        client.resolveHistoryRequest(
+            at: 2,
+            with: HistoryMessagesPage(
+                messages: [
+                    CodexHistoryMessage(id: "rollout:summary-retry", role: "assistant", content: "重试后的缩略历史", createdAt: Date(timeIntervalSince1970: 30))
+                ],
+                loadMode: .economy,
+                notice: "当前显示缩略历史。"
+            )
+        )
+        await selectTask.value
+
+        XCTAssertEqual(conversationStore.messages(for: history.id).map(\.content), ["重试后的缩略历史"])
+        XCTAssertEqual(store.selectedHistorySavingsNotice?.kind, .summaryLoaded)
     }
 
     func testLoadEarlierHistoryMergesOlderMessagePage() async {
@@ -10539,7 +10728,7 @@ private final class OrderedHistoryPageClient: SessionStoreAPIClient {
     private var requestedMessageCursorsStorage: [String?] = []
     private var requestedMessageLimitsStorage: [Int?] = []
     private var requestedMessageLoadModesStorage: [HistoryMessagesPage.LoadMode] = []
-    private var historyContinuations: [CheckedContinuation<HistoryMessagesPage, Never>?] = []
+    private var historyContinuations: [CheckedContinuation<HistoryMessagesPage, Error>?] = []
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
 
     init(projects: [AgentProject], page: SessionsPage) {
@@ -10610,7 +10799,7 @@ private final class OrderedHistoryPageClient: SessionStoreAPIClient {
         limit: Int?,
         loadMode: HistoryMessagesPage.LoadMode
     ) async throws -> HistoryMessagesPage {
-        await withCheckedContinuation { continuation in
+        try await withCheckedThrowingContinuation { continuation in
             let waiters = appendHistoryRequest(before: before, limit: limit, loadMode: loadMode, continuation: continuation)
             waiters.forEach { $0.resume() }
         }
@@ -10638,11 +10827,24 @@ private final class OrderedHistoryPageClient: SessionStoreAPIClient {
         continuation.resume(returning: page)
     }
 
+    func failHistoryRequest(
+        at index: Int,
+        with error: Error,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let continuation = takeHistoryContinuation(at: index) else {
+            XCTFail("No pending history request at index \(index)", file: file, line: line)
+            return
+        }
+        continuation.resume(throwing: error)
+    }
+
     private func appendHistoryRequest(
         before: String?,
         limit: Int?,
         loadMode: HistoryMessagesPage.LoadMode,
-        continuation: CheckedContinuation<HistoryMessagesPage, Never>
+        continuation: CheckedContinuation<HistoryMessagesPage, Error>
     ) -> [CheckedContinuation<Void, Never>] {
         lock.lock()
         defer {
@@ -10670,7 +10872,7 @@ private final class OrderedHistoryPageClient: SessionStoreAPIClient {
         return false
     }
 
-    private func takeHistoryContinuation(at index: Int) -> CheckedContinuation<HistoryMessagesPage, Never>? {
+    private func takeHistoryContinuation(at index: Int) -> CheckedContinuation<HistoryMessagesPage, Error>? {
         lock.lock()
         defer {
             lock.unlock()
@@ -12400,6 +12602,45 @@ extension ConversationDataFlowTests {
         XCTAssertFalse(itemAssistant.isTimestampFallback)
     }
 
+    func testDirectRuntimeStampsActiveSnapshotItemsWithReadTime() async throws {
+        let project = AgentProject(id: "proj_hist_active_time", name: "Hist Active", path: "/tmp/hist-active")
+        let transport = FakeCodexAppServerTransport()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { transport },
+            configProvider: { makeDirectAppServerConfig(project: project) }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+
+        let pageTask = Task {
+            try await client.messagesPage(sessionID: "thr_hist_active_time", before: nil, limit: 10)
+        }
+
+        let initialize = try await waitForFakeAppServerRequest(transport, method: "initialize")
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: initialize.id)),"result":{"userAgent":"fake-codex","platformFamily":"macos"}}"#)
+
+        let read = try await waitForFakeAppServerRequest(transport, method: "thread/read")
+        let lowerBound = Date()
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: read.id)),"result":{"thread":{"id":"thr_hist_active_time","sessionId":"thr_hist_active_time","preview":"active time","ephemeral":false,"modelProvider":"openai","createdAt":1780490000,"updatedAt":1780490001,"status":{"type":"active"},"path":null,"cwd":"/tmp/hist-active","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"active time","turns":[{"id":"turn_live_time","startedAt":1780490000,"status":"inProgress","items":[{"type":"userMessage","id":"user_live","content":[{"type":"text","text":"继续观察"}]},{"type":"commandExecution","id":"cmd_live","command":"go test ./...","status":"running"},{"type":"commandExecution","id":"cmd_failed","command":"xcodebuild test","status":"failed"},{"type":"agentMessage","id":"assistant_live","text":"还在输出日志","phase":"final_answer"}]}]}}}"#)
+
+        let page = try await pageTask.value
+        let upperBound = Date()
+        let user = try XCTUnwrap(page.messages.first { $0.content == "继续观察" })
+        let command = try XCTUnwrap(page.messages.first { $0.content.contains("go test ./...") })
+        let failedCommand = try XCTUnwrap(page.messages.first { $0.content.contains("xcodebuild test") })
+        let assistant = try XCTUnwrap(page.messages.first { $0.content == "还在输出日志" })
+
+        XCTAssertNil(user.updatedAt)
+        XCTAssertNil(failedCommand.updatedAt)
+        for message in [command, assistant] {
+            let updatedAt = try XCTUnwrap(message.updatedAt)
+            XCTAssertGreaterThan(updatedAt, try XCTUnwrap(message.createdAt))
+            XCTAssertGreaterThanOrEqual(updatedAt.timeIntervalSince1970, lowerBound.addingTimeInterval(-1).timeIntervalSince1970)
+            XCTAssertLessThanOrEqual(updatedAt.timeIntervalSince1970, upperBound.addingTimeInterval(1).timeIntervalSince1970)
+        }
+    }
+
     func testDirectRuntimeMarksMissingHistoryTimestampsAsFallback() async throws {
         let project = AgentProject(id: "proj_hist_fallback", name: "Hist Fallback", path: "/tmp/hist-fallback")
         let transport = FakeCodexAppServerTransport()
@@ -12660,6 +12901,18 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(page.messages.map(\.role), ["user", "system", "system", "system", "system", "assistant"])
         XCTAssertEqual(page.messages.map(\.kind), [.message, .reasoningSummary, .plan, .reasoningSummary, .commandSummary, .message])
         XCTAssertEqual(page.messages.last?.createdAt, Date(timeIntervalSince1970: 1780490134))
+        let historyCommand = try XCTUnwrap(page.messages.first { $0.itemID == "cmd_processed" })
+        XCTAssertEqual(historyCommand.activityPayload?.category, .runCommand)
+        XCTAssertEqual(historyCommand.activityPayload?.displayTitle, "运行 echo joke")
+
+        var projector = CodexAppServerEventProjector()
+        let liveCommand = try decodeAppServerNotification(#"{"method":"item/completed","params":{"threadId":"thr_processed","turnId":"turn_processed","item":{"type":"commandExecution","id":"cmd_processed","command":"echo joke","cwd":"/tmp/processed","processId":null,"source":"exec","status":"completed","commandActions":[],"aggregatedOutput":"ok","exitCode":0,"durationMs":1000}}}"#)
+        if case .processItemCompleted(let liveMessage, _, _) = try XCTUnwrap(projector.project(liveCommand)) {
+            XCTAssertEqual(liveMessage.content, historyCommand.content)
+            XCTAssertEqual(liveMessage.activityPayload, historyCommand.activityPayload)
+        } else {
+            XCTFail("Expected live command process item")
+        }
 
         let conversationStore = ConversationStore()
         conversationStore.setHistory(page.messages, sessionID: "thr_processed")
@@ -13573,12 +13826,16 @@ extension ConversationDataFlowTests {
             XCTFail("Expected plan processItemCompleted")
         }
 
-        let commandCompleted = try decodeAppServerNotification(#"{"method":"item/completed","params":{"threadId":"thr_demo","turnId":"turn_demo","item":{"type":"commandExecution","id":"cmd_1","command":"go test ./...","cwd":"/tmp/demo","status":"completed","aggregatedOutput":"ok","exitCode":0}}}"#)
+        let commandCompleted = try decodeAppServerNotification(#"{"method":"item/completed","params":{"threadId":"thr_demo","turnId":"turn_demo","item":{"type":"commandExecution","id":"cmd_1","command":"go test ./...","cwd":"/tmp/demo","status":"completed","commandActions":[{"name":"read","path":"README.md"}],"aggregatedOutput":"ok","exitCode":0}}}"#)
         if case .processItemCompleted(let message, let context, _) = try XCTUnwrap(projector.project(commandCompleted)) {
             XCTAssertEqual(message.role, .system)
             XCTAssertEqual(message.kind, .commandSummary)
             XCTAssertTrue(message.content.contains("命令：go test ./..."))
             XCTAssertTrue(message.content.contains("输出：\nok"))
+            XCTAssertEqual(message.activityPayload?.category, .runCommand)
+            XCTAssertEqual(message.activityPayload?.displayTitle, "查看 README.md")
+            XCTAssertEqual(message.activityPayload?.cwd, "/tmp/demo")
+            XCTAssertEqual(message.activityPayload?.exitCode, 0)
             XCTAssertEqual(context?.tasks.first?.kind, "command")
             XCTAssertEqual(context?.tasks.first?.status, "completed")
         } else {
@@ -13590,6 +13847,8 @@ extension ConversationDataFlowTests {
             XCTAssertEqual(message.role, .system)
             XCTAssertEqual(message.kind, .commandSummary)
             XCTAssertEqual(message.content, "工具：browser.open\n状态：completed")
+            XCTAssertEqual(message.activityPayload?.category, .toolCall)
+            XCTAssertEqual(message.activityPayload?.displayTitle, "browser.open")
             XCTAssertEqual(context?.tasks.first?.kind, "dynamic_tool")
             XCTAssertEqual(context?.tasks.first?.title, "browser.open")
             XCTAssertEqual(context?.tasks.first?.status, "completed")
@@ -13814,8 +14073,19 @@ extension ConversationDataFlowTests {
         XCTAssertFalse(display.isNearLimit)
         XCTAssertFalse(display.isExhausted)
 
+        let eightyPercent = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: RateLimitSummary(primaryUsedPercent: 80), now: now))
+        XCTAssertFalse(eightyPercent.isNearLimit)
+        let almostNearLimit = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: RateLimitSummary(primaryUsedPercent: 84), now: now))
+        XCTAssertFalse(almostNearLimit.isNearLimit)
         let nearLimit = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: RateLimitSummary(primaryUsedPercent: 85), now: now))
         XCTAssertTrue(nearLimit.isNearLimit)
+
+        let exhaustedLimit = RateLimitSummary(limitName: "Codex", primaryUsedPercent: 100, primaryResetsAt: resetEpoch)
+        let exhaustedDisplay = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: exhaustedLimit, now: now))
+        XCTAssertTrue(exhaustedDisplay.isExhausted)
+        let exhaustedNotice = try XCTUnwrap(CodexQuotaNotice.make(rateLimit: exhaustedLimit, errorMessage: nil, now: now))
+        XCTAssertTrue(exhaustedNotice.blocksSending)
+        XCTAssertEqual(exhaustedNotice.title, "Codex 消息额度已用尽")
 
         let secondaryResetEpoch: Int64 = 1_780_497_900
         let secondaryDriven = try XCTUnwrap(CodexUsageDisplaySummary.make(
@@ -14383,6 +14653,31 @@ private func transportErrorResponse(_ transport: FakeCodexAppServerTransport, id
     let encodedID = (try? jsonFragment(for: id)) ?? "null"
     let encodedMessage = (try? String(decoding: JSONEncoder().encode(message), as: UTF8.self)) ?? #""app-server error""#
     transport.enqueue(#"{"id":\#(encodedID),"error":{"code":\#(code),"message":\#(encodedMessage)}}"#)
+}
+
+private func historyPolicyError(reason: String, retryAfterMs: Int? = nil) -> Error {
+    var data: [String: CodexAppServerJSONValue] = [
+        "reason": .string(reason),
+        "method": .string("thread/turns/list"),
+        "threadId": .string("codex_history_policy_test"),
+        "itemsView": .string(reason == "history_response_too_large" ? "full" : "summary")
+    ]
+    if let retryAfterMs {
+        data["retryAfterMs"] = .int(Int64(retryAfterMs))
+        data["retryAfterSeconds"] = .int(Int64(max(1, (retryAfterMs + 999) / 1_000)))
+    }
+    let message: String
+    switch reason {
+    case "history_response_too_large":
+        message = "thread/turns/list history response 过大，gateway 已阻断；请降低 limit/itemsView 或改用分页读取"
+    default:
+        message = "thread/turns/list 同一 thread/method 正在临时限流，请稍后重试或降低 limit/itemsView"
+    }
+    return CodexAppServerConnectionError.appServer(CodexAppServerError(
+        code: -32080,
+        message: message,
+        data: .object(data)
+    ))
 }
 
 private func makeProject(id: String) -> AgentProject {

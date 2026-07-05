@@ -31,6 +31,7 @@ final class ConversationStore: ObservableObject {
         let turnID: TurnID?
         let itemID: AgentItemID?
         let createdAt: Date?
+        var updatedAt: Date?
         var text: String
         var revision: ModelRevision?
     }
@@ -54,6 +55,7 @@ final class ConversationStore: ObservableObject {
         let seq: EventSequence?
         let revision: ModelRevision?
         let sendStatus: MessageSendStatus?
+        let activityPayload: ConversationActivityPayload?
         let timelineOrdinal: Int64?
         let userDelivery: UserMessageDelivery?
         let isTimestampFallback: Bool
@@ -78,6 +80,7 @@ final class ConversationStore: ObservableObject {
         let updatedAt: Date?
         let sendStatus: MessageSendStatus
         let revision: ModelRevision?
+        let activityPayload: ConversationActivityPayload?
         let timelineOrdinal: Int64?
         let userDelivery: UserMessageDelivery?
         let isTimestampFallback: Bool
@@ -506,6 +509,7 @@ final class ConversationStore: ObservableObject {
         revision: ModelRevision?,
         sessionID: String
     ) {
+        let activityAt = createdAt ?? Date()
         if pendingAssistantDeltasBySessionID[sessionID]?.stableID != stableID {
             flushPendingAssistantDelta(sessionID: sessionID)
         }
@@ -536,6 +540,7 @@ final class ConversationStore: ObservableObject {
         if var pending = pendingAssistantDeltasBySessionID[sessionID] {
             pending.text += text
             pending.revision = revision ?? pending.revision
+            pending.updatedAt = latestDate(pending.updatedAt, activityAt)
             pendingAssistantDeltasBySessionID[sessionID] = pending
         } else {
             pendingAssistantDeltasBySessionID[sessionID] = PendingAssistantDelta(
@@ -544,7 +549,8 @@ final class ConversationStore: ObservableObject {
                 clientMessageID: clientMessageID,
                 turnID: turnID,
                 itemID: itemID,
-                createdAt: createdAt,
+                createdAt: createdAt ?? activityAt,
+                updatedAt: activityAt,
                 text: text,
                 revision: revision
             )
@@ -585,6 +591,7 @@ final class ConversationStore: ObservableObject {
             list[index].role = role
             list[index].kind = displayKind
             list[index].content = message.content
+            list[index].activityPayload = message.activityPayload ?? list[index].activityPayload
             list[index].sendStatus = message.sendStatus == .failed ? .failed : .confirmed
             list[index].revision = message.revision
             list[index].updatedAt = message.updatedAt ?? metadata.createdAt ?? Date()
@@ -616,6 +623,7 @@ final class ConversationStore: ObservableObject {
                 updatedAt: message.updatedAt ?? metadata.createdAt,
                 sendStatus: message.sendStatus,
                 revision: message.revision,
+                activityPayload: message.activityPayload,
                 isTimestampFallback: message.isTimestampFallback
             )
             // 回放/迟到的 completed 事件带的是流式 item id；thread/read 把 item id 重排成 item-N 后，
@@ -628,8 +636,9 @@ final class ConversationStore: ObservableObject {
                     twin.isTimestampFallback = false
                 }
                 twin.updatedAt = message.updatedAt ?? metadata.createdAt ?? twin.updatedAt
-                twin.sendStatus = message.sendStatus == .failed ? .failed : .confirmed
+                twin.sendStatus = message.sendStatus == .failed ? MessageSendStatus.failed : MessageSendStatus.confirmed
                 twin.revision = max(message.revision, twin.revision ?? message.revision)
+                twin.activityPayload = twin.activityPayload ?? message.activityPayload
                 list[twinIndex] = twin
                 messageUUIDByStableMessageID[key] = twin.id
                 // 真实时间回填后，历史孪生卡可能需要从估算时间位置挪回真实时间线位置。
@@ -750,6 +759,19 @@ final class ConversationStore: ObservableObject {
             .first { !$0.isEmpty } ?? ""
     }
 
+    private func latestDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case (.some(let left), .some(let right)):
+            return max(left, right)
+        case (.some(let left), .none):
+            return left
+        case (.none, .some(let right)):
+            return right
+        case (.none, .none):
+            return nil
+        }
+    }
+
     private func stableCacheKey(stableID: MessageID, sessionID: String) -> StableMessageCacheKey {
         StableMessageCacheKey(sessionID: sessionID, stableID: stableID)
     }
@@ -828,6 +850,9 @@ final class ConversationStore: ObservableObject {
             list[index].content += pending.text
             list[index].sendStatus = .sending
             list[index].revision = pending.revision ?? list[index].revision
+            // 流式 delta 没有 completed 事件时，右下角时间也要表达“最近收到内容”的时间；
+            // 只更新 updatedAt，保留 createdAt 作为消息开始时间和排序锚点。
+            list[index].updatedAt = latestDate(list[index].updatedAt, pending.updatedAt)
             replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
             return
         }
@@ -841,6 +866,7 @@ final class ConversationStore: ObservableObject {
             role: .assistant,
             content: pending.text,
             createdAt: pending.createdAt ?? Date(),
+            updatedAt: pending.updatedAt,
             sendStatus: .sending,
             revision: pending.revision
         )
@@ -941,6 +967,7 @@ final class ConversationStore: ObservableObject {
             && lhs.updatedAt == rhs.updatedAt
             && lhs.sendStatus == rhs.sendStatus
             && lhs.revision == rhs.revision
+            && lhs.activityPayload == rhs.activityPayload
             && lhs.timelineOrdinal == rhs.timelineOrdinal
             && lhs.userDelivery == rhs.userDelivery
             && lhs.isTimestampFallback == rhs.isTimestampFallback
@@ -1175,6 +1202,9 @@ final class ConversationStore: ObservableObject {
             next.createdAt = candidate.createdAt
             next.updatedAt = candidate.updatedAt ?? history.updatedAt
         }
+        if next.activityPayload == nil {
+            next.activityPayload = candidate.activityPayload
+        }
         return next
     }
 
@@ -1379,6 +1409,7 @@ final class ConversationStore: ObservableObject {
                       updatedAt: item.updatedAt,
                       sendStatus: sendStatus,
                       revision: item.revision,
+                      activityPayload: item.activityPayload,
                       timelineOrdinal: item.timelineOrdinal,
                       userDelivery: item.userDelivery,
                       isTimestampFallback: isTimestampFallback,
@@ -1401,6 +1432,7 @@ final class ConversationStore: ObservableObject {
             updatedAt: item.updatedAt,
             sendStatus: sendStatus,
             revision: item.revision,
+            activityPayload: item.activityPayload,
             timelineOrdinal: item.timelineOrdinal,
             userDelivery: item.userDelivery,
             isTimestampFallback: isTimestampFallback
@@ -1497,6 +1529,7 @@ final class ConversationStore: ObservableObject {
             updatedAt: message.updatedAt,
             sendStatus: message.sendStatus,
             revision: message.revision,
+            activityPayload: message.activityPayload,
             timelineOrdinal: message.timelineOrdinal,
             userDelivery: message.userDelivery,
             isTimestampFallback: message.isTimestampFallback
@@ -1511,6 +1544,7 @@ final class ConversationStore: ObservableObject {
         updatedAt: Date?,
         sendStatus: MessageSendStatus,
         revision: ModelRevision?,
+        activityPayload: ConversationActivityPayload?,
         timelineOrdinal: Int64?,
         userDelivery: UserMessageDelivery?,
         isTimestampFallback: Bool,
@@ -1524,6 +1558,7 @@ final class ConversationStore: ObservableObject {
             updatedAt: updatedAt,
             sendStatus: sendStatus,
             revision: revision,
+            activityPayload: activityPayload,
             timelineOrdinal: timelineOrdinal,
             userDelivery: userDelivery,
             isTimestampFallback: isTimestampFallback
@@ -1561,6 +1596,7 @@ final class ConversationStore: ObservableObject {
             seq: item.seq,
             revision: item.revision,
             sendStatus: item.sendStatus,
+            activityPayload: item.activityPayload,
             timelineOrdinal: item.timelineOrdinal,
             userDelivery: item.userDelivery,
             isTimestampFallback: item.isTimestampFallback

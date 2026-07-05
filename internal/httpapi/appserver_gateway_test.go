@@ -847,8 +847,9 @@ func TestAppServerGatewayCapsOversizedHistoryResponses(t *testing.T) {
 			var frame struct {
 				ID    json.RawMessage `json:"id"`
 				Error struct {
-					Code    int    `json:"code"`
-					Message string `json:"message"`
+					Code    int            `json:"code"`
+					Message string         `json:"message"`
+					Data    map[string]any `json:"data"`
 				} `json:"error"`
 			}
 			if err := json.Unmarshal(raw, &frame); err != nil {
@@ -856,6 +857,18 @@ func TestAppServerGatewayCapsOversizedHistoryResponses(t *testing.T) {
 			}
 			if frame.Error.Code != appServerPolicyErrorCode || !strings.Contains(frame.Error.Message, "history response 过大") {
 				t.Fatalf("history cap error 文案异常：%+v raw=%s", frame, raw)
+			}
+			if frame.Error.Data["reason"] != "history_response_too_large" {
+				t.Fatalf("history cap error 应包含 reason data：%+v raw=%s", frame.Error.Data, raw)
+			}
+			if got := int(frame.Error.Data["retryAfterSeconds"].(float64)); got <= 0 {
+				t.Fatalf("history cap error 应包含 retryAfterSeconds：%+v raw=%s", frame.Error.Data, raw)
+			}
+			if got := int(frame.Error.Data["responseBytes"].(float64)); got <= appServerGatewayHistoryResponseCapBytes {
+				t.Fatalf("history cap error 应包含 responseBytes：%+v raw=%s", frame.Error.Data, raw)
+			}
+			if got := int(frame.Error.Data["maxResponseBytes"].(float64)); got != appServerGatewayHistoryResponseCapBytes {
+				t.Fatalf("history cap error 应包含 maxResponseBytes：%+v raw=%s", frame.Error.Data, raw)
 			}
 
 			rec := httptest.NewRecorder()
@@ -920,6 +933,84 @@ func TestAppServerGatewayForwardsSmallHistoryResponse(t *testing.T) {
 	}
 }
 
+func TestAppServerGatewayHistoryBudgetSeparatesItemsView(t *testing.T) {
+	oldCap := appServerGatewayHistoryResponseCapBytes
+	oldBudgetBytes := appServerGatewayHistoryBudgetMaxResponseBytes
+	appServerGatewayHistoryResponseCapBytes = 512
+	appServerGatewayHistoryBudgetMaxResponseBytes = 512
+	t.Cleanup(func() {
+		appServerGatewayHistoryResponseCapBytes = oldCap
+		appServerGatewayHistoryBudgetMaxResponseBytes = oldBudgetBytes
+	})
+
+	var projectDir string
+	smallSummaryResponse := []byte(`{"id":721,"result":{"data":[{"id":"turn-summary"}]}}`)
+	upstreamURL, received, _ := fakeAppServerUpstream(t, func(conn *websocket.Conn, messageType int, payload []byte) {
+		var frame appServerGatewayFrame
+		if err := json.Unmarshal(payload, &frame); err != nil {
+			t.Errorf("fake upstream 收到非法 JSON：%v", err)
+			return
+		}
+		if frame.Method == "thread/list" {
+			respondToThreadListAuthorization(t, conn, payload, projectDir, "thread-split-view")
+			return
+		}
+		if frame.Method != "thread/turns/list" {
+			return
+		}
+		params, err := decodeGatewayParams(frame.Params)
+		if err != nil {
+			t.Errorf("fake upstream 解析 params 失败：%v", err)
+			return
+		}
+		itemsView, _ := gatewayStringParam(params, "itemsView")
+		switch itemsView {
+		case "full":
+			padding := strings.Repeat("history-block-marker", 80)
+			response := fmt.Sprintf(`{"id":%s,"result":{"data":[{"id":"turn-full","content":%q}]}}`, string(*frame.ID), padding)
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(response)); err != nil {
+				t.Errorf("fake upstream 写 full 大响应失败：%v", err)
+			}
+		case "summary":
+			if err := conn.WriteMessage(websocket.TextMessage, smallSummaryResponse); err != nil {
+				t.Errorf("fake upstream 写 summary 小响应失败：%v", err)
+			}
+		default:
+			t.Errorf("unexpected itemsView: %q", itemsView)
+		}
+	})
+	handler, dir := appServerGatewayRouterFixture(t, upstreamURL)
+	projectDir = dir
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	conn := dialAuthedGateway(t, server.URL)
+	defer conn.Close()
+	authorizeGatewayThread(t, conn, received, projectDir, "thread-split-view")
+
+	fullRequest := []byte(`{"id":720,"method":"thread/turns/list","params":{"threadId":"thread-split-view","limit":20,"itemsView":"full"}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, fullRequest); err != nil {
+		t.Fatal(err)
+	}
+	_ = readUpstreamFrame(t, received)
+	fullErr := readGatewayError(t, conn)
+	if !strings.Contains(fullErr.message, "history response 过大") {
+		t.Fatalf("full 大响应应被 cap 阻断：%+v", fullErr)
+	}
+	if fullErr.data["itemsView"] != "full" {
+		t.Fatalf("full cap error 应标记 itemsView=full：%+v", fullErr.data)
+	}
+
+	summaryRequest := []byte(`{"id":721,"method":"thread/turns/list","params":{"threadId":"thread-split-view","limit":20,"itemsView":"summary"}}`)
+	if err := conn.WriteMessage(websocket.TextMessage, summaryRequest); err != nil {
+		t.Fatal(err)
+	}
+	_ = readUpstreamFrame(t, received)
+	if got := readGatewayRaw(t, conn); !bytes.Equal(got, smallSummaryResponse) {
+		t.Fatalf("full 预算耗尽后 summary 应按独立预算透传：got=%s want=%s", got, smallSummaryResponse)
+	}
+}
+
 func TestAppServerGatewayRejectsHistoryRetryStormByThreadMethod(t *testing.T) {
 	oldWindow := appServerGatewayHistoryBudgetWindow
 	oldMaxRequests := appServerGatewayHistoryBudgetMaxRequests
@@ -964,6 +1055,12 @@ func TestAppServerGatewayRejectsHistoryRetryStormByThreadMethod(t *testing.T) {
 	errFrame := readGatewayError(t, conn)
 	if !strings.Contains(errFrame.message, "同一 thread/method 请求过于频繁") {
 		t.Fatalf("重试风暴应被同 thread/method 频率预算拒绝：%+v", errFrame)
+	}
+	if errFrame.data["reason"] != "history_budget_limited" {
+		t.Fatalf("重试风暴错误应包含 budget reason：%+v", errFrame.data)
+	}
+	if got := int(errFrame.data["retryAfterSeconds"].(float64)); got <= 0 {
+		t.Fatalf("重试风暴错误应包含 retryAfterSeconds：%+v", errFrame.data)
 	}
 	assertNoUpstreamFrame(t, received)
 
@@ -2995,6 +3092,7 @@ func writeTestBridge(t *testing.T, body string) string {
 type gatewayErrorFrame struct {
 	id      json.RawMessage
 	message string
+	data    map[string]any
 }
 
 func readGatewayError(t *testing.T, conn *websocket.Conn) gatewayErrorFrame {
@@ -3003,8 +3101,9 @@ func readGatewayError(t *testing.T, conn *websocket.Conn) gatewayErrorFrame {
 	var frame struct {
 		ID    json.RawMessage `json:"id"`
 		Error struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
+			Code    int            `json:"code"`
+			Message string         `json:"message"`
+			Data    map[string]any `json:"data"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &frame); err != nil {
@@ -3013,7 +3112,7 @@ func readGatewayError(t *testing.T, conn *websocket.Conn) gatewayErrorFrame {
 	if frame.Error.Code != appServerPolicyErrorCode || frame.Error.Message == "" {
 		t.Fatalf("gateway error code/message 异常：%+v raw=%s", frame, raw)
 	}
-	return gatewayErrorFrame{id: frame.ID, message: frame.Error.Message}
+	return gatewayErrorFrame{id: frame.ID, message: frame.Error.Message, data: frame.Error.Data}
 }
 
 func readUpstreamFrame(t *testing.T, received <-chan []byte) []byte {

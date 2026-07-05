@@ -573,7 +573,7 @@ actor CodexAppServerSessionRuntime {
             throw CodexAppServerSessionRuntimeError.sessionNotFound(sessionID)
         }
         let turns = thread["turns"]?.arrayValue?.compactMap(\.objectValue) ?? []
-        let messages = historyMessages(from: thread, sessionID: sessionID)
+        let messages = historyMessages(from: thread, sessionID: sessionID, snapshotReadAt: Date())
         let authoritativeCompletedTurnItems = Self.authoritativeCompletedTurnItems(fromTurns: turns)
         var context: SessionContextSnapshot?
         if let session = try? agentSession(from: thread, projects: projects, fallbackProject: nil) {
@@ -629,7 +629,9 @@ actor CodexAppServerSessionRuntime {
             fromTurns: chronologicalTurns,
             sessionID: sessionID,
             threadCreatedAt: firstDate(in: thread, keys: ["createdAt", "created_at"]),
-            threadUpdatedAt: firstDate(in: thread, keys: ["updatedAt", "updated_at"])
+            threadUpdatedAt: firstDate(in: thread, keys: ["updatedAt", "updated_at"]),
+            threadIsActive: isActiveHistoryThread(thread),
+            snapshotReadAt: Date()
         )
         let context = contextForHistoryThread(thread, sessionID: sessionID, projects: projects)
         let nextCursor = firstString(in: object, keys: ["nextCursor", "next_cursor"])
@@ -2476,13 +2478,19 @@ actor CodexAppServerSessionRuntime {
         return .some(activeTurnID)
     }
 
-    private func historyMessages(from thread: [String: CodexAppServerJSONValue], sessionID: SessionID) -> [CodexHistoryMessage] {
+    private func historyMessages(
+        from thread: [String: CodexAppServerJSONValue],
+        sessionID: SessionID,
+        snapshotReadAt: Date
+    ) -> [CodexHistoryMessage] {
         let turns = thread["turns"]?.arrayValue?.compactMap(\.objectValue) ?? []
         return historyMessages(
             fromTurns: turns,
             sessionID: sessionID,
             threadCreatedAt: firstDate(in: thread, keys: ["createdAt", "created_at"]),
-            threadUpdatedAt: firstDate(in: thread, keys: ["updatedAt", "updated_at"])
+            threadUpdatedAt: firstDate(in: thread, keys: ["updatedAt", "updated_at"]),
+            threadIsActive: isActiveHistoryThread(thread),
+            snapshotReadAt: snapshotReadAt
         )
     }
 
@@ -2490,7 +2498,9 @@ actor CodexAppServerSessionRuntime {
         fromTurns turns: [[String: CodexAppServerJSONValue]],
         sessionID: SessionID,
         threadCreatedAt: Date? = nil,
-        threadUpdatedAt: Date? = nil
+        threadUpdatedAt: Date? = nil,
+        threadIsActive: Bool = false,
+        snapshotReadAt: Date
     ) -> [CodexHistoryMessage] {
         var messages: [CodexHistoryMessage] = []
         messages.reserveCapacity(turns.reduce(0) { count, turn in
@@ -2502,6 +2512,12 @@ actor CodexAppServerSessionRuntime {
             let turnID = turn["id"]?.stringValue
             let startedAt = firstDate(in: turn, keys: ["startedAt", "started_at", "createdAt", "created_at", "timestamp"])
             let completedAt = firstDate(in: turn, keys: ["completedAt", "completed_at", "updatedAt", "updated_at", "finishedAt", "finished_at"])
+            let turnIsInProgress = isInProgressHistoryTurn(
+                turn,
+                isLastTurn: turnIndex == turns.index(before: turns.endIndex),
+                threadIsActive: threadIsActive,
+                completedAt: completedAt
+            )
             let items = turn["items"]?.arrayValue?.compactMap(\.objectValue) ?? []
             var hasVisibleUserMessageInTurn = false
             for (itemIndex, item) in items.enumerated() {
@@ -2513,7 +2529,9 @@ actor CodexAppServerSessionRuntime {
                     isInjectedUserMessage: hasVisibleUserMessageInTurn,
                     startedAt: startedAt,
                     completedAt: completedAt,
-                    estimatedAt: estimatedHistoryItemDate(startedAt: startedAt, completedAt: completedAt, itemIndex: itemIndex, itemCount: items.count)
+                    estimatedAt: estimatedHistoryItemDate(startedAt: startedAt, completedAt: completedAt, itemIndex: itemIndex, itemCount: items.count),
+                    turnIsInProgress: turnIsInProgress,
+                    snapshotReadAt: snapshotReadAt
                 ) else {
                     continue
                 }
@@ -2543,7 +2561,9 @@ actor CodexAppServerSessionRuntime {
         isInjectedUserMessage: Bool,
         startedAt: Date?,
         completedAt: Date?,
-        estimatedAt: Date?
+        estimatedAt: Date?,
+        turnIsInProgress: Bool,
+        snapshotReadAt: Date
     ) -> CodexHistoryMessage? {
         let type = item["type"]?.stringValue
         let itemID = item["id"]?.stringValue ?? UUID().uuidString
@@ -2551,6 +2571,9 @@ actor CodexAppServerSessionRuntime {
         let itemCreatedAt = firstDate(in: item, keys: ["createdAt", "created_at", "startedAt", "started_at", "timestamp"])
         let itemCompletedAt = firstDate(in: item, keys: ["completedAt", "completed_at", "updatedAt", "updated_at", "finishedAt", "finished_at", "timestamp"])
         let processCreatedAt = itemCreatedAt ?? estimatedAt ?? startedAt ?? itemCompletedAt ?? completedAt
+        // running thread/read 快照常缺 item 级 completedAt，但内容已是最新输出；
+        // 用读取时间写 updatedAt，让观察模式显示最近活动，同时不改 createdAt 的排序语义。
+        let liveSnapshotUpdatedAt = turnIsInProgress && itemCompletedAt == nil && !isTerminalHistoryStatus(item["status"]) ? snapshotReadAt : nil
         let processTimestampIsFallback = itemCreatedAt == nil && itemCompletedAt == nil && estimatedAt != nil
         switch type {
         case "userMessage":
@@ -2577,28 +2600,43 @@ actor CodexAppServerSessionRuntime {
                 return nil
             }
             if item["phase"]?.stringValue == "commentary" {
-                return CodexHistoryMessage(id: messageID, role: "system", kind: .reasoningSummary, content: text, createdAt: processCreatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
+                return CodexHistoryMessage(id: messageID, role: "system", kind: .reasoningSummary, content: text, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
             }
             let completed = itemCompletedAt ?? completedAt
-            return CodexHistoryMessage(id: messageID, role: "assistant", content: text, createdAt: completed ?? itemCreatedAt ?? estimatedAt ?? startedAt, updatedAt: completed, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: completed == nil && itemCreatedAt == nil && estimatedAt != nil)
+            return CodexHistoryMessage(id: messageID, role: "assistant", content: text, createdAt: completed ?? itemCreatedAt ?? estimatedAt ?? startedAt, updatedAt: completed ?? liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: completed == nil && itemCreatedAt == nil && estimatedAt != nil)
         case "plan":
-            let text = item["text"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !text.isEmpty else {
+            guard let payload = ConversationActivityPayload(item: item) else {
                 return nil
             }
-            return CodexHistoryMessage(id: messageID, role: "system", kind: .plan, content: text, createdAt: processCreatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
+            let content = payload.summaryText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else {
+                return nil
+            }
+            return CodexHistoryMessage(id: messageID, role: "system", kind: payload.messageKind, content: content, activityPayload: payload, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
         case "reasoning":
-            let text = reasoningHistoryText(from: item)
-            guard !text.isEmpty else {
+            guard let payload = ConversationActivityPayload(item: item) else {
                 return nil
             }
-            return CodexHistoryMessage(id: messageID, role: "system", kind: .reasoningSummary, content: text, createdAt: processCreatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
+            let content = payload.summaryText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else {
+                return nil
+            }
+            return CodexHistoryMessage(id: messageID, role: "system", kind: payload.messageKind, content: content, activityPayload: payload, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
         case "commandExecution":
-            return CodexHistoryMessage(id: messageID, role: "system", kind: .commandSummary, content: commandExecutionHistoryText(from: item), createdAt: processCreatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
+            guard let payload = ConversationActivityPayload(item: item) else {
+                return nil
+            }
+            return CodexHistoryMessage(id: messageID, role: "system", kind: payload.messageKind, content: payload.summaryText, activityPayload: payload, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
         case "fileChange":
-            return CodexHistoryMessage(id: messageID, role: "system", kind: .fileChangeSummary, content: fileChangeHistoryText(from: item), createdAt: processCreatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
+            guard let payload = ConversationActivityPayload(item: item) else {
+                return nil
+            }
+            return CodexHistoryMessage(id: messageID, role: "system", kind: payload.messageKind, content: payload.summaryText, activityPayload: payload, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
         case "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch":
-            return CodexHistoryMessage(id: messageID, role: "system", kind: .commandSummary, content: toolHistoryText(from: item), createdAt: processCreatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
+            guard let payload = ConversationActivityPayload(item: item) else {
+                return nil
+            }
+            return CodexHistoryMessage(id: messageID, role: "system", kind: payload.messageKind, content: payload.summaryText, activityPayload: payload, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
         default:
             return nil
         }
@@ -2606,6 +2644,51 @@ actor CodexAppServerSessionRuntime {
 
     private func historyTimelineOrdinal(turnIndex: Int, itemIndex: Int) -> Int64 {
         Int64(turnIndex) * 1_000_000 + Int64(itemIndex)
+    }
+
+    private func isActiveHistoryThread(_ thread: [String: CodexAppServerJSONValue]) -> Bool {
+        isActiveHistoryStatus(thread["status"])
+    }
+
+    private func isInProgressHistoryTurn(
+        _ turn: [String: CodexAppServerJSONValue],
+        isLastTurn: Bool,
+        threadIsActive: Bool,
+        completedAt: Date?
+    ) -> Bool {
+        if isActiveHistoryStatus(turn["status"]) {
+            return true
+        }
+        guard completedAt == nil else {
+            return false
+        }
+        // thread/read 的 running turn 可能只在 thread.status 标 active，turn 自己不带 status；
+        // 只有最后一个未完成 turn 继承线程活跃态，避免老 turn 的缺失时间被误标成当前读取时间。
+        return threadIsActive && isLastTurn
+    }
+
+    private func isActiveHistoryStatus(_ value: CodexAppServerJSONValue?) -> Bool {
+        let raw = value?.stringValue
+            ?? value?.objectValue?["type"]?.stringValue
+            ?? value?.objectValue?["status"]?.stringValue
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "active", "running", "inprogress", "in_progress", "waiting_for_approval", "waiting_for_input":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isTerminalHistoryStatus(_ value: CodexAppServerJSONValue?) -> Bool {
+        let raw = value?.stringValue
+            ?? value?.objectValue?["type"]?.stringValue
+            ?? value?.objectValue?["status"]?.stringValue
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "completed", "complete", "succeeded", "success", "failed", "failure", "cancelled", "canceled":
+            return true
+        default:
+            return false
+        }
     }
 
     private func estimatedHistoryItemDate(startedAt: Date?, completedAt: Date?, itemIndex: Int, itemCount: Int) -> Date? {
@@ -2617,15 +2700,6 @@ actor CodexAppServerSessionRuntime {
         }
         let progress = Double(itemIndex) / Double(max(1, itemCount - 1))
         return startedAt.addingTimeInterval(completedAt.timeIntervalSince(startedAt) * progress)
-    }
-
-    private func reasoningHistoryText(from item: [String: CodexAppServerJSONValue]) -> String {
-        let summary = item["summary"]?.arrayValue?.compactMap(\.stringValue) ?? []
-        let content = item["content"]?.arrayValue?.compactMap(\.stringValue) ?? []
-        return (summary + content)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n\n")
     }
 
     private func isVisibleUserHistoryMessage(_ text: String) -> Bool {
@@ -2640,70 +2714,6 @@ actor CodexAppServerSessionRuntime {
             "<codex_internal_context>"
         ]
         return !hiddenPrefixes.contains { trimmed.hasPrefix($0) }
-    }
-
-    private func commandExecutionHistoryText(from item: [String: CodexAppServerJSONValue]) -> String {
-        let command = item["command"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "命令执行"
-        var lines = ["命令：\(command)"]
-        if let cwd = item["cwd"]?.stringValue, !cwd.isEmpty {
-            lines.append("目录：\(cwd)")
-        }
-        let status = item["status"]?.stringValue
-        let exitCode = item["exitCode"]?.intValue.map { "\($0)" }
-        let statusLine = [status.map { "状态：\($0)" }, exitCode.map { "退出码：\($0)" }]
-            .compactMap { $0 }
-            .joined(separator: "，")
-        if !statusLine.isEmpty {
-            lines.append(statusLine)
-        }
-        if let output = item["aggregatedOutput"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
-            lines.append("输出：\n\(truncatedHistoryText(output))")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private func fileChangeHistoryText(from item: [String: CodexAppServerJSONValue]) -> String {
-        let changes = item["changes"]?.arrayValue?.compactMap(\.objectValue) ?? []
-        let status = item["status"]?.stringValue ?? "modified"
-        let summary = fileChangeSummary(from: changes) ?? "workspace"
-        return "文件变更：\(summary) \(status)"
-    }
-
-    private func toolHistoryText(from item: [String: CodexAppServerJSONValue]) -> String {
-        switch item["type"]?.stringValue {
-        case "mcpToolCall":
-            let title = [item["server"]?.stringValue, item["tool"]?.stringValue]
-                .compactMap { nonEmpty($0) }
-                .joined(separator: ".")
-            return historyToolLine(title: title.isEmpty ? "MCP 工具调用" : title, status: item["status"]?.stringValue)
-        case "dynamicToolCall":
-            let title = [item["namespace"]?.stringValue, item["tool"]?.stringValue]
-                .compactMap { nonEmpty($0) }
-                .joined(separator: ".")
-            return historyToolLine(title: title.isEmpty ? "动态工具调用" : title, status: item["status"]?.stringValue)
-        case "collabAgentToolCall":
-            let title = item["tool"]?.stringValue ?? "子 Agent 调用"
-            return historyToolLine(title: title, status: item["status"]?.stringValue)
-        case "webSearch":
-            return historyToolLine(title: "网络搜索：\(item["query"]?.stringValue ?? "")", status: nil)
-        default:
-            return "工具调用"
-        }
-    }
-
-    private func historyToolLine(title: String, status: String?) -> String {
-        guard let status, !status.isEmpty else {
-            return "工具：\(title)"
-        }
-        return "工具：\(title)\n状态：\(status)"
-    }
-
-    private func truncatedHistoryText(_ text: String, limit: Int = 2_000) -> String {
-        let prefix = text.prefix(limit)
-        guard prefix.endIndex != text.endIndex else {
-            return text
-        }
-        return String(prefix) + "\n... output truncated"
     }
 
     private func appServerHistoryMessageID(turnID: TurnID?, itemID: AgentItemID) -> MessageID {

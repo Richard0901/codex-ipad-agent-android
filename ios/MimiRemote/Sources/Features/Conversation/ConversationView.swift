@@ -1232,6 +1232,7 @@ private struct ConversationTimelineCacheKey: Equatable {
     let revision: ModelRevision?
     let renderFingerprint: ConversationMessageRenderFingerprint
     let turnPayload: CodexAppServerTurnPayload?
+    let activityPayload: ConversationActivityPayload?
     let isTimestampFallback: Bool
 
     init(message: ConversationMessage) {
@@ -1248,6 +1249,7 @@ private struct ConversationTimelineCacheKey: Equatable {
         self.revision = message.revision
         self.renderFingerprint = message.renderFingerprint
         self.turnPayload = message.turnPayload
+        self.activityPayload = message.activityPayload
         self.isTimestampFallback = message.isTimestampFallback
     }
 }
@@ -1266,25 +1268,29 @@ private struct ProcessedTurnRow: View, Equatable {
     }
 
     var body: some View {
+        let preview = ProcessedActivityPreviewModel(messages: group.messages, maxRows: collapsedPreviewLimit)
+
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                Button(action: toggle) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle")
-                            .font(themeStore.uiFont(.caption, weight: .semibold))
-                        Text(group.title)
-                            .font(themeStore.uiFont(.caption, weight: .medium))
-                        Image(systemName: "chevron.right")
-                            .font(themeStore.uiFont(.caption2, weight: .semibold))
-                            .frame(width: 10, height: 10)
-                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                            .animation(Self.disclosureAnimation, value: isExpanded)
+                if isExpanded || preview.items.isEmpty {
+                    Button(action: toggle) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle")
+                                .font(themeStore.uiFont(.caption, weight: .semibold))
+                            Text(group.title)
+                                .font(themeStore.uiFont(.caption, weight: .medium))
+                            Image(systemName: "chevron.right")
+                                .font(themeStore.uiFont(.caption2, weight: .semibold))
+                                .frame(width: 10, height: 10)
+                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                .animation(Self.disclosureAnimation, value: isExpanded)
+                        }
+                        .foregroundStyle(tokens.secondaryText)
+                        .contentShape(Rectangle())
                     }
-                    .foregroundStyle(tokens.secondaryText)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isExpanded ? "收起已处理过程" : "展开已处理过程")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isExpanded ? "收起已处理过程" : "展开已处理过程")
 
                 if isExpanded {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1293,6 +1299,13 @@ private struct ProcessedTurnRow: View, Equatable {
                         }
                     }
                     .padding(.top, 8)
+                    .transition(.opacity)
+                } else if !preview.items.isEmpty {
+                    Button(action: toggle) {
+                        ProcessedActivityPreview(model: preview)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("展开已处理过程，\(group.title)")
                     .transition(.opacity)
                 }
             }
@@ -1306,6 +1319,456 @@ private struct ProcessedTurnRow: View, Equatable {
 
     private var tokens: ThemeTokens {
         themeStore.tokens(for: colorScheme)
+    }
+
+    private var collapsedPreviewLimit: Int {
+        layout.assistantBubbleMaxWidth < 560 ? 4 : 5
+    }
+}
+
+private struct ProcessedActivityPreview: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    let model: ProcessedActivityPreviewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ForEach(model.items) { item in
+                ProcessedActivityPreviewRow(item: item)
+            }
+            if model.hiddenOriginalCount > 0 {
+                Text("另有 \(model.hiddenOriginalCount) 个过程项，展开查看")
+                    .font(themeStore.uiFont(.caption2, weight: .medium))
+                    .foregroundStyle(tokens.secondaryText)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var tokens: ThemeTokens {
+        themeStore.tokens(for: colorScheme)
+    }
+}
+
+private struct ProcessedActivityPreviewRow: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    let item: ProcessedActivityPreviewItem
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: item.symbolName)
+                .font(themeStore.uiFont(.caption, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 16, alignment: .center)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(item.title)
+                        .font(themeStore.uiFont(.caption, weight: .medium))
+                        .foregroundStyle(tokens.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.right")
+                        .font(themeStore.uiFont(.caption2, weight: .semibold))
+                        .foregroundStyle(tokens.secondaryText.opacity(0.9))
+                }
+                if let detail = item.detail {
+                    Text(detail)
+                        .font(themeStore.uiFont(.caption2))
+                        .foregroundStyle(tokens.secondaryText.opacity(0.82))
+                        .lineLimit(item.prefersExpandedDetail ? 2 : 1)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var tint: Color {
+        switch item.style {
+        case .editFile, .approval:
+            return tokens.accent
+        case .error:
+            return .red
+        case .browseFile, .search, .runCommand, .toolCall, .thinking, .userInput, .other:
+            return tokens.secondaryText
+        }
+    }
+
+    private var tokens: ThemeTokens {
+        themeStore.tokens(for: colorScheme)
+    }
+}
+
+private struct ProcessedActivityPreviewModel: Equatable {
+    let items: [ProcessedActivityPreviewItem]
+    let hiddenOriginalCount: Int
+
+    init(messages: [ConversationMessage], maxRows: Int) {
+        let units = messages.map { ProcessedActivityPreviewUnit(message: $0) }
+        guard !units.isEmpty else {
+            items = []
+            hiddenOriginalCount = 0
+            return
+        }
+
+        // 折叠态不是完整日志：单一类型时给更多上下文，多类型时按语义聚合成小模块。
+        let styles = Set(units.map(\.style))
+        if styles == [.thinking] {
+            items = [ProcessedActivityPreviewItem.aggregate(style: .thinking, units: units)]
+            hiddenOriginalCount = 0
+        } else if styles.count == 1 {
+            let limit = min(maxRows + 1, 6)
+            items = Array(units.prefix(limit).map { $0.detailedItem })
+            hiddenOriginalCount = max(0, units.count - items.count)
+        } else {
+            let groupedUnits = Self.groupedByStyle(units)
+            let orderedGroups = Self.prioritized(groups: groupedUnits)
+            items = Array(orderedGroups.prefix(maxRows).map { style, units in
+                ProcessedActivityPreviewItem.aggregate(style: style, units: units)
+            })
+            hiddenOriginalCount = orderedGroups.dropFirst(maxRows).reduce(0) { total, group in
+                total + group.units.count
+            }
+        }
+    }
+
+    private static func groupedByStyle(_ units: [ProcessedActivityPreviewUnit]) -> [(style: ProcessedActivityPreviewStyle, units: [ProcessedActivityPreviewUnit])] {
+        var orderedStyles: [ProcessedActivityPreviewStyle] = []
+        var grouped: [ProcessedActivityPreviewStyle: [ProcessedActivityPreviewUnit]] = [:]
+        for unit in units {
+            if grouped[unit.style] == nil {
+                orderedStyles.append(unit.style)
+            }
+            grouped[unit.style, default: []].append(unit)
+        }
+        return orderedStyles.compactMap { style in
+            guard let units = grouped[style] else {
+                return nil
+            }
+            return (style, units)
+        }
+    }
+
+    private static func prioritized(
+        groups: [(style: ProcessedActivityPreviewStyle, units: [ProcessedActivityPreviewUnit])]
+    ) -> [(style: ProcessedActivityPreviewStyle, units: [ProcessedActivityPreviewUnit])] {
+        groups.sorted { lhs, rhs in
+            let leftPriority = lhs.style.mixedPreviewPriority
+            let rightPriority = rhs.style.mixedPreviewPriority
+            guard leftPriority == rightPriority else {
+                return leftPriority < rightPriority
+            }
+            let leftOrdinal = lhs.units.first?.ordinal ?? 0
+            let rightOrdinal = rhs.units.first?.ordinal ?? 0
+            return leftOrdinal < rightOrdinal
+        }
+    }
+}
+
+private struct ProcessedActivityPreviewItem: Identifiable, Equatable {
+    let id: String
+    let style: ProcessedActivityPreviewStyle
+    let title: String
+    let detail: String?
+    let symbolName: String
+    let prefersExpandedDetail: Bool
+
+    static func aggregate(style: ProcessedActivityPreviewStyle, units: [ProcessedActivityPreviewUnit]) -> ProcessedActivityPreviewItem {
+        let title: String
+        let detail: String?
+        switch style {
+        case .browseFile:
+            let count = Self.fileCount(in: units)
+            title = "已浏览 \(count) 个文件"
+            detail = units.count == 1 ? units.first?.detail : nil
+        case .search:
+            title = "已搜索 \(units.count) 次"
+            detail = units.count == 1 ? units.first?.title : nil
+        case .runCommand:
+            title = units.count == 1 ? (units.first?.completedTitle ?? "已运行 1 条命令") : "已运行 \(units.count) 条命令"
+            detail = units.count == 1 ? units.first?.detail : nil
+        case .editFile:
+            title = "已编辑 \(Self.fileCount(in: units)) 个文件"
+            detail = units.count == 1 ? units.first?.detail : nil
+        case .toolCall:
+            title = units.count == 1 ? (units.first?.completedTitle ?? "已调用 1 个工具") : "已调用 \(units.count) 个工具"
+            detail = units.count == 1 ? units.first?.detail : nil
+        case .thinking:
+            title = units.count == 1 ? "推理摘要" : "推理摘要 \(units.count) 条"
+            detail = units.compactMap(\.detail).first
+        case .approval:
+            title = units.count == 1 ? "处理审批" : "处理 \(units.count) 个审批"
+            detail = units.count == 1 ? units.first?.detail : nil
+        case .userInput:
+            title = units.count == 1 ? "补充信息" : "补充信息 \(units.count) 次"
+            detail = units.count == 1 ? units.first?.detail : nil
+        case .error:
+            title = units.count == 1 ? "运行异常" : "运行异常 \(units.count) 条"
+            detail = units.first?.detail
+        case .other:
+            title = units.count == 1 ? (units.first?.title ?? "过程项") : "已处理 \(units.count) 个过程项"
+            detail = units.count == 1 ? units.first?.detail : nil
+        }
+
+        return ProcessedActivityPreviewItem(
+            id: "aggregate:\(style.rawValue)",
+            style: style,
+            title: title,
+            detail: detail?.trimmedPreview(limit: 120),
+            symbolName: style.symbolName,
+            prefersExpandedDetail: false
+        )
+    }
+
+    private static func fileCount(in units: [ProcessedActivityPreviewUnit]) -> Int {
+        var seen: Set<String> = []
+        var count = 0
+        for path in units.flatMap(\.filePaths) {
+            if seen.insert(path).inserted {
+                count += 1
+            }
+        }
+        return max(count, units.count)
+    }
+}
+
+private struct ProcessedActivityPreviewUnit: Equatable {
+    let ordinal: Int
+    let messageID: UUID
+    let style: ProcessedActivityPreviewStyle
+    let title: String
+    let completedTitle: String?
+    let detail: String?
+    let filePaths: [String]
+
+    init(message: ConversationMessage) {
+        ordinal = Int(message.createdAt.timeIntervalSinceReferenceDate * 1_000)
+        messageID = message.id
+        if let payload = message.activityPayload {
+            style = ProcessedActivityPreviewStyle(payload: payload)
+            title = Self.title(for: payload)
+            completedTitle = Self.completedTitle(for: payload, style: style)
+            detail = Self.detail(for: payload)
+            filePaths = payload.filePaths
+        } else {
+            style = ProcessedActivityPreviewStyle(kind: message.kind)
+            title = Self.fallbackTitle(for: message)
+            completedTitle = nil
+            detail = Self.firstContentLine(in: message.content)
+            filePaths = []
+        }
+    }
+
+    var detailedItem: ProcessedActivityPreviewItem {
+        ProcessedActivityPreviewItem(
+            id: "message:\(messageID.uuidString)",
+            style: style,
+            title: title,
+            detail: detail?.trimmedPreview(limit: 180),
+            symbolName: style.symbolName,
+            prefersExpandedDetail: true
+        )
+    }
+
+    private static func title(for payload: ConversationActivityPayload) -> String {
+        if payload.category == .runCommand, isRunning(payload.status) {
+            return "正在运行 \(commandSubject(for: payload))"
+        }
+        return payload.displayTitle
+    }
+
+    private static func completedTitle(for payload: ConversationActivityPayload, style: ProcessedActivityPreviewStyle) -> String? {
+        switch style {
+        case .browseFile:
+            return "已浏览 1 个文件"
+        case .search:
+            return "已搜索 1 次"
+        case .runCommand:
+            if let exitCode = payload.exitCode, exitCode != 0 {
+                return "命令失败 \(commandSubject(for: payload))"
+            }
+            return "已运行 \(commandSubject(for: payload))"
+        case .editFile:
+            return "已编辑 \(max(payload.filePaths.count, 1)) 个文件"
+        case .toolCall:
+            return "已调用 \(payload.toolName ?? payload.displayTitle)"
+        case .thinking, .approval, .userInput, .error, .other:
+            return nil
+        }
+    }
+
+    private static func detail(for payload: ConversationActivityPayload) -> String? {
+        switch payload.category {
+        case .thinking, .plan, .error:
+            return payload.subtitle
+        case .runCommand:
+            return payload.outputPreview ?? payload.cwd ?? payload.command
+        case .editFile:
+            if payload.filePaths.isEmpty {
+                return payload.subtitle
+            }
+            return payload.filePaths.prefix(4).joined(separator: ", ")
+        case .toolCall:
+            return payload.status ?? payload.toolName
+        }
+    }
+
+    private static func fallbackTitle(for message: ConversationMessage) -> String {
+        switch message.kind {
+        case .plan:
+            return "计划"
+        case .reasoningSummary:
+            return "推理摘要"
+        case .commandSummary:
+            return "运行命令"
+        case .fileChangeSummary:
+            return "编辑文件"
+        case .approval:
+            return "处理审批"
+        case .userInput:
+            return "补充信息"
+        case .error:
+            return "运行异常"
+        case .message:
+            return firstContentLine(in: message.content) ?? "状态"
+        }
+    }
+
+    private static func commandSubject(for payload: ConversationActivityPayload) -> String {
+        if let command = payload.command?.trimmedNonEmpty {
+            return command
+        }
+        return payload.displayTitle
+            .removingPrefix("运行 ")
+            .removingPrefix("正在运行 ")
+    }
+
+    private static func firstContentLine(in text: String) -> String? {
+        text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init)?
+            .trimmedNonEmpty
+    }
+
+    private static func isRunning(_ status: String?) -> Bool {
+        guard let status = status?.lowercased() else {
+            return false
+        }
+        return status == "running" || status == "in_progress" || status == "started"
+    }
+}
+
+private enum ProcessedActivityPreviewStyle: String, Equatable, Hashable {
+    case browseFile
+    case search
+    case runCommand
+    case editFile
+    case toolCall
+    case thinking
+    case approval
+    case userInput
+    case error
+    case other
+
+    init(payload: ConversationActivityPayload) {
+        switch payload.category {
+        case .thinking:
+            self = .thinking
+        case .plan:
+            self = .other
+        case .runCommand:
+            if payload.displayTitle.hasPrefix("查看 ") || payload.displayTitle.hasPrefix("列出 ") {
+                self = .browseFile
+            } else if payload.displayTitle.hasPrefix("搜索 ") || payload.displayTitle.hasPrefix("网络搜索") {
+                self = .search
+            } else {
+                self = .runCommand
+            }
+        case .editFile:
+            self = .editFile
+        case .toolCall:
+            self = .toolCall
+        case .error:
+            self = .error
+        }
+    }
+
+    init(kind: MessageKind) {
+        switch kind {
+        case .reasoningSummary:
+            self = .thinking
+        case .commandSummary:
+            self = .runCommand
+        case .fileChangeSummary:
+            self = .editFile
+        case .approval:
+            self = .approval
+        case .userInput:
+            self = .userInput
+        case .error:
+            self = .error
+        case .plan, .message:
+            self = .other
+        }
+    }
+
+    var mixedPreviewPriority: Int {
+        switch self {
+        case .error:
+            return 0
+        case .browseFile, .search, .editFile, .runCommand, .toolCall:
+            return 1
+        case .approval, .userInput:
+            return 2
+        case .other:
+            return 3
+        case .thinking:
+            return 4
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .browseFile, .runCommand:
+            return "terminal"
+        case .search:
+            return "magnifyingglass"
+        case .editFile:
+            return "pencil"
+        case .toolCall:
+            return "wrench.and.screwdriver"
+        case .thinking:
+            return "brain.head.profile"
+        case .approval:
+            return "checkmark.seal"
+        case .userInput:
+            return "questionmark.bubble"
+        case .error:
+            return "exclamationmark.triangle"
+        case .other:
+            return "info.circle"
+        }
+    }
+}
+
+private enum ProcessedActivitySymbol {
+    static func symbolName(for category: ConversationActivityCategory) -> String {
+        switch category {
+        case .thinking:
+            return "brain.head.profile"
+        case .plan:
+            return "list.clipboard"
+        case .runCommand:
+            return "terminal"
+        case .editFile:
+            return "doc.text"
+        case .toolCall:
+            return "wrench.and.screwdriver"
+        case .error:
+            return "exclamationmark.triangle"
+        }
     }
 }
 
@@ -1330,6 +1793,7 @@ private struct MessageRow: View, Equatable {
             && lhs.message.updatedAt == rhs.message.updatedAt
             && lhs.message.renderFingerprint == rhs.message.renderFingerprint
             && lhs.message.turnPayload == rhs.message.turnPayload
+            && lhs.message.activityPayload == rhs.message.activityPayload
             && lhs.themeVersion == rhs.themeVersion
             && lhs.layout == rhs.layout
             && lhs.showsActiveDeliveryStatus == rhs.showsActiveDeliveryStatus
@@ -1891,13 +2355,73 @@ private struct RuntimeSummaryCard: View {
 
     @ViewBuilder
     private var contentView: some View {
-        if message.kind == .plan {
+        if let payload = message.activityPayload {
+            activityContent(payload)
+        } else if message.kind == .plan {
             planMarkdownContent
         } else {
             Text(message.content)
                 .font(themeStore.uiFont(.caption))
                 .foregroundStyle(tokens.secondaryText)
                 .lineLimit(3)
+        }
+    }
+
+    private func activityContent(_ payload: ConversationActivityPayload) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if payload.category == .plan {
+                planMarkdownContent
+            } else if payload.category == .thinking, let subtitle = payload.subtitle {
+                Text(subtitle)
+                    .font(themeStore.uiFont(.caption))
+                    .foregroundStyle(tokens.secondaryText)
+                    .lineLimit(3)
+            } else {
+                if let command = payload.command {
+                    activityDetailRow("命令", value: command, monospaced: true)
+                }
+                if let cwd = payload.cwd {
+                    activityDetailRow("目录", value: cwd, monospaced: true)
+                }
+                if !payload.filePaths.isEmpty {
+                    activityDetailRow("文件", value: payload.filePaths.prefix(5).joined(separator: ", "), monospaced: true)
+                }
+                if let toolName = payload.toolName, payload.category == .toolCall {
+                    activityDetailRow("工具", value: toolName, monospaced: true)
+                }
+                let statusText = [payload.status.map { "状态 \($0)" }, payload.exitCode.map { "退出码 \($0)" }]
+                    .compactMap { $0 }
+                    .joined(separator: " · ")
+                if !statusText.isEmpty {
+                    Text(statusText)
+                        .font(themeStore.uiFont(.caption2, weight: .medium))
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
+                }
+                if let output = payload.outputPreview {
+                    Text(output)
+                        .font(themeStore.uiFont(.caption2).monospaced())
+                        .foregroundStyle(tokens.secondaryText)
+                        .lineLimit(6)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func activityDetailRow(_ label: String, value: String, monospaced: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .font(themeStore.uiFont(.caption2, weight: .semibold))
+                .foregroundStyle(tokens.secondaryText.opacity(0.82))
+                .frame(width: 30, alignment: .leading)
+            Text(value)
+                .font(monospaced ? themeStore.uiFont(.caption2).monospaced() : themeStore.uiFont(.caption2))
+                .foregroundStyle(tokens.secondaryText)
+                .lineLimit(2)
+                .truncationMode(.middle)
         }
     }
 
@@ -1934,6 +2458,9 @@ private struct RuntimeSummaryCard: View {
     }
 
     private var title: String {
+        if let payload = message.activityPayload {
+            return payload.displayTitle
+        }
         switch message.kind {
         case .plan:
             return "计划"
@@ -1967,6 +2494,9 @@ private struct RuntimeSummaryCard: View {
     }
 
     private var symbolName: String {
+        if let category = message.activityPayload?.category {
+            return ProcessedActivitySymbol.symbolName(for: category)
+        }
         switch message.kind {
         case .plan:
             return "list.clipboard"
@@ -1994,6 +2524,16 @@ private struct RuntimeSummaryCard: View {
     }
 
     private var tint: Color {
+        if let category = message.activityPayload?.category {
+            switch category {
+            case .plan, .editFile:
+                return tokens.accent
+            case .error:
+                return .red
+            case .thinking, .runCommand, .toolCall:
+                return tokens.secondaryText
+            }
+        }
         switch message.kind {
         case .plan:
             return tokens.accent
@@ -2017,6 +2557,18 @@ private struct RuntimeSummaryCard: View {
     }
 
     private var background: Color {
+        if let category = message.activityPayload?.category {
+            switch category {
+            case .plan:
+                return tokens.accent.opacity(0.08)
+            case .editFile:
+                return tokens.accent.opacity(0.10)
+            case .error:
+                return Color.red.opacity(0.10)
+            case .thinking, .runCommand, .toolCall:
+                return tokens.systemBubble
+            }
+        }
         switch message.kind {
         case .plan:
             return tokens.accent.opacity(0.08)
@@ -2082,6 +2634,28 @@ private extension View {
     }
 }
 
+private extension String {
+    func removingPrefix(_ prefix: String) -> String {
+        guard hasPrefix(prefix) else {
+            return self
+        }
+        return String(dropFirst(prefix.count))
+    }
+
+    var trimmedNonEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func trimmedPreview(limit: Int) -> String {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > limit else {
+            return trimmed
+        }
+        return String(trimmed.prefix(limit)) + "..."
+    }
+}
+
 private struct MessageTimestampCaption: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
@@ -2108,8 +2682,12 @@ extension ConversationMessage {
             text = "发出 \(Self.compactTime(createdAt))"
         case .assistant:
             guard sendStatus != .sending else {
-                let sendingText = "开始 \(Self.compactTime(createdAt))"
-                return sendingText
+                let started = Self.compactTime(createdAt)
+                guard let updatedAt else {
+                    return "开始 \(started)"
+                }
+                let latest = Self.compactTime(updatedAt)
+                return started == latest ? "开始 \(started)" : "开始 \(started) · 最近 \(latest)"
             }
             let completedAt = updatedAt ?? createdAt
             let started = Self.compactTime(createdAt)

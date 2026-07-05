@@ -251,6 +251,11 @@ private struct HistoryFirstPageFetchFailure: LocalizedError {
     }
 }
 
+private struct HistoryPolicyFailure: Equatable {
+    let retryAfterNanoseconds: UInt64?
+    let retryAfterSeconds: Int?
+}
+
 private enum HistoryFirstPageCachePolicy: Equatable {
     case reuseRecent
     case bypass
@@ -286,6 +291,7 @@ private struct HistoryLoadJob {
     let token: Int
     let sessionSignature: HistoryLoadSignature
     let loadMode: HistoryMessagesPage.LoadMode
+    let allowPolicyRetry: Bool
     let task: Task<HistoryFirstPageResult, Error>
 }
 
@@ -867,8 +873,10 @@ final class SessionStore: ObservableObject {
     private let runtimeEventFlushDelayNanoseconds: UInt64 = 80_000_000
     private let sessionListPollingDelayNanoseconds: UInt64 = 8_000_000_000
     private let economyHistoryPageLimit = 60
-    private let fullHistoryPageLimit = 120
+    private let fullHistoryPageLimit = 20
     private let historyFirstPageCacheTTL: TimeInterval = 4
+    private let historyPolicyRetryFallbackNanoseconds: UInt64 = 15_000_000_000
+    private let historyPolicyRetryMaxNanoseconds: UInt64 = 20_000_000_000
     private static let optimisticSessionSource = "local"
     static let sessionPreviewLimit = 3
     static let sessionExpansionStep = 5
@@ -3142,7 +3150,8 @@ final class SessionStore: ObservableObject {
         loadMode: HistoryMessagesPage.LoadMode = .full,
         force: Bool = false,
         reason: HistoryLoadReason = .automatic,
-        successStatusMessage: String? = nil
+        successStatusMessage: String? = nil,
+        allowPolicyRetry: Bool = true
     ) async -> Bool {
         if !force, canReuseLoadedHistory(for: session, loadMode: loadMode) {
             return true
@@ -3183,6 +3192,7 @@ final class SessionStore: ObservableObject {
             token: jobToken,
             sessionSignature: signature,
             loadMode: loadMode,
+            allowPolicyRetry: allowPolicyRetry,
             task: task
         )
         historyLoadJobsBySessionID[session.id] = job
@@ -3245,7 +3255,7 @@ final class SessionStore: ObservableObject {
                 successStatusMessage: successStatusMessage
             )
         } catch {
-            return failHistoryLoadJob(job, sessionID: session.id, error: error, quiet: quiet)
+            return await failHistoryLoadJob(job, session: session, error: error, quiet: quiet)
         }
     }
 
@@ -3287,10 +3297,11 @@ final class SessionStore: ObservableObject {
 
     private func failHistoryLoadJob(
         _ job: HistoryLoadJob,
-        sessionID: SessionID,
+        session: AgentSession,
         error: Error,
         quiet: Bool
-    ) -> Bool {
+    ) async -> Bool {
+        let sessionID = session.id
         guard historyLoadJobsBySessionID[sessionID]?.token == job.token else {
             return false
         }
@@ -3301,6 +3312,50 @@ final class SessionStore: ObservableObject {
         if let failure = error as? HistoryFirstPageFetchFailure,
            !isCurrentHistoryPageRequest(sessionID: sessionID, token: failure.token) {
             return false
+        }
+        if let policyFailure = historyPolicyFailure(from: error) {
+            switch job.loadMode {
+            case .full:
+                let message = "完整历史内容较大，正在切换缩略历史。"
+                setHistoryLoadNotice(sessionID: sessionID, kind: .loadingSummary, message: message)
+                if !quiet {
+                    setStatusMessage(message)
+                }
+                return await loadHistory(
+                    for: session,
+                    quiet: quiet,
+                    loadMode: .economy,
+                    force: true,
+                    reason: .automatic,
+                    successStatusMessage: quiet ? nil : "已自动加载缩略历史"
+                )
+            case .economy where job.allowPolicyRetry:
+                let delay = policyFailure.retryAfterNanoseconds ?? historyPolicyRetryFallbackNanoseconds
+                let seconds = policyFailure.retryAfterSeconds ?? Int((delay + 999_999_999) / 1_000_000_000)
+                let message = "服务器临时限流，\(seconds) 秒后自动重试缩略历史。"
+                setHistoryLoadNotice(sessionID: sessionID, kind: .loadingSummary, message: message)
+                if !quiet {
+                    setStatusMessage(message)
+                }
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled else {
+                    return false
+                }
+                if let selectedSessionID, selectedSessionID != sessionID {
+                    return false
+                }
+                return await loadHistory(
+                    for: session,
+                    quiet: quiet,
+                    loadMode: .economy,
+                    force: true,
+                    reason: .automatic,
+                    successStatusMessage: quiet ? nil : "已加载缩略历史",
+                    allowPolicyRetry: false
+                )
+            default:
+                break
+            }
         }
         if job.loadMode == .full {
             setHistoryLoadNotice(sessionID: sessionID, kind: .fullFailed)
@@ -3313,6 +3368,76 @@ final class SessionStore: ObservableObject {
         return false
     }
 
+    private func historyPolicyFailure(from error: Error) -> HistoryPolicyFailure? {
+        let underlying = (error as? HistoryFirstPageFetchFailure)?.underlying ?? error
+        let message = underlying.localizedDescription
+        let lowerMessage = message.lowercased()
+        let appServerError: CodexAppServerError?
+        if case CodexAppServerConnectionError.appServer(let error) = underlying {
+            appServerError = error
+        } else {
+            appServerError = nil
+        }
+
+        let data = appServerError?.data?.objectValue
+        let reason = data?["reason"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isHistoryReason = reason?.hasPrefix("history_") == true
+        let isLegacyHistoryPolicyMessage =
+            lowerMessage.contains("-32080")
+            && (
+                lowerMessage.contains("thread/turns/list")
+                || lowerMessage.contains("thread/read")
+                || lowerMessage.contains("history response")
+                || lowerMessage.contains("limit/itemsview")
+                || message.contains("历史响应")
+                || message.contains("临时限流")
+                || message.contains("响应过大")
+                || message.contains("内容过大")
+            )
+        let isGatewayHistoryPolicy = appServerError?.code == -32080 && (isHistoryReason || isLegacyHistoryPolicyMessage)
+        guard isGatewayHistoryPolicy || isLegacyHistoryPolicyMessage else {
+            return nil
+        }
+
+        let retryAfterMs = data?["retryAfterMs"]?.intValue
+        let retryAfterSeconds = data?["retryAfterSeconds"]?.intValue
+            ?? Self.retryAfterSeconds(fromHistoryPolicyMessage: message)
+        let retryAfterNanoseconds: UInt64?
+        if let retryAfterMs, retryAfterMs > 0 {
+            retryAfterNanoseconds = boundedHistoryPolicyRetryNanoseconds(UInt64(retryAfterMs) * 1_000_000)
+        } else if let retryAfterSeconds, retryAfterSeconds > 0 {
+            retryAfterNanoseconds = boundedHistoryPolicyRetryNanoseconds(UInt64(retryAfterSeconds) * 1_000_000_000)
+        } else {
+            retryAfterNanoseconds = nil
+        }
+        return HistoryPolicyFailure(retryAfterNanoseconds: retryAfterNanoseconds, retryAfterSeconds: retryAfterSeconds)
+    }
+
+    private func boundedHistoryPolicyRetryNanoseconds(_ nanoseconds: UInt64) -> UInt64 {
+        min(max(nanoseconds, 1_000_000), historyPolicyRetryMaxNanoseconds)
+    }
+
+    nonisolated private static func retryAfterSeconds(fromHistoryPolicyMessage message: String) -> Int? {
+        let patterns = [
+            #""retryAfterSeconds"\s*:\s*(\d+)"#,
+            #""retry_after_seconds"\s*:\s*(\d+)"#,
+            #"请\s*(\d+)\s*秒后重试"#
+        ]
+        let range = NSRange(message.startIndex..<message.endIndex, in: message)
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+            guard let match = regex.firstMatch(in: message, range: range),
+                  let secondsRange = Range(match.range(at: 1), in: message),
+                  let seconds = Int(message[secondsRange]) else {
+                continue
+            }
+            return seconds
+        }
+        return nil
+    }
+
     private func cancelHistoryLoadJob(_ job: HistoryLoadJob, sessionID: SessionID) {
         if historyLoadJobsBySessionID[sessionID]?.token == job.token {
             // best-effort 取消旧 job；即使底层请求已发出，token 校验也会阻止迟到结果覆盖当前视图。
@@ -3321,18 +3446,19 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    private func setHistoryLoadNotice(sessionID: SessionID, kind: HistorySavingsNotice.Kind) {
-        let message: String
+    private func setHistoryLoadNotice(sessionID: SessionID, kind: HistorySavingsNotice.Kind, message customMessage: String? = nil) {
+        let defaultMessage: String
         switch kind {
         case .loadingFull:
-            message = "正在加载完整历史，内容较大时可能需要等待。"
+            defaultMessage = "正在加载完整历史，内容较大时可能需要等待。"
         case .fullFailed:
-            message = "完整历史加载失败，可能是内容过大。"
+            defaultMessage = "完整历史加载失败，可能是内容过大。"
         case .loadingSummary:
-            message = "正在加载缩略历史。"
+            defaultMessage = "正在加载缩略历史。"
         case .summaryLoaded:
-            message = "当前显示缩略历史。"
+            defaultMessage = "当前显示缩略历史。"
         }
+        let message = customMessage ?? defaultMessage
         historySavingsNoticesBySessionID[sessionID] = HistorySavingsNotice(sessionID: sessionID, kind: kind, message: message)
     }
 

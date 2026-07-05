@@ -713,6 +713,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
     let role: String
     let kind: MessageKind
     let content: String
+    let activityPayload: ConversationActivityPayload?
     let createdAt: Date?
     let updatedAt: Date?
     let clientMessageID: ClientMessageID?
@@ -730,6 +731,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
         role: String,
         kind: MessageKind = .message,
         content: String,
+        activityPayload: ConversationActivityPayload? = nil,
         createdAt: Date?,
         updatedAt: Date? = nil,
         clientMessageID: ClientMessageID? = nil,
@@ -746,6 +748,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
         self.role = role
         self.kind = kind
         self.content = content
+        self.activityPayload = activityPayload
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.clientMessageID = clientMessageID
@@ -764,6 +767,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
         case role
         case kind
         case content
+        case activityPayload = "activity_payload"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case clientMessageID = "client_message_id"
@@ -789,6 +793,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
             role: role,
             kind: try container.decodeIfPresent(MessageKind.self, forKey: .kind) ?? .message,
             content: content,
+            activityPayload: try container.decodeIfPresent(ConversationActivityPayload.self, forKey: .activityPayload),
             createdAt: createdAt,
             updatedAt: updatedAt,
             clientMessageID: clientMessageID,
@@ -809,6 +814,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
             role: role,
             kind: kind,
             content: content,
+            activityPayload: activityPayload,
             createdAt: createdAt,
             updatedAt: updatedAt ?? self.updatedAt,
             clientMessageID: clientMessageID,
@@ -1195,6 +1201,7 @@ struct ConversationMessage: Identifiable, Hashable {
     var sendStatus: MessageSendStatus
     var revision: ModelRevision?
     var turnPayload: CodexAppServerTurnPayload?
+    var activityPayload: ConversationActivityPayload?
     var timelineOrdinal: Int64?
     var userDelivery: UserMessageDelivery?
     var isTimestampFallback: Bool
@@ -1224,6 +1231,7 @@ struct ConversationMessage: Identifiable, Hashable {
         sendStatus: MessageSendStatus = .sent,
         revision: ModelRevision? = nil,
         turnPayload: CodexAppServerTurnPayload? = nil,
+        activityPayload: ConversationActivityPayload? = nil,
         timelineOrdinal: Int64? = nil,
         userDelivery: UserMessageDelivery? = nil,
         isTimestampFallback: Bool = false
@@ -1241,6 +1249,7 @@ struct ConversationMessage: Identifiable, Hashable {
         self.sendStatus = sendStatus
         self.revision = revision
         self.turnPayload = turnPayload
+        self.activityPayload = activityPayload
         self.timelineOrdinal = timelineOrdinal
         self.userDelivery = userDelivery
         self.isTimestampFallback = isTimestampFallback
@@ -1262,6 +1271,7 @@ struct ConversationMessage: Identifiable, Hashable {
             && lhs.updatedAt == rhs.updatedAt
             && lhs.sendStatus == rhs.sendStatus
             && lhs.revision == rhs.revision
+            && lhs.activityPayload == rhs.activityPayload
             && lhs.timelineOrdinal == rhs.timelineOrdinal
             && lhs.userDelivery == rhs.userDelivery
             && lhs.isTimestampFallback == rhs.isTimestampFallback
@@ -1281,6 +1291,7 @@ struct ConversationMessage: Identifiable, Hashable {
         hasher.combine(updatedAt)
         hasher.combine(sendStatus)
         hasher.combine(revision)
+        hasher.combine(activityPayload)
         hasher.combine(timelineOrdinal)
         hasher.combine(userDelivery)
         hasher.combine(isTimestampFallback)
@@ -1353,6 +1364,361 @@ enum UserMessageDelivery: String, Codable, Hashable {
     case injected
 }
 
+enum ConversationActivityCategory: String, Codable, Hashable {
+    case thinking
+    case plan
+    case runCommand = "run_command"
+    case editFile = "edit_file"
+    case toolCall = "tool_call"
+    case error
+}
+
+struct ConversationActivityPayload: Codable, Hashable {
+    let category: ConversationActivityCategory
+    let displayTitle: String
+    let subtitle: String?
+    let status: String?
+    let command: String?
+    let cwd: String?
+    let toolName: String?
+    let filePaths: [String]
+    let exitCode: Int?
+    let outputPreview: String?
+    let outputDigest: UInt64?
+    let outputByteCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case category
+        case displayTitle = "display_title"
+        case subtitle
+        case status
+        case command
+        case cwd
+        case toolName = "tool_name"
+        case filePaths = "file_paths"
+        case exitCode = "exit_code"
+        case outputPreview = "output_preview"
+        case outputDigest = "output_digest"
+        case outputByteCount = "output_byte_count"
+    }
+
+    init(
+        category: ConversationActivityCategory,
+        displayTitle: String,
+        subtitle: String? = nil,
+        status: String? = nil,
+        command: String? = nil,
+        cwd: String? = nil,
+        toolName: String? = nil,
+        filePaths: [String] = [],
+        exitCode: Int? = nil,
+        outputPreview: String? = nil,
+        outputDigest: UInt64? = nil,
+        outputByteCount: Int? = nil
+    ) {
+        self.category = category
+        self.displayTitle = displayTitle
+        self.subtitle = subtitle
+        self.status = status
+        self.command = command
+        self.cwd = cwd
+        self.toolName = toolName
+        self.filePaths = filePaths
+        self.exitCode = exitCode
+        self.outputPreview = outputPreview
+        self.outputDigest = outputDigest
+        self.outputByteCount = outputByteCount
+    }
+
+    init?(item: [String: CodexAppServerJSONValue]) {
+        guard let type = Self.firstString(in: item, keys: ["type"]) else {
+            return nil
+        }
+        switch type {
+        case "plan":
+            guard let text = Self.firstString(in: item, keys: ["text"])?.trimmedNonEmpty else {
+                return nil
+            }
+            self.init(category: .plan, displayTitle: "计划", subtitle: text)
+
+        case "reasoning":
+            let text = Self.reasoningText(from: item)
+            guard !text.isEmpty else {
+                return nil
+            }
+            self.init(category: .thinking, displayTitle: "推理摘要", subtitle: text)
+
+        case "commandExecution":
+            let command = Self.firstString(in: item, keys: ["command", "processId"])?.trimmedNonEmpty ?? "命令执行"
+            let actionTitle = Self.commandActionTitle(from: item["commandActions"]?.arrayValue)
+            let status = Self.firstString(in: item, keys: ["status"])?.trimmedNonEmpty
+            let cwd = Self.firstString(in: item, keys: ["cwd"])?.trimmedNonEmpty
+            let output = Self.firstString(in: item, keys: ["aggregatedOutput"])?.trimmedNonEmpty
+            let outputDigest = output.map(Self.stableDigest)
+            let outputByteCount = output?.utf8.count
+            self.init(
+                category: .runCommand,
+                displayTitle: actionTitle ?? "运行 \(command)",
+                subtitle: cwd,
+                status: status,
+                command: command,
+                cwd: cwd,
+                exitCode: Self.firstInt(in: item, keys: ["exitCode"]),
+                outputPreview: output.map { Self.truncatedText($0, limit: Self.outputPreviewLimit) },
+                outputDigest: outputDigest,
+                outputByteCount: outputByteCount
+            )
+
+        case "fileChange":
+            let changes = item["changes"]?.arrayValue?.compactMap(\.objectValue) ?? []
+            let filePaths = Self.filePaths(from: changes)
+            let status = Self.firstString(in: item, keys: ["status"])?.trimmedNonEmpty ?? "modified"
+            let summary = Self.fileChangeSummary(from: changes) ?? "workspace"
+            let title = filePaths.count > 1 ? "修改 \(filePaths.count) 个文件" : "修改 \(summary)"
+            self.init(category: .editFile, displayTitle: title, subtitle: status, status: status, filePaths: filePaths)
+
+        case "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch":
+            let title = Self.toolTitle(from: item, type: type)
+            let status = Self.firstString(in: item, keys: ["status"])?.trimmedNonEmpty
+            self.init(
+                category: .toolCall,
+                displayTitle: title,
+                subtitle: status,
+                status: status,
+                toolName: title
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    var messageKind: MessageKind {
+        switch category {
+        case .thinking:
+            return .reasoningSummary
+        case .plan:
+            return .plan
+        case .runCommand, .toolCall:
+            return .commandSummary
+        case .editFile:
+            return .fileChangeSummary
+        case .error:
+            return .error
+        }
+    }
+
+    var summaryText: String {
+        switch category {
+        case .thinking, .plan:
+            return subtitle ?? displayTitle
+        case .runCommand:
+            return commandSummaryText
+        case .editFile:
+            return fileChangeSummaryText
+        case .toolCall:
+            return toolSummaryText
+        case .error:
+            return subtitle ?? displayTitle
+        }
+    }
+
+    static func == (lhs: ConversationActivityPayload, rhs: ConversationActivityPayload) -> Bool {
+        lhs.category == rhs.category
+            && lhs.displayTitle == rhs.displayTitle
+            && lhs.subtitle == rhs.subtitle
+            && lhs.status == rhs.status
+            && lhs.command == rhs.command
+            && lhs.cwd == rhs.cwd
+            && lhs.toolName == rhs.toolName
+            && lhs.filePaths == rhs.filePaths
+            && lhs.exitCode == rhs.exitCode
+            && lhs.outputDigest == rhs.outputDigest
+            && lhs.outputByteCount == rhs.outputByteCount
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(category)
+        hasher.combine(displayTitle)
+        hasher.combine(subtitle)
+        hasher.combine(status)
+        hasher.combine(command)
+        hasher.combine(cwd)
+        hasher.combine(toolName)
+        hasher.combine(filePaths)
+        hasher.combine(exitCode)
+        hasher.combine(outputDigest)
+        hasher.combine(outputByteCount)
+    }
+
+    private var commandSummaryText: String {
+        let command = command?.trimmedNonEmpty ?? displayTitle
+        var lines = ["命令：\(command)"]
+        if let cwd {
+            lines.append("目录：\(cwd)")
+        }
+        let statusLine = [status.map { "状态：\($0)" }, exitCode.map { "退出码：\($0)" }]
+            .compactMap { $0 }
+            .joined(separator: "，")
+        if !statusLine.isEmpty {
+            lines.append(statusLine)
+        }
+        if let outputPreview {
+            lines.append("输出：\n\(outputPreview)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private var fileChangeSummaryText: String {
+        let summary = filePaths.isEmpty ? (displayTitle.replacingOccurrences(of: "修改 ", with: "")) : Self.compactFileSummary(filePaths)
+        let statusText = status ?? "modified"
+        return "文件变更：\(summary) \(statusText)"
+    }
+
+    private var toolSummaryText: String {
+        let title = toolName ?? displayTitle
+        guard let status, !status.isEmpty else {
+            return "工具：\(title)"
+        }
+        return "工具：\(title)\n状态：\(status)"
+    }
+
+    private static let outputPreviewLimit = 1_000
+
+    private static func reasoningText(from item: [String: CodexAppServerJSONValue]) -> String {
+        let summary = item["summary"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        let content = item["content"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        return (summary + content)
+            .compactMap(\.trimmedNonEmpty)
+            .joined(separator: "\n\n")
+    }
+
+    private static func commandActionTitle(from actions: [CodexAppServerJSONValue]?) -> String? {
+        for action in actions?.compactMap(\.objectValue) ?? [] {
+            if let query = firstString(in: action, keys: ["query"])?.trimmedNonEmpty {
+                return "搜索 \(query)"
+            }
+            let name = firstString(in: action, keys: ["name", "type", "kind"])?.trimmedNonEmpty
+            let path = firstString(in: action, keys: ["path", "file", "filePath", "relativePath"])?.trimmedNonEmpty
+            if let path {
+                let verb = localizedActionVerb(name)
+                return "\(verb) \(shortPath(path))"
+            }
+            if let name {
+                return localizedActionVerb(name)
+            }
+        }
+        return nil
+    }
+
+    private static func localizedActionVerb(_ value: String?) -> String {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "read", "view", "open", "cat":
+            return "查看"
+        case "search", "grep", "rg", "find":
+            return "搜索"
+        case "list", "ls":
+            return "列出"
+        case let value? where !value.isEmpty:
+            return value
+        default:
+            return "查看"
+        }
+    }
+
+    private static func toolTitle(from item: [String: CodexAppServerJSONValue], type: String) -> String {
+        switch type {
+        case "mcpToolCall":
+            let title = [firstString(in: item, keys: ["server"]), firstString(in: item, keys: ["tool"])]
+                .compactMap { $0?.trimmedNonEmpty }
+                .joined(separator: ".")
+            return title.isEmpty ? "MCP 工具调用" : title
+        case "dynamicToolCall":
+            let title = [firstString(in: item, keys: ["namespace"]), firstString(in: item, keys: ["tool"])]
+                .compactMap { $0?.trimmedNonEmpty }
+                .joined(separator: ".")
+            return title.isEmpty ? "动态工具调用" : title
+        case "collabAgentToolCall":
+            return firstString(in: item, keys: ["tool", "agentNickname", "nickname"])?.trimmedNonEmpty ?? "子 Agent 调用"
+        case "webSearch":
+            if let query = firstString(in: item, keys: ["query"])?.trimmedNonEmpty {
+                return "网络搜索：\(query)"
+            }
+            return "网络搜索"
+        default:
+            return "工具调用"
+        }
+    }
+
+    private static func filePaths(from changes: [[String: CodexAppServerJSONValue]]) -> [String] {
+        changes.compactMap { change in
+            firstString(in: change, keys: ["path", "filePath", "relativePath", "filename"])?.trimmedNonEmpty
+        }
+    }
+
+    private static func fileChangeSummary(from changes: [[String: CodexAppServerJSONValue]]) -> String? {
+        let paths = filePaths(from: changes)
+        guard !paths.isEmpty else {
+            return nil
+        }
+        return compactFileSummary(paths)
+    }
+
+    private static func compactFileSummary(_ paths: [String]) -> String {
+        var parts = Array(paths.prefix(3))
+        if paths.count > parts.count {
+            parts.append("+\(paths.count - parts.count)")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private static func shortPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return path
+        }
+        if let last = trimmed.split(separator: "/").last, !last.isEmpty {
+            return String(last)
+        }
+        return trimmed
+    }
+
+    private static func truncatedText(_ text: String, limit: Int) -> String {
+        let prefix = text.prefix(limit)
+        guard prefix.endIndex != text.endIndex else {
+            return text
+        }
+        return String(prefix) + "\n... output truncated"
+    }
+
+    private static func stableDigest(_ text: String) -> UInt64 {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return hash
+    }
+
+    private static func firstString(in params: [String: CodexAppServerJSONValue], keys: [String]) -> String? {
+        for key in keys {
+            if let value = params[key]?.stringValue {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func firstInt(in params: [String: CodexAppServerJSONValue], keys: [String]) -> Int? {
+        for key in keys {
+            if let value = params[key]?.intValue {
+                return value
+            }
+        }
+        return nil
+    }
+}
+
 struct UsageSummary: Codable, Hashable {
     let inputTokens: Int?
     let outputTokens: Int?
@@ -1378,6 +1744,13 @@ struct UsageSummary: Codable, Hashable {
             return "\(outputTokens) out"
         }
         return nil
+    }
+}
+
+private extension String {
+    var trimmedNonEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -1547,7 +1920,7 @@ struct RateLimitSummary: Codable, Hashable {
 }
 
 struct CodexUsageDisplaySummary: Equatable {
-    static let nearLimitThreshold = 0.8
+    static let nearLimitThreshold = 0.85
 
     let title: String
     let primaryText: String
@@ -1832,6 +2205,7 @@ struct AgentMessage: Identifiable, Codable, Hashable {
     let kind: MessageKind
     var content: String
     var summary: String?
+    var activityPayload: ConversationActivityPayload?
     var createdAt: Date?
     var updatedAt: Date?
     var seq: EventSequence?
@@ -1849,6 +2223,7 @@ struct AgentMessage: Identifiable, Codable, Hashable {
         case kind
         case content
         case summary
+        case activityPayload = "activity_payload"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case seq
@@ -1867,6 +2242,7 @@ struct AgentMessage: Identifiable, Codable, Hashable {
         kind: MessageKind = .message,
         content: String,
         summary: String? = nil,
+        activityPayload: ConversationActivityPayload? = nil,
         createdAt: Date? = nil,
         updatedAt: Date? = nil,
         seq: EventSequence? = nil,
@@ -1883,6 +2259,7 @@ struct AgentMessage: Identifiable, Codable, Hashable {
         self.kind = kind
         self.content = content
         self.summary = summary
+        self.activityPayload = activityPayload
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.seq = seq
@@ -1902,6 +2279,7 @@ struct AgentMessage: Identifiable, Codable, Hashable {
         self.kind = try container.decodeIfPresent(MessageKind.self, forKey: .kind) ?? .message
         self.content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
         self.summary = try container.decodeIfPresent(String.self, forKey: .summary)
+        self.activityPayload = try container.decodeIfPresent(ConversationActivityPayload.self, forKey: .activityPayload)
         self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt)
         self.seq = try container.decodeIfPresent(EventSequence.self, forKey: .seq)

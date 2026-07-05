@@ -146,10 +146,7 @@ struct ComposerView: View {
         // 这里只保留一个真正的输入卡片，避免“框中框”的视觉堆叠。
         VStack(alignment: .leading, spacing: 10) {
             foregroundActivityRow
-            sessionControlNotice
-            quotaLimitNotice
-            usageLimitStrip
-            activeGoalStatusBar
+            composerStatusTray
             pendingApprovalAction
             pendingUserInputAction
             voiceErrorMessage
@@ -226,8 +223,8 @@ struct ComposerView: View {
                 guidedFollowUpEnabled = false
             }
         }
-        .onChange(of: sessionStore.selectedThreadGoal) { _, goal in
-            syncGoalStatusBarVisibility(for: goal)
+        .onChange(of: sessionStore.selectedThreadGoal) { previousGoal, goal in
+            syncGoalStatusBarVisibility(from: previousGoal, to: goal)
         }
         .task(id: voiceInput.errorMessage) {
             await autoDismissVoiceErrorIfNeeded(voiceInput.errorMessage)
@@ -476,162 +473,78 @@ struct ComposerView: View {
     }
 
     @ViewBuilder
-    private var sessionControlNotice: some View {
-        if let notice = sessionStore.selectedSessionControlNotice {
-            let tokens = themeStore.tokens(for: colorScheme)
-            HStack(spacing: 8) {
-                Image(systemName: "eye")
-                    .font(themeStore.uiFont(.caption, weight: .semibold))
-                Text(notice)
-                    .lineLimit(2)
-                    .layoutPriority(1)
-                Button {
+    private var composerStatusTray: some View {
+        let visibleGoal = selectedVisibleThreadGoal
+        let usageNotice = selectedComposerUsageNotice
+        if sessionStore.selectedSessionControlNotice != nil ||
+            sessionStore.selectedQuotaNotice != nil ||
+            usageNotice != nil ||
+            visibleGoal != nil {
+            ComposerStatusTray(
+                sessionControlNotice: sessionStore.selectedSessionControlNotice,
+                quotaNotice: sessionStore.selectedQuotaNotice,
+                usage: usageNotice,
+                goal: visibleGoal,
+                isGoalExpanded: isGoalStatusExpanded,
+                isGoalUpdating: sessionStore.isUpdatingThreadGoal,
+                goalErrorMessage: sessionStore.threadGoalErrorMessage,
+                isRefreshDisabled: sessionStore.isRefreshingSelectedSession || sessionStore.isLoading,
+                onTakeOver: {
                     sessionStore.takeOverSelectedSession()
-                } label: {
-                    Label("接管", systemImage: "hand.raised.fill")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(.borderless)
-                .font(themeStore.uiFont(.caption, weight: .semibold))
-            }
-            .font(themeStore.uiFont(.caption))
-            .foregroundStyle(tokens.secondaryText)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(tokens.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(tokens.border)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var quotaLimitNotice: some View {
-        if let notice = sessionStore.selectedQuotaNotice {
-            let tokens = themeStore.tokens(for: colorScheme)
-            HStack(spacing: 8) {
-                Image(systemName: "speedometer")
-                    .font(themeStore.uiFont(.caption, weight: .semibold))
-                Text(notice.blocksSending ? "额度已用尽，暂时不能发送。\(notice.message)" : notice.message)
-                    .lineLimit(2)
-                    .layoutPriority(1)
-                Button {
+                },
+                onRefreshUsage: {
                     Task {
                         await sessionStore.refreshCurrentContext()
                     }
-                } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(.borderless)
-                .font(themeStore.uiFont(.caption, weight: .semibold))
-            }
-            .font(themeStore.uiFont(.caption))
-            .foregroundStyle(tokens.warning)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(tokens.warning.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(tokens.warning.opacity(0.36))
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var usageLimitStrip: some View {
-        if sessionStore.selectedQuotaNotice == nil,
-           let usage = sessionStore.selectedCodexUsageDisplay,
-           !usage.isExhausted {
-            let tokens = themeStore.tokens(for: colorScheme)
-            let tint = usage.isNearLimit ? tokens.warning : tokens.accent
-
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 10) {
-                    usageLimitIcon(tint: tint)
-                    usageLimitSummary(usage, tint: tint)
-                    Spacer(minLength: 8)
-                    usageLimitRefreshButton(tint: tint)
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .top, spacing: 10) {
-                        usageLimitIcon(tint: tint)
-                        usageLimitSummary(usage, tint: tint)
+                },
+                onEditGoal: {
+                    if let goal = visibleGoal {
+                        goalEditor = ThreadGoalEditorDraft(sessionID: goal.threadID, existing: goal)
                     }
-                    usageLimitRefreshButton(tint: tint)
+                },
+                onTogglePauseGoal: {
+                    if let goal = visibleGoal {
+                        Task { await sessionStore.updateSelectedThreadGoalStatus(nextPrimaryGoalStatus(for: goal.status)) }
+                    }
+                },
+                onCompleteGoal: {
+                    Task { await sessionStore.updateSelectedThreadGoalStatus(.complete) }
+                },
+                onClearGoal: {
+                    Task { await sessionStore.clearSelectedThreadGoal() }
+                },
+                onToggleGoalExpanded: {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        isGoalStatusExpanded.toggle()
+                    }
+                }
+            )
+            .environmentObject(themeStore)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .task(id: visibleGoal.map { completedGoalAutoHideTaskID(for: $0) } ?? "no-goal") {
+                if let visibleGoal {
+                    await autoHideCompletedGoalIfNeeded(visibleGoal)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(tint.opacity(0.28))
-            }
-            .accessibilityElement(children: .contain)
         }
     }
 
-    private func usageLimitIcon(tint: Color) -> some View {
-        Image(systemName: "speedometer")
-            .font(themeStore.uiFont(.body, weight: .semibold))
-            .foregroundStyle(tint)
-            .frame(width: 24, height: 24)
-            .background(tint.opacity(0.12), in: Circle())
-            .accessibilityHidden(true)
+    private var selectedComposerUsageNotice: CodexUsageDisplaySummary? {
+        guard sessionStore.selectedQuotaNotice == nil,
+              let usage = sessionStore.selectedCodexUsageDisplay,
+              !usage.isExhausted,
+              usage.isNearLimit
+        else {
+            return nil
+        }
+        return usage
     }
 
-    private func usageLimitSummary(_ usage: CodexUsageDisplaySummary, tint: Color) -> some View {
-        let tokens = themeStore.tokens(for: colorScheme)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(usage.title)
-                    .font(themeStore.uiFont(.caption, weight: .semibold))
-                    .foregroundStyle(tokens.secondaryText)
-                    .lineLimit(1)
-                Text(usage.primaryText)
-                    .font(themeStore.uiFont(.caption2, weight: .bold))
-                    .foregroundStyle(tint)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(tint.opacity(0.13), in: Capsule())
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.86)
-            }
-
-            Text(usage.secondaryText)
-                .font(themeStore.uiFont(.caption2, weight: .medium))
-                .foregroundStyle(tokens.secondaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.86)
-
-            if let progress = usage.progress {
-                ProgressView(value: progress)
-                    .tint(tint)
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("Codex 使用量")
-                    .accessibilityValue(usage.primaryText)
-            }
+    private var selectedVisibleThreadGoal: ThreadGoal? {
+        guard let goal = sessionStore.selectedThreadGoal, shouldShowGoalStatusBar(goal) else {
+            return nil
         }
-        .layoutPriority(1)
-    }
-
-    private func usageLimitRefreshButton(tint: Color) -> some View {
-        Button {
-            Task {
-                await sessionStore.refreshCurrentContext()
-            }
-        } label: {
-            Label("刷新", systemImage: "arrow.clockwise")
-                .labelStyle(.titleAndIcon)
-        }
-        .buttonStyle(.borderless)
-        .font(themeStore.uiFont(.caption, weight: .semibold))
-        .foregroundStyle(tint)
-        .disabled(sessionStore.isRefreshingSelectedSession || sessionStore.isLoading)
-        .accessibilityLabel("刷新 Codex 使用量")
+        return goal
     }
 
     // 输入框上方收敛成一行：左＝常驻只读信息（模型/权限 + seq/usage 等），中＝录音波形，
@@ -741,40 +654,6 @@ struct ComposerView: View {
         .layoutPriority(1)
     }
 
-    @ViewBuilder
-    private var activeGoalStatusBar: some View {
-        if let goal = sessionStore.selectedThreadGoal, shouldShowGoalStatusBar(goal) {
-            ActiveGoalStatusBar(
-                goal: goal,
-                isExpanded: isGoalStatusExpanded,
-                isUpdating: sessionStore.isUpdatingThreadGoal,
-                errorMessage: sessionStore.threadGoalErrorMessage,
-                onEdit: {
-                    goalEditor = ThreadGoalEditorDraft(sessionID: goal.threadID, existing: goal)
-                },
-                onTogglePause: {
-                    Task { await sessionStore.updateSelectedThreadGoalStatus(nextPrimaryGoalStatus(for: goal.status)) }
-                },
-                onComplete: {
-                    Task { await sessionStore.updateSelectedThreadGoalStatus(.complete) }
-                },
-                onClear: {
-                    Task { await sessionStore.clearSelectedThreadGoal() }
-                },
-                onToggleExpanded: {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        isGoalStatusExpanded.toggle()
-                    }
-                }
-            )
-            .environmentObject(themeStore)
-            .transition(.move(edge: .top).combined(with: .opacity))
-            .task(id: completedGoalAutoHideTaskID(for: goal)) {
-                await autoHideCompletedGoalIfNeeded(goal)
-            }
-        }
-    }
-
     private func shouldShowGoalStatusBar(_ goal: ThreadGoal) -> Bool {
         goal.status != .complete || !hiddenCompletedGoalIDs.contains(goal.threadID)
     }
@@ -787,10 +666,13 @@ struct ComposerView: View {
         ].joined(separator: "#")
     }
 
-    private func syncGoalStatusBarVisibility(for goal: ThreadGoal?) {
+    private func syncGoalStatusBarVisibility(from previousGoal: ThreadGoal?, to goal: ThreadGoal?) {
         guard let goal else {
             isGoalStatusExpanded = false
             return
+        }
+        if previousGoal?.threadID != goal.threadID {
+            isGoalStatusExpanded = false
         }
         // 目标重新进入非完成态时，恢复 composer 上方的常驻状态条。
         if goal.status != .complete {
@@ -2563,180 +2445,313 @@ struct ComposerView: View {
     }
 }
 
-private struct ActiveGoalStatusBar: View {
+private struct ComposerStatusTray: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
 
-    let goal: ThreadGoal
-    let isExpanded: Bool
-    let isUpdating: Bool
-    let errorMessage: String?
-    let onEdit: () -> Void
-    let onTogglePause: () -> Void
-    let onComplete: () -> Void
-    let onClear: () -> Void
-    let onToggleExpanded: () -> Void
+    let sessionControlNotice: String?
+    let quotaNotice: CodexQuotaNotice?
+    let usage: CodexUsageDisplaySummary?
+    let goal: ThreadGoal?
+    let isGoalExpanded: Bool
+    let isGoalUpdating: Bool
+    let goalErrorMessage: String?
+    let isRefreshDisabled: Bool
+    let onTakeOver: () -> Void
+    let onRefreshUsage: () -> Void
+    let onEditGoal: () -> Void
+    let onTogglePauseGoal: () -> Void
+    let onCompleteGoal: () -> Void
+    let onClearGoal: () -> Void
+    let onToggleGoalExpanded: () -> Void
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
+        let tint = trayTint(tokens: tokens)
 
-        VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
-            ViewThatFits(in: .horizontal) {
-                horizontalHeader(tokens: tokens)
-                verticalHeader(tokens: tokens)
+        VStack(alignment: .leading, spacing: isGoalExpanded ? 8 : 0) {
+            trayHeader(tokens: tokens)
+
+            if isGoalExpanded {
+                expandedTrayContent(tokens: tokens)
             }
 
-            if isExpanded {
-                Divider()
-                expandedDetails(tokens: tokens)
-            }
-
-            if let errorMessage = errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !errorMessage.isEmpty {
+            if let trimmedGoalError {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle")
-                    Text(errorMessage)
+                    Text(trimmedGoalError)
                         .lineLimit(2)
                 }
                 .font(themeStore.uiFont(.caption2, weight: .medium))
                 .foregroundStyle(tokens.warning)
-                .padding(.top, isExpanded ? 0 : 6)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(statusTint.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(8)
+        .frame(maxWidth: isGoalExpanded ? 680 : .infinity, alignment: .leading)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(statusTint.opacity(0.28))
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(tint.opacity(0.28))
         }
         .accessibilityElement(children: .contain)
     }
 
-    private func horizontalHeader(tokens: ThemeTokens) -> some View {
-        HStack(alignment: .center, spacing: 10) {
-            statusIcon
-            summaryText(tokens: tokens)
-            Spacer(minLength: 8)
-            goalActionButtons(tokens: tokens)
-        }
-    }
-
-    private func verticalHeader(tokens: ThemeTokens) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
-                statusIcon
-                summaryText(tokens: tokens)
-                Spacer(minLength: 8)
-                expandButton(tokens: tokens)
+    @ViewBuilder
+    private func trayHeader(tokens: ThemeTokens) -> some View {
+        if isGoalExpanded {
+            HStack {
+                Spacer(minLength: 0)
+                iconButton(
+                    title: "收起状态",
+                    systemImage: "chevron.up",
+                    tint: tokens.secondaryText,
+                    isDisabled: false,
+                    action: onToggleGoalExpanded
+                )
             }
-            goalActionButtons(tokens: tokens, includesExpandButton: false)
+        } else {
+            collapsedHeader(tokens: tokens)
         }
     }
 
-    private var statusIcon: some View {
-        Image(systemName: "target")
-            .font(themeStore.uiFont(size: 15, weight: .bold))
-            .foregroundStyle(statusTint)
-            .frame(width: 30, height: 30)
-            .background(statusTint.opacity(0.14), in: Circle())
+    private func collapsedHeader(tokens: ThemeTokens) -> some View {
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    if sessionControlNotice != nil {
+                        collapsedChip(title: "观察", systemImage: "eye", tint: tokens.secondaryText, tokens: tokens)
+                    }
+                    if quotaNotice != nil {
+                        collapsedChip(title: "额度", systemImage: "speedometer", tint: tokens.warning, tokens: tokens)
+                    } else if usage != nil {
+                        collapsedChip(title: "额度", systemImage: "speedometer", tint: tokens.warning, tokens: tokens)
+                    }
+                    if let goal {
+                        collapsedChip(title: collapsedGoalChipTitle(for: goal.status), systemImage: "target", tint: goalStatusTint(goal, tokens: tokens), tokens: tokens)
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+            .layoutPriority(1)
+
+            iconButton(
+                title: isGoalExpanded ? "收起状态" : "展开状态",
+                systemImage: isGoalExpanded ? "chevron.up" : "chevron.down",
+                tint: tokens.secondaryText,
+                isDisabled: false,
+                action: onToggleGoalExpanded
+            )
+        }
     }
 
-    private func summaryText(tokens: ThemeTokens) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+    @ViewBuilder
+    private func expandedTrayContent(tokens: ThemeTokens) -> some View {
+        if hasStatusModules {
+            adaptiveStatusModules(tokens: tokens)
+        }
+        if let goal {
+            if hasStatusModules {
+                Divider()
+            }
+            expandedGoalDetails(goal, tokens: tokens)
+        }
+    }
+
+    private var hasStatusModules: Bool {
+        sessionControlNotice != nil || quotaNotice != nil || usage != nil
+    }
+
+    private func collapsedChip(title: String, systemImage: String, tint: Color, tokens: ThemeTokens) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(themeStore.uiFont(.caption, weight: .semibold))
+                .foregroundStyle(tint)
+            Text(title)
+                .font(themeStore.uiFont(.caption, weight: .semibold))
+                .foregroundStyle(tokens.primaryText)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(tokens.surface.opacity(0.74), in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(tint.opacity(0.18))
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func adaptiveStatusModules(tokens: ThemeTokens) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 8) {
+                statusModuleContent(tokens: tokens)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                statusModuleContent(tokens: tokens)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func statusModuleContent(tokens: ThemeTokens) -> some View {
+        if let sessionControlNotice {
+            observingSegment(sessionControlNotice, tokens: tokens)
+        }
+        if let quotaNotice {
+            quotaSegment(quotaNotice, tokens: tokens)
+        } else if let usage {
+            usageSegment(usage, tokens: tokens)
+        }
+    }
+
+    private func observingSegment(_ notice: String, tokens: ThemeTokens) -> some View {
+        traySegment(tokens: tokens, tint: tokens.secondaryText, minWidth: 132) {
             HStack(spacing: 7) {
-                Text(headerTitle)
+                segmentIcon("eye", tint: tokens.secondaryText)
+                Text("仅观察")
                     .font(themeStore.uiFont(.caption, weight: .semibold))
+                    .foregroundStyle(tokens.primaryText)
+                    .lineLimit(1)
+                Button(action: onTakeOver) {
+                    Text("接管")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .font(themeStore.uiFont(.caption, weight: .semibold))
+                .foregroundStyle(tokens.accent)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityHint(notice)
+        }
+    }
+
+    private func quotaSegment(_ notice: CodexQuotaNotice, tokens: ThemeTokens) -> some View {
+        traySegment(tokens: tokens, tint: tokens.warning, minWidth: 230, layoutPriority: 1) {
+            HStack(spacing: 8) {
+                segmentIcon("speedometer", tint: tokens.warning)
+                Text(notice.blocksSending ? "额度已用尽" : notice.title)
+                    .font(themeStore.uiFont(.caption, weight: .semibold))
+                    .foregroundStyle(tokens.warning)
+                    .lineLimit(1)
+                Text(notice.message)
+                    .font(themeStore.uiFont(.caption2, weight: .medium))
                     .foregroundStyle(tokens.secondaryText)
                     .lineLimit(1)
-                Text(goal.status.displayText)
-                    .font(themeStore.uiFont(.caption2, weight: .bold))
-                    .foregroundStyle(statusTint)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(statusTint.opacity(0.13), in: Capsule())
+                    .minimumScaleFactor(0.86)
+                    .layoutPriority(1)
+                refreshButton(tint: tokens.warning)
             }
+            .accessibilityElement(children: .combine)
+        }
+    }
 
+    private func usageSegment(_ usage: CodexUsageDisplaySummary, tokens: ThemeTokens) -> some View {
+        traySegment(tokens: tokens, tint: tokens.warning, minWidth: 250, layoutPriority: 1) {
+            HStack(spacing: 8) {
+                segmentIcon("speedometer", tint: tokens.warning)
+                Text("额度 \(usage.primaryText)")
+                    .font(themeStore.uiFont(.caption, weight: .semibold))
+                    .foregroundStyle(tokens.warning)
+                    .lineLimit(1)
+                Text(usage.secondaryText)
+                    .font(themeStore.uiFont(.caption2, weight: .medium))
+                    .foregroundStyle(tokens.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.86)
+                    .layoutPriority(1)
+                refreshButton(tint: tokens.warning)
+            }
+            .accessibilityElement(children: .contain)
+        }
+    }
+
+    private func expandedGoalDetails(_ goal: ThreadGoal, tokens: ThemeTokens) -> some View {
+        let tint = goalStatusTint(goal, tokens: tokens)
+        return VStack(alignment: .leading, spacing: 8) {
             Text(goal.objective)
                 .font(themeStore.uiFont(.caption, weight: .semibold))
                 .foregroundStyle(tokens.primaryText)
-                .lineLimit(isExpanded ? 3 : 1)
+                .lineLimit(3)
 
             if let progress = goal.budgetProgressFraction {
                 ProgressView(value: progress)
-                    .tint(statusTint)
-                    .frame(maxWidth: 220)
+                    .tint(tint)
+                    .frame(maxWidth: 260)
                     .accessibilityLabel("目标 token 预算进度")
                     .accessibilityValue(goal.budgetPercentText ?? goal.progressText)
             }
 
-            HStack(spacing: 8) {
-                if let percent = goal.budgetPercentText {
-                    Label("\(percent) · \(goal.progressText)", systemImage: "gauge.with.dots.needle.33percent")
-                } else {
-                    Label(goal.progressText, systemImage: "gauge.with.dots.needle.33percent")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
+                    goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
+                    if let percent = goal.budgetPercentText {
+                        goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
+                    }
+                    goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
                 }
-                Label(goal.elapsedText, systemImage: "timer")
+                VStack(alignment: .leading, spacing: 4) {
+                    goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
+                    goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
+                    if let percent = goal.budgetPercentText {
+                        goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
+                    }
+                    goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
+                }
             }
-            .font(themeStore.uiFont(.caption2, weight: .medium))
-            .foregroundStyle(tokens.secondaryText)
-            .lineLimit(1)
-        }
-        .layoutPriority(1)
-    }
 
-    private func goalActionButtons(tokens: ThemeTokens, includesExpandButton: Bool = true) -> some View {
-        HStack(spacing: 5) {
-            if isUpdating {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 30, height: 30)
-            }
-            goalActionButton(
-                title: "编辑目标",
-                systemImage: "pencil",
-                tint: tokens.secondaryText,
-                isDisabled: isUpdating,
-                action: onEdit
-            )
-            goalActionButton(
-                title: primaryStatusActionTitle,
-                systemImage: primaryStatusActionSymbol,
-                tint: statusTint,
-                isDisabled: isUpdating,
-                action: onTogglePause
-            )
-            goalActionButton(
-                title: "标记完成",
-                systemImage: "checkmark.circle",
-                tint: tokens.success,
-                isDisabled: isUpdating || goal.status == .complete,
-                action: onComplete
-            )
-            goalActionButton(
-                title: "清除目标",
-                systemImage: "trash",
-                tint: .red,
-                isDisabled: isUpdating,
-                action: onClear
-            )
-            if includesExpandButton {
-                expandButton(tokens: tokens)
+            HStack(spacing: 6) {
+                iconButton(title: "编辑目标", systemImage: "pencil", tint: tokens.secondaryText, isDisabled: isGoalUpdating, action: onEditGoal)
+                iconButton(title: primaryGoalActionTitle(for: goal.status), systemImage: primaryGoalActionSymbol(for: goal.status), tint: tint, isDisabled: isGoalUpdating, action: onTogglePauseGoal)
+                iconButton(title: "标记完成", systemImage: "checkmark.circle", tint: tokens.success, isDisabled: isGoalUpdating || goal.status == .complete, action: onCompleteGoal)
+                iconButton(title: "清除目标", systemImage: "trash", tint: .red, isDisabled: isGoalUpdating, action: onClearGoal)
             }
         }
     }
 
-    private func expandButton(tokens: ThemeTokens) -> some View {
-        goalActionButton(
-            title: isExpanded ? "收起目标" : "展开目标",
-            systemImage: isExpanded ? "chevron.up" : "chevron.down",
-            tint: tokens.secondaryText,
-            isDisabled: false,
-            action: onToggleExpanded
-        )
+    private func traySegment<Content: View>(
+        tokens: ThemeTokens,
+        tint: Color,
+        minWidth: CGFloat? = nil,
+        layoutPriority: Double = 0,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        content()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(minWidth: minWidth, minHeight: 38)
+            .background(tokens.surface.opacity(0.74), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(tint.opacity(0.18))
+            }
+            .layoutPriority(layoutPriority)
     }
 
-    private func goalActionButton(
+    private func segmentIcon(_ systemImage: String, tint: Color) -> some View {
+        Image(systemName: systemImage)
+            .font(themeStore.uiFont(.caption, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: 24, height: 24)
+            .background(tint.opacity(0.12), in: Circle())
+            .accessibilityHidden(true)
+    }
+
+    private func refreshButton(tint: Color) -> some View {
+        Button(action: onRefreshUsage) {
+            Image(systemName: "arrow.clockwise")
+                .font(themeStore.uiFont(size: 13, weight: .semibold))
+                .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isRefreshDisabled ? themeStore.tokens(for: colorScheme).tertiaryText : tint)
+        .disabled(isRefreshDisabled)
+        .help("刷新 Codex 使用量")
+        .accessibilityLabel("刷新 Codex 使用量")
+    }
+
+    private func iconButton(
         title: String,
         systemImage: String,
         tint: Color,
@@ -2745,13 +2760,13 @@ private struct ActiveGoalStatusBar: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(themeStore.uiFont(size: 14, weight: .semibold))
+                .font(themeStore.uiFont(size: 13, weight: .semibold))
                 .foregroundStyle(isDisabled ? themeStore.tokens(for: colorScheme).tertiaryText : tint)
                 .frame(width: 30, height: 30)
                 .background(themeStore.tokens(for: colorScheme).elevatedSurface.opacity(0.78), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(themeStore.tokens(for: colorScheme).border.opacity(0.75))
+                        .strokeBorder(themeStore.tokens(for: colorScheme).border.opacity(0.72))
                 }
         }
         .buttonStyle(.plain)
@@ -2760,56 +2775,66 @@ private struct ActiveGoalStatusBar: View {
         .accessibilityLabel(title)
     }
 
-    private func expandedDetails(tokens: ThemeTokens) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            goalDetailRow(symbol: "circle.dashed", title: "状态", value: goal.status.displayText, tokens: tokens)
-            goalDetailRow(symbol: "gauge.with.dots.needle.33percent", title: "进度", value: goal.progressText, tokens: tokens)
-            if let percent = goal.budgetPercentText {
-                goalDetailRow(symbol: "percent", title: "预算", value: percent, tokens: tokens)
-            }
-            goalDetailRow(symbol: "timer", title: "用时", value: goal.elapsedText, tokens: tokens)
-            if let updatedAt = goal.updatedAt {
-                goalDetailRow(symbol: "clock", title: "更新", value: updatedAt.formatted(date: .omitted, time: .shortened), tokens: tokens)
-            }
+    private func goalDetailText(_ text: String, symbol: String, tokens: ThemeTokens) -> some View {
+        Label(text, systemImage: symbol)
+            .font(themeStore.uiFont(.caption2, weight: .medium))
+            .foregroundStyle(tokens.secondaryText)
+            .lineLimit(1)
+    }
+
+    private var trimmedGoalError: String? {
+        let trimmed = goalErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else {
+            return nil
         }
+        return trimmed
     }
 
-    private func goalDetailRow(symbol: String, title: String, value: String, tokens: ThemeTokens) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol)
-                .frame(width: 16)
-            Text(title)
-                .foregroundStyle(tokens.secondaryText)
-                .frame(width: 34, alignment: .leading)
-            Text(value)
-                .foregroundStyle(tokens.primaryText)
-                .lineLimit(1)
+    private func trayTint(tokens: ThemeTokens) -> Color {
+        if quotaNotice != nil || usage != nil {
+            return tokens.warning
         }
-        .font(themeStore.uiFont(.caption2, weight: .medium))
+        if let goal {
+            return goalStatusTint(goal, tokens: tokens)
+        }
+        return tokens.secondaryText
     }
 
-    private var headerTitle: String {
-        goal.status == .complete ? "已完成目标" : "进行中的目标"
-    }
-
-    private var primaryStatusActionTitle: String {
-        goal.status == .active ? "暂停目标" : "继续目标"
-    }
-
-    private var primaryStatusActionSymbol: String {
-        goal.status == .active ? "pause.circle" : "play.circle"
-    }
-
-    private var statusTint: Color {
+    private func goalStatusTint(_ goal: ThreadGoal, tokens: ThemeTokens) -> Color {
         switch goal.status {
         case .active:
-            return themeStore.tokens(for: colorScheme).goalActive
+            return tokens.goalActive
         case .paused:
             return .secondary
         case .blocked, .usageLimited, .budgetLimited:
-            return themeStore.tokens(for: colorScheme).warning
+            return tokens.warning
         case .complete:
-            return themeStore.tokens(for: colorScheme).accent
+            return tokens.accent
+        }
+    }
+
+    private func primaryGoalActionTitle(for status: ThreadGoalStatus) -> String {
+        status == .active ? "暂停目标" : "继续目标"
+    }
+
+    private func primaryGoalActionSymbol(for status: ThreadGoalStatus) -> String {
+        status == .active ? "pause.circle" : "play.circle"
+    }
+
+    private func collapsedGoalChipTitle(for status: ThreadGoalStatus) -> String {
+        switch status {
+        case .active:
+            return "目标"
+        case .paused:
+            return "暂停"
+        case .blocked:
+            return "受阻"
+        case .usageLimited:
+            return "额度"
+        case .budgetLimited:
+            return "预算"
+        case .complete:
+            return "完成"
         }
     }
 }
