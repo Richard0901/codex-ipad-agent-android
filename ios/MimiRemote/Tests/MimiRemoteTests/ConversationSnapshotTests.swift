@@ -179,7 +179,16 @@ final class ConversationSnapshotTests: XCTestCase {
         )
     }
 
-    private func makeComposerStatusTrayCrowdedView(width: CGFloat, height: CGFloat) async -> some View {
+    func testComposerStatusTrayExpandedCrowdedState() async {
+        let view = await makeComposerStatusTrayCrowdedView(width: 420, height: 768, goalExpanded: true)
+
+        assertSnapshot(
+            of: view,
+            as: .image(precision: 0.98, layout: .fixed(width: 420, height: 768))
+        )
+    }
+
+    private func makeComposerStatusTrayCrowdedView(width: CGFloat, height: CGFloat, goalExpanded: Bool = false) async -> some View {
         let project = AgentProject(id: "tray-project", name: "tray-project", path: "/Users/me/code/tray-project")
         let sessionID = "crowded"
         let threadID = "thread-\(sessionID)"
@@ -239,7 +248,7 @@ final class ConversationSnapshotTests: XCTestCase {
         await sessionStore.toggleProjectExpansion(project)
         sessionStore.selectedSessionID = sessionID
 
-        return ConversationView()
+        return ConversationView(initialGoalStatusExpanded: goalExpanded)
             .environmentObject(sessionStore)
             .environmentObject(conversationStore)
             .environmentObject(themeStore)

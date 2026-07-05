@@ -135,6 +135,11 @@ struct ComposerView: View {
 
     var availableWidth: CGFloat?
 
+    init(availableWidth: CGFloat? = nil, initialGoalStatusExpanded: Bool = false) {
+        self.availableWidth = availableWidth
+        _isGoalStatusExpanded = State(initialValue: initialGoalStatusExpanded)
+    }
+
     private static let minimumUsableVoiceDuration: TimeInterval = 0.35
     private static let minimumVoicePressDuration: TimeInterval = 0.45
     private static let completedGoalAutoHideDelayNanoseconds: UInt64 = 3_500_000_000
@@ -2470,10 +2475,11 @@ private struct ComposerStatusTray: View {
         let tint = trayTint(tokens: tokens)
 
         VStack(alignment: .leading, spacing: isGoalExpanded ? 8 : 0) {
-            trayHeader(tokens: tokens)
-
+            // 展开态把状态内容和收起按钮放到同一行，避免先出现一整行空白按钮区。
             if isGoalExpanded {
                 expandedTrayContent(tokens: tokens)
+            } else {
+                collapsedHeader(tokens: tokens)
             }
 
             if let trimmedGoalError {
@@ -2486,7 +2492,7 @@ private struct ComposerStatusTray: View {
                 .foregroundStyle(tokens.warning)
             }
         }
-        .padding(8)
+        .padding(isGoalExpanded ? 10 : 8)
         .frame(maxWidth: isGoalExpanded ? 680 : .infinity, alignment: .leading)
         .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
@@ -2494,24 +2500,6 @@ private struct ComposerStatusTray: View {
                 .strokeBorder(tint.opacity(0.28))
         }
         .accessibilityElement(children: .contain)
-    }
-
-    @ViewBuilder
-    private func trayHeader(tokens: ThemeTokens) -> some View {
-        if isGoalExpanded {
-            HStack {
-                Spacer(minLength: 0)
-                iconButton(
-                    title: "收起状态",
-                    systemImage: "chevron.up",
-                    tint: tokens.secondaryText,
-                    isDisabled: false,
-                    action: onToggleGoalExpanded
-                )
-            }
-        } else {
-            collapsedHeader(tokens: tokens)
-        }
     }
 
     private func collapsedHeader(tokens: ThemeTokens) -> some View {
@@ -2546,14 +2534,41 @@ private struct ComposerStatusTray: View {
 
     @ViewBuilder
     private func expandedTrayContent(tokens: ThemeTokens) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            expandedHeaderRow(tokens: tokens)
+            if let goal {
+                expandedGoalDetails(goal, tokens: tokens)
+            }
+        }
+    }
+
+    private func expandedHeaderRow(tokens: ThemeTokens) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            expandedHeaderSummary(tokens: tokens)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+
+            iconButton(
+                title: "收起状态",
+                systemImage: "chevron.up",
+                tint: tokens.secondaryText,
+                isDisabled: false,
+                action: onToggleGoalExpanded
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func expandedHeaderSummary(tokens: ThemeTokens) -> some View {
         if hasStatusModules {
             adaptiveStatusModules(tokens: tokens)
-        }
-        if let goal {
-            if hasStatusModules {
-                Divider()
-            }
-            expandedGoalDetails(goal, tokens: tokens)
+        } else if let goal {
+            collapsedChip(
+                title: collapsedGoalChipTitle(for: goal.status),
+                systemImage: "target",
+                tint: goalStatusTint(goal, tokens: tokens),
+                tokens: tokens
+            )
         }
     }
 
@@ -2677,36 +2692,52 @@ private struct ComposerStatusTray: View {
             if let progress = goal.budgetProgressFraction {
                 ProgressView(value: progress)
                     .tint(tint)
-                    .frame(maxWidth: 260)
+                    .frame(maxWidth: .infinity)
                     .accessibilityLabel("目标 token 预算进度")
                     .accessibilityValue(goal.budgetPercentText ?? goal.progressText)
             }
 
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
-                    goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
-                    if let percent = goal.budgetPercentText {
-                        goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
-                    }
-                    goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
+                HStack(alignment: .center, spacing: 10) {
+                    goalMetrics(goal, tokens: tokens)
+                    Spacer(minLength: 8)
+                    goalActionRow(goal, tint: tint, tokens: tokens)
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
-                    goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
-                    if let percent = goal.budgetPercentText {
-                        goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
-                    }
-                    goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
+                VStack(alignment: .leading, spacing: 8) {
+                    goalMetrics(goal, tokens: tokens)
+                    goalActionRow(goal, tint: tint, tokens: tokens)
                 }
             }
+        }
+    }
 
-            HStack(spacing: 6) {
-                iconButton(title: "编辑目标", systemImage: "pencil", tint: tokens.secondaryText, isDisabled: isGoalUpdating, action: onEditGoal)
-                iconButton(title: primaryGoalActionTitle(for: goal.status), systemImage: primaryGoalActionSymbol(for: goal.status), tint: tint, isDisabled: isGoalUpdating, action: onTogglePauseGoal)
-                iconButton(title: "标记完成", systemImage: "checkmark.circle", tint: tokens.success, isDisabled: isGoalUpdating || goal.status == .complete, action: onCompleteGoal)
-                iconButton(title: "清除目标", systemImage: "trash", tint: .red, isDisabled: isGoalUpdating, action: onClearGoal)
+    private func goalMetrics(_ goal: ThreadGoal, tokens: ThemeTokens) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
+                goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
+                if let percent = goal.budgetPercentText {
+                    goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
+                }
+                goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
             }
+            VStack(alignment: .leading, spacing: 4) {
+                goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
+                goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
+                if let percent = goal.budgetPercentText {
+                    goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
+                }
+                goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
+            }
+        }
+    }
+
+    private func goalActionRow(_ goal: ThreadGoal, tint: Color, tokens: ThemeTokens) -> some View {
+        HStack(spacing: 6) {
+            iconButton(title: "编辑目标", systemImage: "pencil", tint: tokens.secondaryText, isDisabled: isGoalUpdating, action: onEditGoal)
+            iconButton(title: primaryGoalActionTitle(for: goal.status), systemImage: primaryGoalActionSymbol(for: goal.status), tint: tint, isDisabled: isGoalUpdating, action: onTogglePauseGoal)
+            iconButton(title: "标记完成", systemImage: "checkmark.circle", tint: tokens.success, isDisabled: isGoalUpdating || goal.status == .complete, action: onCompleteGoal)
+            iconButton(title: "清除目标", systemImage: "trash", tint: .red, isDisabled: isGoalUpdating, action: onClearGoal)
         }
     }
 

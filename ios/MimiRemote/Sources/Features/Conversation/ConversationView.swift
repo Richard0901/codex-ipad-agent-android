@@ -7,6 +7,11 @@ struct ConversationView: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    private let initialGoalStatusExpanded: Bool
+
+    init(initialGoalStatusExpanded: Bool = false) {
+        self.initialGoalStatusExpanded = initialGoalStatusExpanded
+    }
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -31,7 +36,10 @@ struct ConversationView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 HStack {
                     Spacer(minLength: 0)
-                    ComposerView(availableWidth: layout.composerAvailableWidth)
+                    ComposerView(
+                        availableWidth: layout.composerAvailableWidth,
+                        initialGoalStatusExpanded: initialGoalStatusExpanded
+                    )
                         .frame(maxWidth: layout.composerMaxWidth)
                     Spacer(minLength: 0)
                 }
