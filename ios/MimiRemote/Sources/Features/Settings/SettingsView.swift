@@ -5,7 +5,6 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.themeSystemColorScheme) private var themeSystemColorScheme
-    @EnvironmentObject private var appStore: AppStore
     @EnvironmentObject private var themeStore: ThemeStore
 
     let isInitialSetup: Bool
@@ -46,26 +45,6 @@ struct SettingsView: View {
         Form {
             Section {
                 NavigationLink {
-                    ConnectionSettingsView {
-                        dismiss()
-                    }
-                } label: {
-                    SettingsNavigationRow(
-                        systemImage: "desktopcomputer",
-                        title: "连接 Mac",
-                        subtitle: appStore.isConfigured ? appStore.endpoint : "尚未连接",
-                        trailing: appStore.connectionStatus.title,
-                        trailingColor: connectionStatusColor(tokens: tokens)
-                    )
-                }
-            } header: {
-                Text("连接")
-            } footer: {
-                Text("扫码、手动连接、测试连接和忘记 Mac 都在这里处理。连接变更会重建运行通道。")
-            }
-
-            Section {
-                NavigationLink {
                     AppearanceView()
                 } label: {
                     Label("外观", systemImage: "paintpalette")
@@ -85,6 +64,7 @@ struct SettingsView: View {
             } footer: {
                 Text("常亮仅在前台选中会话处于运行或等待审批状态时生效；离开运行会话后会恢复系统默认锁屏。")
             }
+            .listRowBackground(tokens.elevatedSurface)
 
             Section {
                 Toggle(isOn: $developerModeEnabled) {
@@ -107,63 +87,23 @@ struct SettingsView: View {
             } footer: {
                 Text(developerModeEnabled ? "历史诊断会显示本机路径和会话标题，仅用于排障。" : "开发者模式开启后，对话输入区会显示高级运行选项，诊断页也会显示历史诊断。")
             }
+            .listRowBackground(tokens.elevatedSurface)
         }
-    }
-
-    private func connectionStatusColor(tokens: ThemeTokens) -> Color {
-        switch appStore.connectionStatus {
-        case .connected:
-            return tokens.success
-        case .failed:
-            return .red
-        case .testing:
-            return tokens.warning
-        case .idle:
-            return .secondary
-        }
-    }
-}
-
-private struct SettingsNavigationRow: View {
-    @EnvironmentObject private var themeStore: ThemeStore
-    let systemImage: String
-    let title: String
-    let subtitle: String
-    let trailing: String?
-    let trailingColor: Color
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Label {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                    Text(subtitle)
-                        .font(themeStore.uiFont(.footnote))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            } icon: {
-                Image(systemName: systemImage)
-            }
-
-            Spacer()
-
-            if let trailing, !trailing.isEmpty {
-                Text(trailing)
-                    .font(themeStore.uiFont(.footnote, weight: .medium))
-                    .foregroundStyle(trailingColor)
-                    .lineLimit(1)
-            }
-        }
+        .themedSettingsForm(tokens: tokens)
     }
 }
 
 private struct InitialPairingView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var themeStore: ThemeStore
+
     var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
         Form {
             ConnectionSettingsSections(mode: .initialSetup)
         }
+        .themedSettingsForm(tokens: tokens)
     }
 }
 
@@ -182,6 +122,7 @@ struct ConnectionSettingsView: View {
         Form {
             ConnectionSettingsSections(mode: .settings, onFinished: onFinished)
         }
+        .themedSettingsForm(tokens: tokens)
         .navigationTitle("连接 Mac")
         .tint(tokens.accent)
         .preferredColorScheme(resolvedColorScheme)
@@ -213,7 +154,9 @@ private struct DefaultPermissionView: View {
             } footer: {
                 Text("用于新输入区和切换会话后的默认运行权限。输入区里的权限按钮也会同步更新这个全局默认值。")
             }
+            .listRowBackground(tokens.elevatedSurface)
         }
+        .themedSettingsForm(tokens: tokens)
         .navigationTitle("默认权限")
         .tint(tokens.accent)
     }
@@ -296,6 +239,8 @@ private struct ConnectionSettingsSections: View {
     @State private var localError: String?
 
     var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
         Group {
             if isInitialSetup {
                 Section {
@@ -422,6 +367,7 @@ private struct ConnectionSettingsSections: View {
                 .disabled(isSavingConnection || !appStore.isConfigured)
             }
         }
+        .listRowBackground(tokens.elevatedSurface)
         // 连接地址/Token 是高频编辑状态，放在这个小子树里，避免每次删字都重绘整个设置页。
         .onAppear(perform: loadInitialConnectionIfNeeded)
         .sheet(isPresented: $isShowingQRCodeScanner) {
@@ -850,6 +796,8 @@ private struct CapabilitiesView: View {
     @EnvironmentObject private var themeStore: ThemeStore
 
     var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
         Form {
             Section {
                 if let path = sessionStore.capabilityList?.path, !path.isEmpty {
@@ -870,6 +818,7 @@ private struct CapabilitiesView: View {
             } footer: {
                 Text("这里只读展示 agentd 可发现的本地 Skills 和 MCP 配置，不会启动 MCP server，也不会读取或显示环境变量值。")
             }
+            .listRowBackground(tokens.elevatedSurface)
 
             if let error = sessionStore.capabilityErrorMessage {
                 Section("错误") {
@@ -877,6 +826,7 @@ private struct CapabilitiesView: View {
                         .font(themeStore.uiFont(.caption))
                         .foregroundStyle(.red)
                 }
+                .listRowBackground(tokens.elevatedSurface)
             }
 
             Section("Skills") {
@@ -896,6 +846,7 @@ private struct CapabilitiesView: View {
                     }
                 }
             }
+            .listRowBackground(tokens.elevatedSurface)
 
             Section("MCP") {
                 let servers = sessionStore.capabilityList?.mcpServers ?? []
@@ -916,8 +867,11 @@ private struct CapabilitiesView: View {
                     }
                 }
             }
+            .listRowBackground(tokens.elevatedSurface)
         }
+        .themedSettingsForm(tokens: tokens)
         .navigationTitle("能力")
+        .tint(tokens.accent)
         .task {
             if sessionStore.capabilityList == nil {
                 await sessionStore.refreshCapabilities()
@@ -1119,6 +1073,7 @@ struct AppearanceView: View {
             } footer: {
                 Text("系统模式会跟随当前设备外观；浅色和深色会固定 App 外观。")
             }
+            .listRowBackground(tokens.elevatedSurface)
 
             Section {
                 ForEach(ThemePreset.allCases) { preset in
@@ -1133,6 +1088,7 @@ struct AppearanceView: View {
             } header: {
                 Text("主题")
             }
+            .listRowBackground(tokens.elevatedSurface)
 
             Section {
                 Picker("UI 字体", selection: $themeStore.uiFontPreset) {
@@ -1178,6 +1134,7 @@ struct AppearanceView: View {
             } header: {
                 Text("字体")
             }
+            .listRowBackground(tokens.elevatedSurface)
 
             Section {
                 AppearanceConversationPreview()
@@ -1185,6 +1142,7 @@ struct AppearanceView: View {
             } header: {
                 Text("聊天预览")
             }
+            .listRowBackground(tokens.elevatedSurface)
 
             Section {
                 Button(role: .destructive) {
@@ -1193,7 +1151,9 @@ struct AppearanceView: View {
                     Label("恢复默认外观", systemImage: "arrow.counterclockwise")
                 }
             }
+            .listRowBackground(tokens.elevatedSurface)
         }
+        .themedSettingsForm(tokens: tokens)
         .navigationTitle("外观")
         .preferredColorScheme(resolvedColorScheme)
         .environment(\.colorScheme, resolvedColorScheme)
@@ -1507,5 +1467,12 @@ private struct PreviewBubble: View {
                 Spacer(minLength: 36)
             }
         }
+    }
+}
+
+private extension View {
+    func themedSettingsForm(tokens: ThemeTokens) -> some View {
+        scrollContentBackground(.hidden)
+            .background(tokens.background.ignoresSafeArea())
     }
 }

@@ -80,13 +80,17 @@ struct RootView: View {
     }
 
     private var appShell: some View {
-        TabView(selection: selectedAppTabBinding) {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        return TabView(selection: selectedAppTabBinding) {
             ForEach(AppTab.allCases) { tab in
                 Tab(tab.title, systemImage: tab.systemImage, value: tab) {
                     appTabContent(for: tab)
                 }
             }
         }
+        .toolbarBackground(tokens.background, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
     }
 
     @ViewBuilder
@@ -493,7 +497,8 @@ private struct WorkspaceDetailView: View {
                 }
             }
         }
-        .background(tokens.background)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(tokens.background.ignoresSafeArea())
         .navigationTitle(project?.name ?? "工作区")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -659,6 +664,8 @@ private struct ProfileRootView: View {
     @State private var selectedSection: ProfileSection = .runtime
 
     var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
         GeometryReader { proxy in
             let usesSplitLayout = horizontalSizeClass == .regular && proxy.size.width >= 720
 
@@ -670,14 +677,16 @@ private struct ProfileRootView: View {
                     ProfileSectionDetail(section: selectedSection)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .background(themeStore.tokens(for: colorScheme).background)
+                .background(tokens.background)
             } else {
                 NavigationStack {
                     List {
                         ForEach(ProfileSection.allCases) { section in
                             NavigationLink(value: section) {
                                 Label(section.title, systemImage: section.systemImage)
+                                    .foregroundStyle(tokens.primaryText)
                             }
+                            .listRowBackground(tokens.elevatedSurface)
                         }
                     }
                     .navigationTitle("我的")
@@ -685,7 +694,8 @@ private struct ProfileRootView: View {
                         ProfileSectionDetail(section: section)
                     }
                     .scrollContentBackground(.hidden)
-                    .background(themeStore.tokens(for: colorScheme).background)
+                    .background(tokens.background)
+                    .tint(tokens.accent)
                 }
             }
         }
@@ -743,6 +753,7 @@ private struct ProfileSectionDetail: View {
     @EnvironmentObject private var appStore: AppStore
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var themeStore: ThemeStore
+    @State private var isShowingConnectionSettings = false
     let section: ProfileSection
 
     var body: some View {
@@ -771,17 +782,38 @@ private struct ProfileSectionDetail: View {
         }
         .background(tokens.background)
         .navigationTitle(section.title)
+        .sheet(isPresented: $isShowingConnectionSettings) {
+            NavigationStack {
+                ConnectionSettingsView {
+                    isShowingConnectionSettings = false
+                }
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("完成") {
+                            isShowingConnectionSettings = false
+                        }
+                    }
+                }
+            }
+            .environment(\.themeSystemColorScheme, colorScheme)
+        }
     }
 
     private func runtimeContent(tokens: ThemeTokens) -> some View {
         VStack(spacing: 10) {
-            ProfileInfoRow(
-                systemImage: "desktopcomputer",
-                title: "Mac 助手",
-                value: appStore.connectionStatus.title,
-                detail: appStore.endpoint,
-                tone: appStore.connectionStatus.isConnected ? tokens.success : tokens.warning
-            )
+            Button {
+                isShowingConnectionSettings = true
+            } label: {
+                ProfileInfoRow(
+                    systemImage: "desktopcomputer",
+                    title: "连接 Mac",
+                    value: appStore.connectionStatus.title,
+                    detail: appStore.isConfigured ? appStore.endpoint : "扫码、手动连接、测试连接和忘记 Mac 都在这里处理",
+                    tone: appStore.connectionStatus.isConnected ? tokens.success : tokens.warning,
+                    trailingSystemImage: "chevron.right"
+                )
+            }
+            .buttonStyle(.plain)
             ProfileInfoRow(
                 systemImage: "sparkles",
                 title: "Codex",
@@ -851,6 +883,7 @@ private struct ProfileInfoRow: View {
     let value: String
     let detail: String
     let tone: Color
+    var trailingSystemImage: String? = nil
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -881,6 +914,13 @@ private struct ProfileInfoRow: View {
             }
 
             Spacer(minLength: 0)
+
+            if let trailingSystemImage {
+                Image(systemName: trailingSystemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(tokens.tertiaryText)
+                    .padding(.top, 11)
+            }
         }
         .padding(14)
         .background(tokens.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))

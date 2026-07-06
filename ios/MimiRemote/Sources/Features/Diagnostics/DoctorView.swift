@@ -2,8 +2,10 @@ import Foundation
 import SwiftUI
 
 struct DoctorView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var appStore: AppStore
     @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
     @State private var output = ""
     @State private var isRunning = false
 
@@ -14,15 +16,17 @@ struct DoctorView: View {
     }
 
     var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("检查 Mac 助手、Codex CLI、app-server gateway 和项目配置。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(themeStore.uiFont(.callout))
+                    .foregroundStyle(tokens.secondaryText)
                 if !showsHistoryDiagnostics {
                     Text("历史诊断仅在设置里开启开发者模式后显示。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .font(themeStore.uiFont(.footnote))
+                        .foregroundStyle(tokens.secondaryText)
                 }
             }
 
@@ -53,14 +57,24 @@ struct DoctorView: View {
             ScrollView([.horizontal, .vertical]) {
                 Text(output.isEmpty ? "尚未运行诊断" : output)
                     .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(tokens.primaryText)
                     .lineLimit(nil)
                     .fixedSize(horizontal: true, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(12)
                     .textSelection(.enabled)
+            }
+            .background(tokens.codeBlock, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(tokens.border, lineWidth: 1)
             }
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(tokens.background.ignoresSafeArea())
         .navigationTitle("诊断")
+        .tint(tokens.accent)
     }
 
     private func runDoctor() async {
