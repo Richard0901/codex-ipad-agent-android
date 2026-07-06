@@ -94,6 +94,9 @@ struct RootView: View {
         switch tab {
         case .sessions:
             mainLayout
+        case .workspace:
+            WorkspaceRootView()
+                .environment(\.themeSystemColorScheme, colorScheme)
         case .settings:
             SettingsView(isInitialSetup: false, showsDoneButton: false)
                 .environment(\.themeSystemColorScheme, colorScheme)
@@ -396,8 +399,9 @@ struct RootView: View {
 
 private enum AppTab: String, CaseIterable, Identifiable {
     case sessions
-    case settings
+    case workspace
     case profile
+    case settings
 
     var id: String { rawValue }
 
@@ -405,10 +409,12 @@ private enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .sessions:
             return "会话"
-        case .settings:
-            return "设置"
+        case .workspace:
+            return "工作区"
         case .profile:
             return "我的"
+        case .settings:
+            return "设置"
         }
     }
 
@@ -416,16 +422,203 @@ private enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .sessions:
             return "bubble.left.and.bubble.right"
-        case .settings:
-            return "gearshape"
+        case .workspace:
+            return "folder"
         case .profile:
             return "person.crop.circle"
+        case .settings:
+            return "gearshape"
         }
     }
 
     @ViewBuilder
     var label: some View {
         Label(title, systemImage: systemImage)
+    }
+}
+
+private struct WorkspaceRootView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
+    @State private var isShowingCompactWorkspaceDetail = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let usesSplitLayout = horizontalSizeClass == .regular && proxy.size.width >= 720
+
+            if usesSplitLayout {
+                HStack(spacing: 0) {
+                    ProjectSidebarView(showsSessions: false)
+                        .frame(width: min(max(proxy.size.width * 0.32, 280), 360))
+                    Divider()
+                    WorkspaceDetailView(project: sessionStore.selectedProject)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .background(themeStore.tokens(for: colorScheme).background)
+            } else {
+                NavigationStack {
+                    ProjectSidebarView(showsSessions: false) {
+                        isShowingCompactWorkspaceDetail = true
+                    }
+                        .navigationTitle("工作区")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .navigationDestination(isPresented: $isShowingCompactWorkspaceDetail) {
+                            WorkspaceDetailView(project: sessionStore.selectedProject)
+                        }
+                }
+            }
+        }
+    }
+}
+
+private struct WorkspaceDetailView: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
+    let project: AgentProject?
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        Group {
+            if let project {
+                workspaceContent(project: project, tokens: tokens)
+            } else {
+                ContentUnavailableView {
+                    Label("选择一个工作区", systemImage: "folder")
+                } description: {
+                    Text("左侧会保留最近打开的项目。这里先作为工作区入口，后续再迁移更多管理功能。")
+                }
+            }
+        }
+        .background(tokens.background)
+        .navigationTitle(project?.name ?? "工作区")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func workspaceContent(project: AgentProject, tokens: ThemeTokens) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                workspaceHeader(project: project, tokens: tokens)
+                workspaceStats(project: project, tokens: tokens)
+
+                VStack(spacing: 10) {
+                    ProfileInfoRow(
+                        systemImage: "terminal",
+                        title: "会话",
+                        value: sessionSummary(for: project),
+                        detail: "会话仍在“会话”工作区里创建和继续运行。",
+                        tone: tokens.accent
+                    )
+                    ProfileInfoRow(
+                        systemImage: "square.stack.3d.up",
+                        title: "Git Worktree",
+                        value: worktreeSummary(for: project),
+                        detail: "Worktree 管理入口暂时保留在项目行菜单里。",
+                        tone: tokens.secondaryText
+                    )
+                    ProfileInfoRow(
+                        systemImage: "checkmark.shield",
+                        title: "权限状态",
+                        value: sessionStore.isWorkspaceUnavailable(project.id) ? "需要重试" : "可访问",
+                        detail: sessionStore.isWorkspaceUnavailable(project.id) ? "这个工作区可能已被移动、删除或不在授权范围内。" : "当前工作区在已授权范围内，可继续用于会话。",
+                        tone: sessionStore.isWorkspaceUnavailable(project.id) ? tokens.warning : tokens.success
+                    )
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 760, alignment: .leading)
+        }
+    }
+
+    private func workspaceHeader(project: AgentProject, tokens: ThemeTokens) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(project.name, systemImage: "folder.fill")
+                .font(themeStore.uiFont(.title2, weight: .semibold))
+                .foregroundStyle(tokens.primaryText)
+                .lineLimit(2)
+            Text(project.path)
+                .font(themeStore.uiFont(.callout))
+                .foregroundStyle(tokens.secondaryText)
+                .lineLimit(3)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func workspaceStats(project: AgentProject, tokens: ThemeTokens) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 10)], alignment: .leading, spacing: 10) {
+            WorkspaceStatPill(
+                title: "会话",
+                value: "\(sessionStore.sessions(forProjectID: project.id).count)",
+                systemImage: "bubble.left.and.text.bubble.right",
+                tone: tokens.accent
+            )
+            WorkspaceStatPill(
+                title: "Worktree",
+                value: "\(managedWorktreeCount(for: project))",
+                systemImage: "arrow.triangle.branch",
+                tone: tokens.secondaryText
+            )
+            WorkspaceStatPill(
+                title: "状态",
+                value: sessionStore.isWorkspaceUnavailable(project.id) ? "异常" : "正常",
+                systemImage: sessionStore.isWorkspaceUnavailable(project.id) ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                tone: sessionStore.isWorkspaceUnavailable(project.id) ? tokens.warning : tokens.success
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sessionSummary(for project: AgentProject) -> String {
+        let count = sessionStore.sessions(forProjectID: project.id).count
+        return count == 0 ? "暂无历史" : "\(count) 个"
+    }
+
+    private func worktreeSummary(for project: AgentProject) -> String {
+        let count = managedWorktreeCount(for: project)
+        return count == 0 ? "待接入" : "\(count) 个"
+    }
+
+    private func managedWorktreeCount(for project: AgentProject) -> Int {
+        let rootProjectID = sessionStore.rootProjectID(forProjectID: project.id)
+        return sessionStore.managedWorktrees(rootProjectID: rootProjectID).count
+    }
+}
+
+private struct WorkspaceStatPill: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    let title: String
+    let value: String
+    let systemImage: String
+    let tone: Color
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: systemImage)
+                .font(themeStore.uiFont(size: 16, weight: .semibold))
+                .foregroundStyle(tone)
+            Text(value)
+                .font(themeStore.uiFont(.headline, weight: .semibold))
+                .foregroundStyle(tokens.primaryText)
+                .lineLimit(1)
+            Text(title)
+                .font(themeStore.uiFont(.caption, weight: .medium))
+                .foregroundStyle(tokens.secondaryText)
+                .lineLimit(1)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 94, alignment: .leading)
+        .background(tokens.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(tokens.border, lineWidth: 1)
+        }
     }
 }
 

@@ -11,6 +11,7 @@ struct ProjectSidebarView: View {
     @State private var worktreeManagerRootProjectID = ""
     @State private var worktreeCreateProject: AgentProject?
     var showsSessions = true
+    var onProjectSelected: (() -> Void)?
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -26,10 +27,12 @@ struct ProjectSidebarView: View {
                     ProjectRow(
                         project: project,
                         isActiveProject: project.id == selectedProjectID,
-                        isSelected: project.id == selectedProjectID && selectedSessionID == nil,
+                        isSelected: project.id == selectedProjectID && (!showsSessions || selectedSessionID == nil),
                         isExpanded: snapshot.isExpanded,
                         isLoading: snapshot.isLoadingMore,
                         isUnavailable: sessionStore.isWorkspaceUnavailable(project.id),
+                        showsDisclosure: showsSessions,
+                        showsSessionActions: showsSessions,
                         claudeChannelAvailable: sessionStore.hasClaudeRuntimeChannel,
                         themeRenderKey: themeRenderKey,
                         onToggle: {
@@ -38,6 +41,7 @@ struct ProjectSidebarView: View {
                                     await sessionStore.toggleProjectExpansion(project)
                                 } else {
                                     await sessionStore.selectProject(project)
+                                    onProjectSelected?()
                                 }
                             }
                         },
@@ -76,7 +80,7 @@ struct ProjectSidebarView: View {
                 }
             } header: {
                 HStack {
-                    Text("项目")
+                    Text(showsSessions ? "项目" : "工作区")
                         .font(themeStore.uiFont(size: 12, weight: .semibold))
                         .foregroundStyle(tokens.tertiaryText)
                     Spacer()
@@ -104,7 +108,7 @@ struct ProjectSidebarView: View {
         .scrollContentBackground(.hidden)
         .background(tokens.sidebarBackground)
         .tint(tokens.accent)
-        .searchable(text: $sessionStore.sessionSearchQuery, placement: searchPlacement, prompt: "搜索会话")
+        .searchable(text: $sessionStore.sessionSearchQuery, placement: searchPlacement, prompt: Text(showsSessions ? "搜索会话" : "搜索工作区"))
         .sheet(isPresented: $isPresentingOpenWorkspace) {
             OpenWorkspaceSheet()
         }
@@ -620,6 +624,8 @@ private struct ProjectRow: View, Equatable {
     let isExpanded: Bool
     let isLoading: Bool
     let isUnavailable: Bool
+    let showsDisclosure: Bool
+    let showsSessionActions: Bool
     let claudeChannelAvailable: Bool
     let themeRenderKey: SidebarThemeRenderKey
     let onToggle: () -> Void
@@ -637,6 +643,8 @@ private struct ProjectRow: View, Equatable {
             && lhs.isExpanded == rhs.isExpanded
             && lhs.isLoading == rhs.isLoading
             && lhs.isUnavailable == rhs.isUnavailable
+            && lhs.showsDisclosure == rhs.showsDisclosure
+            && lhs.showsSessionActions == rhs.showsSessionActions
             && lhs.claudeChannelAvailable == rhs.claudeChannelAvailable
             // 主题切换只通过轻量 key 打破行缓存，避免移除 .equatable() 导致长列表回退。
             && lhs.themeRenderKey == rhs.themeRenderKey
@@ -668,36 +676,42 @@ private struct ProjectRow: View, Equatable {
                     ProgressView()
                         .controlSize(.small)
                         .tint(tokens.tertiaryText)
-                } else {
+                } else if showsDisclosure {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(themeStore.uiFont(size: 12, weight: .semibold))
                         .foregroundStyle(tokens.tertiaryText)
+                } else if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(themeStore.uiFont(size: 13, weight: .semibold))
+                        .foregroundStyle(tokens.accent)
                 }
             }
             .contentShape(Rectangle())
             .onTapGesture(perform: onToggle)
 
-            Image(systemName: "square.and.pencil")
-                .font(themeStore.uiFont(size: 14, weight: .medium))
-                .foregroundStyle((isActiveProject ? tokens.accent : tokens.tertiaryText).opacity(isActiveProject ? 0.9 : 0.68))
-                .frame(width: 26, height: 26)
-                // 视觉图标保持紧凑，外层热区补到接近系统最小触控尺寸，避免 iPad 浮窗误触。
-                .frame(width: 34, height: 34)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onNewSession)
-                // 会话在创建瞬间就绑定 runtime，事后无法切换通道；长按提供显式的通道选择，
-                // 轻点保持默认（Codex）行为不变。
-                .contextMenu {
-                    Button(action: onNewSession) {
-                        Label("新建 Codex 会话", systemImage: "plus.circle")
-                    }
-                    if claudeChannelAvailable {
-                        Button(action: onNewClaudeSession) {
-                            Label("新建 Claude Code 会话", systemImage: "sparkles")
+            if showsSessionActions {
+                Image(systemName: "square.and.pencil")
+                    .font(themeStore.uiFont(size: 14, weight: .medium))
+                    .foregroundStyle((isActiveProject ? tokens.accent : tokens.tertiaryText).opacity(isActiveProject ? 0.9 : 0.68))
+                    .frame(width: 26, height: 26)
+                    // 视觉图标保持紧凑，外层热区补到接近系统最小触控尺寸，避免 iPad 浮窗误触。
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onNewSession)
+                    // 会话在创建瞬间就绑定 runtime，事后无法切换通道；长按提供显式的通道选择，
+                    // 轻点保持默认（Codex）行为不变。
+                    .contextMenu {
+                        Button(action: onNewSession) {
+                            Label("新建 Codex 会话", systemImage: "plus.circle")
+                        }
+                        if claudeChannelAvailable {
+                            Button(action: onNewClaudeSession) {
+                                Label("新建 Claude Code 会话", systemImage: "sparkles")
+                            }
                         }
                     }
-                }
-                .accessibilityLabel("新建会话")
+                    .accessibilityLabel("新建会话")
+            }
 
             Menu {
                 if isUnavailable {
