@@ -37,13 +37,15 @@ type Router struct {
 	monitor      *relayMonitor
 	historyMedia *appServerHistoryMediaStore
 
-	gatewayThreadsMu   sync.Mutex
-	gatewayThreads     map[string]appServerGatewayAllowedThread
-	claudeMu           sync.Mutex
-	claudeProbe        appServerBridgeProbe
-	activeClaudeBridge int
-	managedWorktreesMu sync.Mutex
-	managedWorktrees   map[string]managedWorktree
+	gatewayThreadsMu           sync.Mutex
+	gatewayThreads             map[string]appServerGatewayAllowedThread
+	gatewayHistoryBudgetMu     sync.Mutex
+	gatewayHistoryGlobalBudget appServerGatewayHistoryBudget
+	claudeMu                   sync.Mutex
+	claudeProbe                appServerBridgeProbe
+	activeClaudeBridge         int
+	managedWorktreesMu         sync.Mutex
+	managedWorktrees           map[string]managedWorktree
 }
 
 func NewRouter(cfg config.Config, registry *projects.Registry, manager *session.Manager, checker *doctor.Checker, version string) http.Handler {

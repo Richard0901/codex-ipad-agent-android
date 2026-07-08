@@ -18,11 +18,12 @@ type fileReadRequest struct {
 }
 
 type fileReadResponse struct {
-	Path          string `json:"path"`
-	Name          string `json:"name"`
-	ContentType   string `json:"content_type"`
-	Size          int64  `json:"size"`
-	ContentBase64 string `json:"content_base64"`
+	Path              string `json:"path"`
+	Name              string `json:"name"`
+	ContentType       string `json:"content_type"`
+	Size              int64  `json:"size"`
+	ContentBase64     string `json:"content_base64"`
+	OriginalByteCount int64  `json:"original_byte_count,omitempty"`
 }
 
 type fileReadResolvedPath struct {

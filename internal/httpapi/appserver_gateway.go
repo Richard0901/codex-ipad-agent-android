@@ -30,6 +30,7 @@ const (
 	appServerGatewayThreadCacheMax = 2048
 	appServerGatewayThreadCacheTTL = 24 * time.Hour
 	defaultCodexReasoningEffort    = "xhigh"
+	appServerMediaRedactNotifyEnv  = "AGENTD_MEDIA_REDACT_NOTIFICATIONS"
 
 	appServerGatewayThreadTurnsDefaultLimit = 20
 	appServerGatewayThreadTurnsMaxLimit     = 50
@@ -53,6 +54,8 @@ var (
 	appServerGatewayHistoryBudgetMaxRequests            = 6
 	appServerGatewayHistoryBudgetMaxRequestBytes        = int64(64 << 10)
 	appServerGatewayHistoryBudgetMaxResponseBytes       = int64(8 << 20)
+	appServerGatewayHistoryGlobalMaxResponseBytes int64 = 3 << 20
+	appServerGatewayHistoryGlobalWindow                 = appServerGatewayHistoryBudgetWindow
 )
 
 var appServerAllowedMethods = map[string]struct{}{
@@ -1517,6 +1520,9 @@ func (p *appServerGatewayPolicy) reserveHistoryRequest(id *json.RawMessage, meth
 		p.pendingHistory[key] = pending
 		return nil
 	}
+	if policyErr := p.router.reserveHistoryGlobalBudget(id, pending); policyErr != nil {
+		return policyErr
+	}
 	if _, exists := p.pendingHistory[key]; !exists && len(p.pendingHistory) >= appServerGatewayPendingHistoryRequestMax {
 		return &appServerGatewayPolicyError{id: id, message: "gateway pending history 请求过多"}
 	}
@@ -1672,7 +1678,7 @@ func (p *appServerGatewayPolicy) pruneHistoryLocked(now time.Time) {
 		}
 	}
 	for key, budget := range p.historyBudgets {
-		if budget.windowStarted.IsZero() || now.Sub(budget.windowStarted) >= appServerGatewayHistoryBudgetWindow {
+		if budget.windowStarted.IsZero() || (now.Sub(budget.windowStarted) >= appServerGatewayHistoryBudgetWindow && !budget.blockedUntil.After(now)) {
 			delete(p.historyBudgets, key)
 		}
 	}
@@ -1700,7 +1706,6 @@ func (p *appServerGatewayPolicy) recordHistoryResponseBudget(request appServerGa
 	now := time.Now()
 	key := gatewayHistoryBudgetKey(request.threadID, request.method, request.itemsView)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.historyBudgets == nil {
 		p.historyBudgets = map[string]appServerGatewayHistoryBudget{}
 	}
@@ -1713,6 +1718,63 @@ func (p *appServerGatewayPolicy) recordHistoryResponseBudget(request appServerGa
 		budget.blockedUntil = now.Add(appServerGatewayHistoryBudgetWindow)
 	}
 	p.historyBudgets[key] = budget
+	p.mu.Unlock()
+
+	p.router.recordHistoryGlobalResponseBudget(request, responseBytes)
+}
+
+func (r *Router) reserveHistoryGlobalBudget(id *json.RawMessage, request appServerGatewayPendingHistoryRequest) *appServerGatewayPolicyError {
+	if r == nil || request.redactOnly || appServerGatewayHistoryGlobalMaxResponseBytes <= 0 {
+		return nil
+	}
+	now := time.Now()
+	window := appServerGatewayHistoryGlobalBudgetWindow()
+	r.gatewayHistoryBudgetMu.Lock()
+	defer r.gatewayHistoryBudgetMu.Unlock()
+	budget := r.gatewayHistoryGlobalBudget
+	if budget.windowStarted.IsZero() || (now.Sub(budget.windowStarted) >= window && !budget.blockedUntil.After(now)) {
+		budget = appServerGatewayHistoryBudget{windowStarted: now}
+	}
+	if budget.blockedUntil.After(now) {
+		r.gatewayHistoryGlobalBudget = budget
+		return gatewayHistoryBudgetPolicyError(
+			id,
+			fmt.Sprintf("%s 全局历史下行预算已用尽，请稍后重试（itemsView=%s）", request.method, request.itemsView),
+			"history_budget_limited",
+			budget.blockedUntil.Sub(now),
+			request,
+			map[string]any{"scope": "global"},
+		)
+	}
+	r.gatewayHistoryGlobalBudget = budget
+	return nil
+}
+
+func (r *Router) recordHistoryGlobalResponseBudget(request appServerGatewayPendingHistoryRequest, responseBytes int) {
+	if r == nil || request.redactOnly || appServerGatewayHistoryGlobalMaxResponseBytes <= 0 || responseBytes <= 0 {
+		return
+	}
+	now := time.Now()
+	window := appServerGatewayHistoryGlobalBudgetWindow()
+	r.gatewayHistoryBudgetMu.Lock()
+	defer r.gatewayHistoryBudgetMu.Unlock()
+	budget := r.gatewayHistoryGlobalBudget
+	if budget.windowStarted.IsZero() || (now.Sub(budget.windowStarted) >= window && !budget.blockedUntil.After(now)) {
+		budget = appServerGatewayHistoryBudget{windowStarted: now}
+	}
+	// 核心逻辑：全局预算按进程共享，避免 full/summary/fullRead 或多连接同时拉历史时合计挤爆 5Mbps 链路。
+	budget.responseBytes += int64(responseBytes)
+	if budget.responseBytes >= appServerGatewayHistoryGlobalMaxResponseBytes {
+		budget.blockedUntil = now.Add(window)
+	}
+	r.gatewayHistoryGlobalBudget = budget
+}
+
+func appServerGatewayHistoryGlobalBudgetWindow() time.Duration {
+	if appServerGatewayHistoryGlobalWindow > 0 {
+		return appServerGatewayHistoryGlobalWindow
+	}
+	return appServerGatewayHistoryBudgetWindow
 }
 
 func copyGatewayStringParams(params map[string]any, keys ...string) map[string]any {
@@ -1814,6 +1876,14 @@ func (p *appServerGatewayPolicy) observeUpstreamFrame(messageType int, payload [
 		}
 		return payload, true, nil
 	}
+	if strings.TrimSpace(frame.Method) != "" && frame.ID == nil {
+		if normalizeAppServerRuntimeID(p.runtimeID) == "codex" && appServerMediaRedactNotificationsEnabled() {
+			if redacted, changed := p.router.redactInlineHistoryImagesInGatewayResponse(payload); changed {
+				payload = redacted
+			}
+		}
+		return payload, true, nil
+	}
 	if gatewayFrameIsResponse(&frame) {
 		if pending, ok := p.consumePendingHistoryRequest(frame.ID); ok {
 			if len(frame.Error) == 0 && len(frame.Result) > 0 {
@@ -1866,6 +1936,15 @@ func (p *appServerGatewayPolicy) observeUpstreamFrame(messageType int, payload [
 		p.allowThread(thread)
 	}
 	return payload, true, nil
+}
+
+func appServerMediaRedactNotificationsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(appServerMediaRedactNotifyEnv))) {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
 }
 
 func gatewayFrameIsResponse(frame *appServerGatewayFrame) bool {

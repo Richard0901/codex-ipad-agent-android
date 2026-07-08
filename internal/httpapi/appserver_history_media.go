@@ -3,21 +3,31 @@ package httpapi
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/image/draw"
+	"golang.org/x/image/webp"
 )
 
 const appServerHistoryMediaURLPrefix = "agentd-history-media://"
 
 var (
-	appServerHistoryMediaTTL                = 30 * time.Minute
-	appServerHistoryMediaMaxEntries         = 128
-	appServerHistoryMediaMaxBytes     int64 = 256 << 20
-	appServerHistoryMediaMaxItemBytes int64 = 20 << 20
+	appServerHistoryMediaTTL                       = 30 * time.Minute
+	appServerHistoryMediaMaxEntries                = 128
+	appServerHistoryMediaMaxBytes            int64 = 256 << 20
+	appServerHistoryMediaMaxItemBytes        int64 = 20 << 20
+	appServerHistoryMediaDerivedMaxDimension       = 1600
+	appServerHistoryMediaJPEGQuality               = 80
 )
 
 // imageGeneration.result 之类的裸 base64 只有大到影响 gateway cap / 隧道带宽时才值得改写；
@@ -27,6 +37,7 @@ var appServerHistoryMediaMinRawBase64Chars = 16 << 10
 type appServerHistoryMediaStore struct {
 	mu         sync.Mutex
 	entries    map[string]appServerHistoryMediaEntry
+	idByHash   map[[32]byte]string
 	totalBytes int64
 }
 
@@ -34,36 +45,60 @@ type appServerHistoryMediaEntry struct {
 	id          string
 	contentType string
 	data        []byte
+	hash        [32]byte
+	derived     map[string]appServerHistoryMediaVariant
 	createdAt   time.Time
 	lastAccess  time.Time
 }
 
+type appServerHistoryMediaVariant struct {
+	contentType string
+	data        []byte
+}
+
 func newAppServerHistoryMediaStore() *appServerHistoryMediaStore {
-	return &appServerHistoryMediaStore{entries: map[string]appServerHistoryMediaEntry{}}
+	return &appServerHistoryMediaStore{
+		entries:  map[string]appServerHistoryMediaEntry{},
+		idByHash: map[[32]byte]string{},
+	}
 }
 
 func (s *appServerHistoryMediaStore) put(contentType string, data []byte) (string, bool) {
 	if s == nil || len(data) == 0 || int64(len(data)) > appServerHistoryMediaMaxItemBytes {
 		return "", false
 	}
-	id, ok := randomHistoryMediaID()
-	if !ok {
-		return "", false
-	}
 	now := time.Now()
-	entry := appServerHistoryMediaEntry{
-		id:          id,
-		contentType: contentType,
-		data:        append([]byte(nil), data...),
-		createdAt:   now,
-		lastAccess:  now,
-	}
+	hash := sha256.Sum256(data)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(now)
+	if s.idByHash == nil {
+		s.idByHash = map[[32]byte]string{}
+	}
+	if existingID := s.idByHash[hash]; existingID != "" {
+		if entry, ok := s.entries[existingID]; ok {
+			entry.lastAccess = now
+			s.entries[existingID] = entry
+			return existingID, true
+		}
+		delete(s.idByHash, hash)
+	}
+	id, ok := randomHistoryMediaID()
+	if !ok {
+		return "", false
+	}
+	entry := appServerHistoryMediaEntry{
+		id:          id,
+		contentType: contentType,
+		data:        append([]byte(nil), data...),
+		hash:        hash,
+		createdAt:   now,
+		lastAccess:  now,
+	}
 	s.entries[id] = entry
-	s.totalBytes += int64(len(entry.data))
+	s.idByHash[hash] = id
+	s.totalBytes += entry.totalBytes()
 	s.enforceLimitsLocked(now)
 	return id, true
 }
@@ -89,14 +124,83 @@ func (s *appServerHistoryMediaStore) get(id string) (appServerHistoryMediaEntry,
 	return entry, true
 }
 
+func (s *appServerHistoryMediaStore) getDerived(id string, key string) (appServerHistoryMediaEntry, appServerHistoryMediaVariant, bool) {
+	if s == nil {
+		return appServerHistoryMediaEntry{}, appServerHistoryMediaVariant{}, false
+	}
+	id = strings.TrimSpace(id)
+	key = strings.TrimSpace(key)
+	if id == "" || key == "" {
+		return appServerHistoryMediaEntry{}, appServerHistoryMediaVariant{}, false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(now)
+	entry, ok := s.entries[id]
+	if !ok {
+		return appServerHistoryMediaEntry{}, appServerHistoryMediaVariant{}, false
+	}
+	entry.lastAccess = now
+	s.entries[id] = entry
+	variant, ok := entry.derived[key]
+	if !ok {
+		return entry, appServerHistoryMediaVariant{}, false
+	}
+	variant.data = append([]byte(nil), variant.data...)
+	return entry, variant, true
+}
+
+func (s *appServerHistoryMediaStore) storeDerived(id string, key string, variant appServerHistoryMediaVariant) (appServerHistoryMediaEntry, appServerHistoryMediaVariant, bool) {
+	if s == nil || strings.TrimSpace(id) == "" || strings.TrimSpace(key) == "" || len(variant.data) == 0 {
+		return appServerHistoryMediaEntry{}, appServerHistoryMediaVariant{}, false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(now)
+	entry, ok := s.entries[id]
+	if !ok {
+		return appServerHistoryMediaEntry{}, appServerHistoryMediaVariant{}, false
+	}
+	if entry.derived == nil {
+		entry.derived = map[string]appServerHistoryMediaVariant{}
+	}
+	if existing, ok := entry.derived[key]; ok {
+		entry.lastAccess = now
+		s.entries[id] = entry
+		existing.data = append([]byte(nil), existing.data...)
+		return entry, existing, true
+	}
+	copied := appServerHistoryMediaVariant{
+		contentType: variant.contentType,
+		data:        append([]byte(nil), variant.data...),
+	}
+	entry.derived[key] = copied
+	entry.lastAccess = now
+	s.entries[id] = entry
+	s.totalBytes += int64(len(copied.data))
+	s.enforceLimitsLocked(now)
+	copied.data = append([]byte(nil), copied.data...)
+	return entry, copied, true
+}
+
+func (s *appServerHistoryMediaStore) totalBytesForTest() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.totalBytes
+}
+
 func (s *appServerHistoryMediaStore) pruneLocked(now time.Time) {
 	if appServerHistoryMediaTTL <= 0 {
 		return
 	}
 	for id, entry := range s.entries {
 		if now.Sub(entry.createdAt) > appServerHistoryMediaTTL {
-			delete(s.entries, id)
-			s.totalBytes -= int64(len(entry.data))
+			s.deleteEntryLocked(id, entry)
 		}
 	}
 	if s.totalBytes < 0 {
@@ -119,12 +223,27 @@ func (s *appServerHistoryMediaStore) enforceLimitsLocked(now time.Time) {
 			return
 		}
 		entry := s.entries[oldestID]
-		delete(s.entries, oldestID)
-		s.totalBytes -= int64(len(entry.data))
+		s.deleteEntryLocked(oldestID, entry)
 	}
 	if s.totalBytes < 0 {
 		s.totalBytes = 0
 	}
+}
+
+func (s *appServerHistoryMediaStore) deleteEntryLocked(id string, entry appServerHistoryMediaEntry) {
+	delete(s.entries, id)
+	if s.idByHash != nil && entry.hash != ([32]byte{}) {
+		delete(s.idByHash, entry.hash)
+	}
+	s.totalBytes -= entry.totalBytes()
+}
+
+func (e appServerHistoryMediaEntry) totalBytes() int64 {
+	total := int64(len(e.data))
+	for _, variant := range e.derived {
+		total += int64(len(variant.data))
+	}
+	return total
 }
 
 func randomHistoryMediaID() (string, bool) {
@@ -146,18 +265,170 @@ func (r *Router) appServerHistoryMediaHandler(w http.ResponseWriter, req *http.R
 		writeError(w, http.StatusBadRequest, "history media id 无效")
 		return
 	}
-	entry, ok := r.historyMedia.get(id)
-	if !ok {
+	if historyMediaOriginalRequested(req) {
+		entry, ok := r.historyMedia.get(id)
+		if !ok {
+			writeError(w, http.StatusNotFound, "history media 已过期或不存在")
+			return
+		}
+		writeJSON(w, http.StatusOK, historyMediaFileReadResponse(entry.id, entry.contentType, entry.data, 0))
+		return
+	}
+	entry, variant, derived := r.historyMediaValueForDefaultRead(id)
+	if entry.id == "" {
 		writeError(w, http.StatusNotFound, "history media 已过期或不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, fileReadResponse{
-		Path:          appServerHistoryMediaURLPrefix + entry.id,
-		Name:          historyMediaFilename(entry.id, entry.contentType),
-		ContentType:   entry.contentType,
-		Size:          int64(len(entry.data)),
-		ContentBase64: base64.StdEncoding.EncodeToString(entry.data),
-	})
+	if derived {
+		writeJSON(w, http.StatusOK, historyMediaFileReadResponse(entry.id, variant.contentType, variant.data, int64(len(entry.data))))
+		return
+	}
+	writeJSON(w, http.StatusOK, historyMediaFileReadResponse(entry.id, entry.contentType, entry.data, 0))
+}
+
+func historyMediaOriginalRequested(req *http.Request) bool {
+	value := strings.TrimSpace(req.URL.Query().Get("original"))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+func (r *Router) historyMediaValueForDefaultRead(id string) (appServerHistoryMediaEntry, appServerHistoryMediaVariant, bool) {
+	const key = "1600"
+	if entry, variant, ok := r.historyMedia.getDerived(id, key); ok {
+		return entry, variant, true
+	}
+	entry, ok := r.historyMedia.get(id)
+	if !ok {
+		return appServerHistoryMediaEntry{}, appServerHistoryMediaVariant{}, false
+	}
+	variant, changed := deriveHistoryMediaVariant(entry)
+	if !changed {
+		return entry, appServerHistoryMediaVariant{}, false
+	}
+	storedEntry, storedVariant, ok := r.historyMedia.storeDerived(id, key, variant)
+	if !ok {
+		return entry, variant, true
+	}
+	return storedEntry, storedVariant, true
+}
+
+func historyMediaFileReadResponse(id string, contentType string, data []byte, originalByteCount int64) fileReadResponse {
+	return fileReadResponse{
+		Path:              appServerHistoryMediaURLPrefix + id,
+		Name:              historyMediaFilename(id, contentType),
+		ContentType:       contentType,
+		Size:              int64(len(data)),
+		ContentBase64:     base64.StdEncoding.EncodeToString(data),
+		OriginalByteCount: originalByteCount,
+	}
+}
+
+func deriveHistoryMediaVariant(entry appServerHistoryMediaEntry) (appServerHistoryMediaVariant, bool) {
+	img, format, ok := decodeHistoryMediaImage(entry.contentType, entry.data)
+	if !ok {
+		return appServerHistoryMediaVariant{}, false
+	}
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return appServerHistoryMediaVariant{}, false
+	}
+
+	target := img
+	resized := false
+	if appServerHistoryMediaDerivedMaxDimension > 0 && max(width, height) > appServerHistoryMediaDerivedMaxDimension {
+		targetWidth, targetHeight := scaledHistoryMediaSize(width, height, appServerHistoryMediaDerivedMaxDimension)
+		dst := image.NewNRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+		// 核心逻辑：降采样只发生在按需取图接口，WebSocket 主链路永远只传短 URL。
+		draw.CatmullRom.Scale(dst, dst.Bounds(), img, bounds, draw.Over, nil)
+		target = dst
+		resized = true
+	}
+
+	if imageHasTransparency(target) {
+		if !resized {
+			return appServerHistoryMediaVariant{}, false
+		}
+		data, ok := encodeHistoryMediaPNG(target)
+		return appServerHistoryMediaVariant{contentType: "image/png", data: data}, ok
+	}
+
+	if resized {
+		data, ok := encodeHistoryMediaJPEG(target)
+		return appServerHistoryMediaVariant{contentType: "image/jpeg", data: data}, ok
+	}
+
+	if historyMediaIsPNG(entry.contentType, format) {
+		data, ok := encodeHistoryMediaJPEG(target)
+		if ok && len(data) < len(entry.data)*85/100 {
+			return appServerHistoryMediaVariant{contentType: "image/jpeg", data: data}, true
+		}
+	}
+	return appServerHistoryMediaVariant{}, false
+}
+
+func decodeHistoryMediaImage(contentType string, data []byte) (image.Image, string, bool) {
+	reader := bytes.NewReader(data)
+	switch strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0])) {
+	case "image/png":
+		img, err := png.Decode(reader)
+		return img, "png", err == nil
+	case "image/jpeg", "image/jpg":
+		img, err := jpeg.Decode(reader)
+		return img, "jpeg", err == nil
+	case "image/gif":
+		img, err := gif.Decode(reader)
+		return img, "gif", err == nil
+	case "image/webp":
+		img, err := webp.Decode(reader)
+		return img, "webp", err == nil
+	}
+	img, format, err := image.Decode(bytes.NewReader(data))
+	return img, format, err == nil
+}
+
+func scaledHistoryMediaSize(width int, height int, maxDimension int) (int, int) {
+	if width >= height {
+		targetWidth := maxDimension
+		targetHeight := max(1, height*maxDimension/width)
+		return targetWidth, targetHeight
+	}
+	targetHeight := maxDimension
+	targetWidth := max(1, width*maxDimension/height)
+	return targetWidth, targetHeight
+}
+
+func imageHasTransparency(img image.Image) bool {
+	bounds := img.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			_, _, _, alpha := img.At(x, y).RGBA()
+			if alpha != 0xffff {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func encodeHistoryMediaJPEG(img image.Image) ([]byte, bool) {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: appServerHistoryMediaJPEGQuality}); err != nil {
+		return nil, false
+	}
+	return buf.Bytes(), true
+}
+
+func encodeHistoryMediaPNG(img image.Image) ([]byte, bool) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		return nil, false
+	}
+	return buf.Bytes(), true
+}
+
+func historyMediaIsPNG(contentType string, format string) bool {
+	return strings.EqualFold(strings.TrimSpace(strings.Split(contentType, ";")[0]), "image/png") || strings.EqualFold(format, "png")
 }
 
 func (r *Router) redactInlineHistoryImagesInGatewayResponse(payload []byte) ([]byte, bool) {

@@ -67,6 +67,9 @@ type relayGatewayStats struct {
 type relayGatewayDirectionStats struct {
 	Frames                int64 `json:"frames"`
 	Bytes                 int64 `json:"bytes"`
+	ForwardedBytes        int64 `json:"forwarded_bytes"`
+	RedactedFrames        int64 `json:"redacted_frames"`
+	RedactedBytesSaved    int64 `json:"redacted_bytes_saved"`
 	PolicyMillisTotal     int64 `json:"policy_ms_total"`
 	PolicyMillisMax       int64 `json:"policy_ms_max"`
 	WriteMillisTotal      int64 `json:"write_ms_total"`
@@ -75,6 +78,7 @@ type relayGatewayDirectionStats struct {
 	PolicyRejectedFrames  int64 `json:"policy_rejected_frames"`
 	DroppedFrames         int64 `json:"dropped_frames"`
 	LastFrameBytes        int64 `json:"last_frame_bytes"`
+	LastForwardedBytes    int64 `json:"last_forwarded_bytes"`
 	LastWriteMillis       int64 `json:"last_write_ms"`
 	LastPolicyMillis      int64 `json:"last_policy_ms"`
 	LastForwardedAtUnixMs int64 `json:"last_forwarded_at_unix_ms,omitempty"`
@@ -286,8 +290,8 @@ func (m *relayMonitor) recordGatewayForward(id string, direction string, payload
 	}
 	connDir := relayDirectionForConnection(stats, direction)
 	totalDir := relayDirectionForGateway(&m.gateway, direction)
-	applyRelayDirectionForward(connDir, payloadBytes, policyMillis, writeMillis, now)
-	applyRelayDirectionForward(totalDir, payloadBytes, policyMillis, writeMillis, now)
+	applyRelayDirectionForward(connDir, payloadBytes, forwardedBytes, policyMillis, writeMillis, now)
+	applyRelayDirectionForward(totalDir, payloadBytes, forwardedBytes, policyMillis, writeMillis, now)
 	if direction == "client_to_upstream" {
 		stats.LastClientMethod = meta.Method
 		stats.LastClientFrameBytes = int64(payloadBytes)
@@ -306,7 +310,7 @@ func (m *relayMonitor) recordGatewayForward(id string, direction string, payload
 	stats.LastUpstreamMethod = meta.Method
 	stats.LastUpstreamBytes = int64(payloadBytes)
 	if meta.ID != "" && meta.IsResponse {
-		m.completeGatewayRPC(stats, meta.ID, payloadBytes, now)
+		m.completeGatewayRPC(stats, meta.ID, forwardedBytes, now)
 	}
 }
 
@@ -516,13 +520,19 @@ func relayDirectionForGateway(stats *relayGatewayStats, direction string) *relay
 	return &stats.ClientToUpstream
 }
 
-func applyRelayDirectionForward(stats *relayGatewayDirectionStats, payloadBytes int, policyMillis int64, writeMillis int64, now time.Time) {
+func applyRelayDirectionForward(stats *relayGatewayDirectionStats, payloadBytes int, forwardedBytes int, policyMillis int64, writeMillis int64, now time.Time) {
 	stats.Frames++
 	stats.ForwardedFrames++
 	stats.Bytes += int64(payloadBytes)
+	stats.ForwardedBytes += int64(forwardedBytes)
+	if payloadBytes > forwardedBytes {
+		stats.RedactedFrames++
+		stats.RedactedBytesSaved += int64(payloadBytes - forwardedBytes)
+	}
 	stats.PolicyMillisTotal += policyMillis
 	stats.WriteMillisTotal += writeMillis
 	stats.LastFrameBytes = int64(payloadBytes)
+	stats.LastForwardedBytes = int64(forwardedBytes)
 	stats.LastPolicyMillis = policyMillis
 	stats.LastWriteMillis = writeMillis
 	stats.LastForwardedAtUnixMs = now.UnixMilli()

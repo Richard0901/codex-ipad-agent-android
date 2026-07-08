@@ -883,7 +883,8 @@ final class SessionStore: ObservableObject {
 
     private let foregroundOutputIdleClearDelay: UInt64 = 8_000_000_000
     private let runtimeEventFlushDelayNanoseconds: UInt64 = 80_000_000
-    private let sessionListPollingDelayNanoseconds: UInt64 = 8_000_000_000
+    private let sessionListActivePollingDelayNanoseconds: UInt64 = 8_000_000_000
+    private let sessionListIdlePollingDelayNanoseconds: UInt64 = 20_000_000_000
     private let economyHistoryPageLimit = 60
     private let fullHistoryPageLimit = 20
     private let historyFirstPageCacheTTL: TimeInterval = 4
@@ -2539,7 +2540,7 @@ final class SessionStore: ObservableObject {
     func pollSelectedProjectSessionsWhileVisible() async {
         while !Task.isCancelled {
             do {
-                try await Task.sleep(nanoseconds: sessionListPollingDelayNanoseconds)
+                try await Task.sleep(nanoseconds: sessionListPollingDelayNanoseconds())
             } catch {
                 return
             }
@@ -2553,6 +2554,15 @@ final class SessionStore: ObservableObject {
             }
             await refreshSelectedProjectSessions(showLoading: false)
         }
+    }
+
+    private func sessionListPollingDelayNanoseconds() -> UInt64 {
+        guard let selectedProjectID else {
+            return sessionListIdlePollingDelayNanoseconds
+        }
+        return sessions(forProjectID: selectedProjectID).contains(where: \.isRunning)
+            ? sessionListActivePollingDelayNanoseconds
+            : sessionListIdlePollingDelayNanoseconds
     }
 
     func refreshCurrentContext() async {
