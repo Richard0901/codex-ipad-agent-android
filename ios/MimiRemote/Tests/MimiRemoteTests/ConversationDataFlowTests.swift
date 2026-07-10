@@ -9931,13 +9931,6 @@ final class ConversationDataFlowTests: XCTestCase {
         let economyTask = Task {
             try await client.messagesPage(sessionID: "thread_history_mode", before: nil, limit: 20, loadMode: .economy)
         }
-        let metadataRead = try await waitForFakeAppServerRequest(codexTransport, method: "thread/read", after: 2)
-        XCTAssertEqual(metadataRead.params?.objectValue?["includeTurns"]?.boolValue, false)
-        transportResponse(
-            codexTransport,
-            id: metadataRead.id,
-            result: #"{"thread":{"id":"thread_history_mode","sessionId":"thread_history_mode","preview":"history mode","ephemeral":false,"modelProvider":"openai","createdAt":1780493000,"updatedAt":1780493000,"status":{"type":"notLoaded"},"path":null,"cwd":"/tmp/multi-history-mode","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"history mode","turns":[]}}"#
-        )
         let economyRequest = try await waitForFakeAppServerRequest(codexTransport, method: "thread/turns/list", after: 2)
         XCTAssertEqual(economyRequest.params?.objectValue?["itemsView"]?.stringValue, "summary")
         transportResponse(codexTransport, id: economyRequest.id, result: #"{"data":[],"nextCursor":null}"#)
