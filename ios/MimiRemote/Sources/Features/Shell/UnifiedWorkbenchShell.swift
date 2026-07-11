@@ -162,22 +162,31 @@ struct UnifiedWorkbenchShell: View {
             ToolbarItem(placement: .principal) {
                 // 标题放进系统顶栏，才能与 iPad 的侧栏收起按钮保持同一行。
                 HStack(spacing: 8) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Mimi Remote")
-                            .font(themeStore.uiFont(.headline, weight: .semibold))
-                            .foregroundStyle(tokens.primaryText)
-                        Text(connectionSubtitle)
-                            .font(themeStore.uiFont(.caption2))
-                            .foregroundStyle(tokens.tertiaryText)
-                    }
+                    CodexUsageRingsControl(
+                        display: sessionStore.accountCodexUsageWindowsDisplay,
+                        onRefresh: {
+                            await sessionStore.refreshCodexUsage()
+                        }
+                    )
 
-                    Circle()
-                        .fill(connectionTone(tokens: tokens))
-                        .frame(width: 7, height: 7)
-                        .accessibilityHidden(true)
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Mimi Remote")
+                                .font(themeStore.uiFont(.headline, weight: .semibold))
+                                .foregroundStyle(tokens.primaryText)
+                            Text(connectionSubtitle)
+                                .font(themeStore.uiFont(.caption2))
+                                .foregroundStyle(tokens.tertiaryText)
+                        }
+
+                        Circle()
+                            .fill(connectionTone(tokens: tokens))
+                            .frame(width: 7, height: 7)
+                            .accessibilityHidden(true)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Mimi Remote，\(connectionSubtitle)")
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Mimi Remote，\(connectionSubtitle)")
             }
         }
         .task {
@@ -293,6 +302,264 @@ struct UnifiedWorkbenchShell: View {
         }
     }
 }
+
+/// 侧栏标题旁的账号剩余用量入口。图形尺寸跟随横向尺寸环境变化，
+/// 因而 iPad mini 分屏和 iPhone 会自动使用更紧凑的版本。
+private struct CodexUsageRingsControl: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    let display: CodexUsageWindowsDisplay
+    let onRefresh: () async -> Void
+
+    @State private var showsDetails = false
+    @State private var isRefreshing = false
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+        let metrics = CodexUsageRingMetrics(isCompact: horizontalSizeClass == .compact)
+
+        Button {
+            showsDetails.toggle()
+        } label: {
+            usageRings(metrics: metrics, tokens: tokens)
+                .frame(width: metrics.hitSize, height: metrics.hitSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Codex 剩余用量")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityIdentifier("sidebar.codexUsageRings")
+        .popover(isPresented: $showsDetails, arrowEdge: .top) {
+            usageDetails(tokens: tokens)
+                .presentationCompactAdaptation(.sheet)
+                .presentationDetents([.height(300), .medium])
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    private func usageRings(metrics: CodexUsageRingMetrics, tokens: ThemeTokens) -> some View {
+        let fiveHour = window(.fiveHour)
+        let sevenDay = window(.sevenDay)
+
+        return ZStack {
+            usageRing(
+                progress: sevenDay?.remainingProgress,
+                diameter: metrics.diameter,
+                lineWidth: metrics.outerLineWidth,
+                tint: tint(for: .sevenDay),
+                tokens: tokens
+            )
+            usageRing(
+                progress: fiveHour?.remainingProgress,
+                diameter: metrics.innerDiameter,
+                lineWidth: metrics.innerLineWidth,
+                tint: tint(for: .fiveHour),
+                tokens: tokens
+            )
+
+            if !hasUsageProgress {
+                Text("?")
+                    .font(.system(size: metrics.questionMarkSize, weight: .bold, design: .rounded))
+                    .foregroundStyle(tokens.tertiaryText)
+            }
+        }
+        .frame(width: metrics.diameter, height: metrics.diameter)
+        .accessibilityHidden(true)
+    }
+
+    private func usageRing(
+        progress: Double?,
+        diameter: CGFloat,
+        lineWidth: CGFloat,
+        tint: Color,
+        tokens: ThemeTokens
+    ) -> some View {
+        ZStack {
+            Circle()
+                .stroke(tokens.tertiaryText.opacity(0.18), lineWidth: lineWidth)
+
+            if let progress {
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+        }
+        .frame(width: diameter, height: diameter)
+        .animation(.snappy(duration: 0.25), value: progress)
+    }
+
+    private func usageDetails(tokens: ThemeTokens) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Codex 剩余用量")
+                        .font(themeStore.uiFont(.headline, weight: .semibold))
+                        .foregroundStyle(tokens.primaryText)
+                    Text(display.hasLiveData ? "5h 和 7d 账号窗口" : "尚未取得账号用量")
+                        .font(themeStore.uiFont(.caption))
+                        .foregroundStyle(tokens.secondaryText)
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    Task { await refreshUsage() }
+                } label: {
+                    Group {
+                        if isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    }
+                    .frame(width: 34, height: 34)
+                    .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(tokens.secondaryText)
+                .background(tokens.surface.opacity(0.72), in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(tokens.border.opacity(0.72), lineWidth: 1)
+                }
+                .disabled(isRefreshing)
+                .accessibilityLabel("刷新 Codex 用量")
+            }
+
+            VStack(spacing: 14) {
+                usageWindowRow(kind: .fiveHour, tokens: tokens)
+                Divider().overlay(tokens.border.opacity(0.72))
+                usageWindowRow(kind: .sevenDay, tokens: tokens)
+            }
+
+            HStack(spacing: 7) {
+                Image(systemName: display.hasLiveData ? "checkmark.seal" : "info.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(display.creditText)
+                    .font(themeStore.uiFont(.caption, weight: .medium))
+                    .lineLimit(2)
+            }
+            .foregroundStyle(tokens.secondaryText)
+        }
+        .padding(16)
+        .frame(width: horizontalSizeClass == .compact ? nil : 300)
+        .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil, alignment: .leading)
+    }
+
+    private func usageWindowRow(kind: CodexUsageWindowKind, tokens: ThemeTokens) -> some View {
+        let item = window(kind)
+        let progress = item?.remainingProgress ?? 0
+        let tint = tint(for: kind)
+
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Circle()
+                    .stroke(tint, lineWidth: 2.5)
+                    .frame(width: 12, height: 12)
+                Text(kind.label)
+                    .font(themeStore.uiFont(.callout, weight: .semibold))
+                    .foregroundStyle(tokens.primaryText)
+                    .monospacedDigit()
+                Text(kind.title)
+                    .font(themeStore.uiFont(.caption, weight: .medium))
+                    .foregroundStyle(tokens.secondaryText)
+
+                Spacer(minLength: 8)
+
+                Text(item?.remainingText ?? "等待刷新")
+                    .font(themeStore.uiFont(.callout, weight: .semibold))
+                    .foregroundStyle(item?.remainingProgress == nil ? tokens.secondaryText : tint)
+                    .monospacedDigit()
+            }
+
+            ProgressView(value: progress)
+                .tint(tint)
+                .opacity(item?.remainingProgress == nil ? 0.3 : 1)
+
+            Text(item?.resetText ?? "暂无重置时间")
+                .font(themeStore.uiFont(.caption))
+                .foregroundStyle(tokens.secondaryText)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(kind.label) Codex 剩余用量")
+        .accessibilityValue("\(item?.remainingText ?? "等待刷新")，\(item?.resetText ?? "暂无重置时间")")
+    }
+
+    private func refreshUsage() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+        await onRefresh()
+    }
+
+    private func window(_ kind: CodexUsageWindowKind) -> CodexUsageWindowDisplay? {
+        display.windows.first { $0.kind == kind }
+    }
+
+    private var hasUsageProgress: Bool {
+        display.windows.contains { $0.remainingProgress != nil }
+    }
+
+    private func tint(for kind: CodexUsageWindowKind) -> Color {
+        switch kind {
+        case .fiveHour:
+            return .cyan
+        case .sevenDay:
+            return .pink
+        }
+    }
+
+    private var accessibilityValue: String {
+        let fiveHour = window(.fiveHour)?.remainingText ?? "等待刷新"
+        let sevenDay = window(.sevenDay)?.remainingText ?? "等待刷新"
+        return "5 小时\(fiveHour)，7 天\(sevenDay)"
+    }
+}
+
+struct CodexUsageRingMetrics {
+    let diameter: CGFloat
+    let innerDiameter: CGFloat
+    let outerLineWidth: CGFloat
+    let innerLineWidth: CGFloat
+    let hitSize: CGFloat
+    let questionMarkSize: CGFloat
+
+    init(isCompact: Bool) {
+        diameter = isCompact ? 30 : 34
+        innerDiameter = isCompact ? 20 : 23
+        outerLineWidth = isCompact ? 3.4 : 3.8
+        innerLineWidth = isCompact ? 3 : 3.2
+        // 图形在 iPhone 上收紧，但点击区始终保持 44pt，兼顾窄屏排版和触控可用性。
+        hitSize = 44
+        questionMarkSize = isCompact ? 7 : 8
+    }
+}
+
+#if DEBUG
+#Preview("Codex 用量双环自适应") {
+    let loaded = CodexUsageWindowsDisplay.make(
+        rateLimit: RateLimitSummary(primaryUsedPercent: 62, secondaryUsedPercent: 38)
+    )
+    let pending = CodexUsageWindowsDisplay.make(rateLimit: nil)
+
+    HStack(spacing: 24) {
+        CodexUsageRingsControl(display: loaded, onRefresh: {})
+            .environment(\.horizontalSizeClass, .regular)
+        CodexUsageRingsControl(display: loaded, onRefresh: {})
+            .environment(\.horizontalSizeClass, .compact)
+        CodexUsageRingsControl(display: pending, onRefresh: {})
+            .environment(\.horizontalSizeClass, .compact)
+    }
+    .environmentObject(ThemeStore())
+    .padding(20)
+}
+#endif
 
 private struct NewSessionSheet: View {
     @Environment(\.dismiss) private var dismiss

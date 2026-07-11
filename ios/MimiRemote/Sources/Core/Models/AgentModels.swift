@@ -2018,6 +2018,30 @@ struct CodexUsageWindowDisplay: Equatable, Identifiable {
         }
         return "已用 \(usedPercentText)"
     }
+
+    /// 账号接口返回的是“已用比例”，左上角圆环表达的是“剩余比例”，统一在展示模型中换算，
+    /// 避免不同页面各自计算后出现语义相反或越界的问题。
+    var remainingProgress: Double? {
+        progress.map { min(max(1 - $0, 0), 1) }
+    }
+
+    var remainingPercentText: String? {
+        guard let remainingProgress else {
+            return nil
+        }
+        let percent = remainingProgress * 100
+        if abs(percent.rounded() - percent) < 0.0001 {
+            return "\(Int(percent.rounded()))%"
+        }
+        return String(format: "%.1f%%", percent)
+    }
+
+    var remainingText: String {
+        guard let remainingPercentText else {
+            return "等待刷新"
+        }
+        return "剩余 \(remainingPercentText)"
+    }
 }
 
 // app-server 的账号限额以 primary/secondary 返回；移动端按 Codex 当前语义分别展示为 5h/7d，

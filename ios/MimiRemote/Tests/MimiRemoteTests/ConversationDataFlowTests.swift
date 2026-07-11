@@ -14999,16 +14999,43 @@ extension ConversationDataFlowTests {
         XCTAssertTrue(windowsDisplay.hasLiveData)
         XCTAssertEqual(fiveHourWindow.primaryText, "已用 60%")
         XCTAssertEqual(fiveHourWindow.progress ?? -1, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(fiveHourWindow.remainingProgress ?? -1, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(fiveHourWindow.remainingPercentText, "40%")
+        XCTAssertEqual(fiveHourWindow.remainingText, "剩余 40%")
         XCTAssertEqual(fiveHourWindow.resetDate, Date(timeIntervalSince1970: TimeInterval(resetEpoch)))
         XCTAssertEqual(fiveHourWindow.resetText.hasSuffix(" 重置"), true)
         XCTAssertEqual(sevenDayWindow.primaryText, "已用 42%")
+        XCTAssertEqual(sevenDayWindow.remainingProgress ?? -1, 0.58, accuracy: 0.0001)
+        XCTAssertEqual(sevenDayWindow.remainingText, "剩余 58%")
         XCTAssertNil(sevenDayWindow.resetDate)
         XCTAssertEqual(sevenDayWindow.resetText, "暂无重置时间")
 
         let pendingWindowsDisplay = CodexUsageWindowsDisplay.make(rateLimit: nil, now: now)
         XCTAssertFalse(pendingWindowsDisplay.hasLiveData)
-        XCTAssertEqual(try XCTUnwrap(pendingWindowsDisplay.windows.first { $0.kind == .fiveHour }).primaryText, "等待刷新")
+        let pendingFiveHour = try XCTUnwrap(pendingWindowsDisplay.windows.first { $0.kind == .fiveHour })
+        XCTAssertEqual(pendingFiveHour.primaryText, "等待刷新")
+        XCTAssertNil(pendingFiveHour.remainingProgress)
+        XCTAssertNil(pendingFiveHour.remainingPercentText)
+        XCTAssertEqual(pendingFiveHour.remainingText, "等待刷新")
         XCTAssertEqual(try XCTUnwrap(pendingWindowsDisplay.windows.first { $0.kind == .sevenDay }).primaryText, "等待刷新")
+
+        let boundedWindows = CodexUsageWindowsDisplay.make(
+            rateLimit: RateLimitSummary(primaryUsedPercent: -10, secondaryUsedPercent: 125),
+            now: now
+        )
+        let boundedFiveHour = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .fiveHour })
+        let boundedSevenDay = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .sevenDay })
+        XCTAssertEqual(boundedFiveHour.remainingProgress ?? -1, 1, accuracy: 0.0001)
+        XCTAssertEqual(boundedFiveHour.remainingText, "剩余 100%")
+        XCTAssertEqual(boundedSevenDay.remainingProgress ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(boundedSevenDay.remainingText, "剩余 0%")
+
+        let fractionalWindows = CodexUsageWindowsDisplay.make(
+            rateLimit: RateLimitSummary(primaryUsedPercent: 10.5),
+            now: now
+        )
+        let fractionalFiveHour = try XCTUnwrap(fractionalWindows.windows.first { $0.kind == .fiveHour })
+        XCTAssertEqual(fractionalFiveHour.remainingText, "剩余 89.5%")
 
         let eightyPercent = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: RateLimitSummary(primaryUsedPercent: 80), now: now))
         XCTAssertFalse(eightyPercent.isNearLimit)
@@ -15048,6 +15075,18 @@ extension ConversationDataFlowTests {
         )
         XCTAssertFalse(try XCTUnwrap(secondaryWindows.windows.first { $0.kind == .fiveHour }).isExhausted)
         XCTAssertTrue(try XCTUnwrap(secondaryWindows.windows.first { $0.kind == .sevenDay }).isExhausted)
+    }
+
+    func testUsageRingMetricsAdaptToIPadMiniAndIPhone() {
+        let iPadMini = CodexUsageRingMetrics(isCompact: false)
+        XCTAssertEqual(iPadMini.diameter, 34)
+        XCTAssertEqual(iPadMini.innerDiameter, 23)
+        XCTAssertEqual(iPadMini.hitSize, 44)
+
+        let iPhone = CodexUsageRingMetrics(isCompact: true)
+        XCTAssertEqual(iPhone.diameter, 30)
+        XCTAssertEqual(iPhone.innerDiameter, 20)
+        XCTAssertEqual(iPhone.hitSize, 44)
     }
 
     func testDirectRuntimeAttachesUsageDisplayForAvailableRateLimit() async throws {
