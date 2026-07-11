@@ -38,6 +38,7 @@ jobs:
       IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
       DEVELOPMENT_TEAM: ${{ vars.DEVELOPMENT_TEAM }}
       TESTFLIGHT_BETA_GROUP_NAME: ${{ vars.TESTFLIGHT_BETA_GROUP_NAME }}
+      TESTFLIGHT_BETA_GROUP_ID: ${{ vars.TESTFLIGHT_BETA_GROUP_ID }}
       TESTFLIGHT_WHATS_NEW: ${{ inputs.what_to_test || format('自动内测：{0}', github.event.head_commit.message) }}
       APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -138,7 +139,7 @@ jobs:
           echo "IOS_MARKETING_VERSION=$marketing_version" >> "$GITHUB_ENV"
           echo "IOS_BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
 
-      - name: 上传并分发到咪咪 Internal
+      - name: 上传到 App Store Connect
         run: |
           set -euo pipefail
           api_key_json="$RUNNER_TEMP/fastlane-api-key.json"
@@ -154,10 +155,12 @@ jobs:
           fastlane pilot upload \
             --ipa "$IOS_IPA_PATH" \
             --api_key_path "$api_key_json" \
-            --groups "$TESTFLIGHT_BETA_GROUP_NAME" \
-            --changelog "$TESTFLIGHT_WHATS_NEW" \
-            --skip_waiting_for_build_processing false
-          echo "Mimi TestFlight 发布成功：$IOS_MARKETING_VERSION ($IOS_BUILD_NUMBER)"
+            --skip_waiting_for_build_processing true
+
+      - name: 精确分发到咪咪 Internal
+        run: |
+          set -euo pipefail
+          ruby scripts/distribute_internal_build.rb "$IOS_IPA_PATH"
 
       - name: 保存 IPA
         if: ${{ always() }}
