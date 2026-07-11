@@ -723,6 +723,8 @@ struct ConversationTimelineView: View {
     @State private var isPreservingHistoryScroll = false
     @State private var expandedProcessedGroupIDs: Set<String> = []
     @State private var timelineItemCache = ConversationTimelineItemCache()
+    @State private var timelineScrollPosition = ScrollPosition(edge: .bottom)
+    @State private var pendingTailScrollTask: Task<Void, Never>?
     @State private var tailScrollAttemptGeneration = 0
     @State private var userScrollAwayGeneration = 0
 
@@ -771,15 +773,12 @@ struct ConversationTimelineView: View {
                                 .listRowInsets(layout.messageRowInsets)
                                 .listRowBackground(Color.clear)
                         }
-                        Color.clear
-                            .frame(height: 1)
-                            .id(Self.timelineTailSentinelID)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets())
-                            .listRowBackground(Color.clear)
                     }
                 }
                 .listStyle(.plain)
+                // 尾部跟随使用内容边缘，不再把动态 List 行解析成 UICollectionView IndexPath。
+                // 会话切换或过程行折叠时，即使数据快照正在提交，也不会滚向已失效的行下标。
+                .scrollPosition($timelineScrollPosition)
                 .scrollContentBackground(.hidden)
                 .scrollDismissesKeyboard(.interactively)
                 .background(tokens.background)
@@ -803,7 +802,7 @@ struct ConversationTimelineView: View {
 
                 if shouldShowReturnToTailButton(timelineItems: timelineItems) {
                     Button {
-                        returnToTimelineTail(timelineItems: timelineItems, proxy: proxy)
+                        returnToTimelineTail(timelineItems: timelineItems)
                     } label: {
                         returnToTailLabel
                     }
@@ -839,7 +838,6 @@ struct ConversationTimelineView: View {
                     isTailFollowLockedByLocalSubmit = true
                     queueTailScrollAttempts(
                         timelineItems: timelineItems,
-                        proxy: proxy,
                         sessionID: sessionStore.selectedSessionID,
                         expectedTailItemID: timelineItems.last?.id,
                         animatedFirstAttempt: true,
@@ -852,7 +850,6 @@ struct ConversationTimelineView: View {
                     // 覆盖首次布局时机，确保落在真正的底部而不是空白区。
                     queueTailScrollAttempts(
                         timelineItems: timelineItems,
-                        proxy: proxy,
                         sessionID: sessionStore.selectedSessionID,
                         expectedTailItemID: timelineItems.last?.id,
                         animatedFirstAttempt: false,
@@ -862,7 +859,6 @@ struct ConversationTimelineView: View {
                 }
                 queueTailScrollAttempts(
                     timelineItems: timelineItems,
-                    proxy: proxy,
                     sessionID: sessionStore.selectedSessionID,
                     expectedTailItemID: timelineItems.last?.id,
                     animatedFirstAttempt: true,
@@ -870,13 +866,27 @@ struct ConversationTimelineView: View {
                 )
             }
             .onChange(of: messages.last?.renderFingerprint) { _, _ in
-                // 流式增量会高频改写最后一条内容；无动画直接定位，跟随输出但不卡。
-                scrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: false)
+                // 流式增量会高频改写最后一条内容；请求会自动合并，同一更新周期只滚一次。
+                queueTailScrollAttempts(
+                    timelineItems: timelineItems,
+                    sessionID: sessionStore.selectedSessionID,
+                    expectedTailItemID: timelineItems.last?.id,
+                    animatedFirstAttempt: false,
+                    force: false,
+                    retriesAfterLayout: false
+                )
             }
             .onChange(of: timelineItemIDs) { _, _ in
                 // turn 完成可能只改变 sendStatus，却让过程卡从多行收成“已处理”一行；
                 // 监听派生 row id，确保折叠发生时底部跟随逻辑仍然有机会重锚。
-                scrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: false)
+                queueTailScrollAttempts(
+                    timelineItems: timelineItems,
+                    sessionID: sessionStore.selectedSessionID,
+                    expectedTailItemID: timelineItems.last?.id,
+                    animatedFirstAttempt: false,
+                    force: false,
+                    retriesAfterLayout: false
+                )
             }
             .task(id: tailFollowTaskKey) {
                 guard tailFollowTaskKey != nil else {
@@ -886,12 +896,14 @@ struct ConversationTimelineView: View {
                 // 用 task(id:) 补一条首帧重锚路径，避免 List 默认停在最早消息。
                 queueTailScrollAttempts(
                     timelineItems: timelineItems,
-                    proxy: proxy,
                     sessionID: sessionStore.selectedSessionID,
                     expectedTailItemID: timelineItems.last?.id,
                     animatedFirstAttempt: false,
                     force: false
                 )
+            }
+            .onDisappear {
+                cancelPendingTailScrollAttempts()
             }
         }
     }
@@ -938,8 +950,6 @@ struct ConversationTimelineView: View {
         }
         return nil
     }
-
-    private static let timelineTailSentinelID = "__conversation_timeline_tail__"
 
     private static func isOptimisticSessionID(_ sessionID: SessionID?) -> Bool {
         sessionID?.hasPrefix("local:") == true
@@ -1084,7 +1094,7 @@ struct ConversationTimelineView: View {
         themeStore.tokens(for: colorScheme).secondaryText
     }
 
-    private func forceScrollToTimelineTail(timelineItems: [ConversationTimelineItem], proxy: ScrollViewProxy, animated: Bool) {
+    private func forceScrollToTimelineTail(timelineItems: [ConversationTimelineItem], animated: Bool) {
         guard !timelineItems.isEmpty else {
             return
         }
@@ -1095,16 +1105,16 @@ struct ConversationTimelineView: View {
         hasUnseenTailMessage = false
         isTimelineNearBottom = true
         forceNextMessageTailScroll = false
-        scrollToTimelineTail(id: Self.timelineTailSentinelID, proxy: proxy, animated: animated)
+        scrollToTimelineTail(animated: animated)
     }
 
     private func queueTailScrollAttempts(
         timelineItems: [ConversationTimelineItem],
-        proxy: ScrollViewProxy,
         sessionID: SessionID?,
         expectedTailItemID: String?,
         animatedFirstAttempt: Bool,
-        force: Bool
+        force: Bool,
+        retriesAfterLayout: Bool = true
     ) {
         guard let sessionID, let expectedTailItemID, !timelineItems.isEmpty else {
             return
@@ -1123,65 +1133,71 @@ struct ConversationTimelineView: View {
             return
         }
 
+        // 消息 ID、内容指纹和派生行 ID 可能在同一帧一起变化。先取消旧请求并让出一次
+        // MainActor 更新周期，等 List 提交完当前快照后再滚动，避免并发滚动互相覆盖。
+        pendingTailScrollTask?.cancel()
         tailScrollAttemptGeneration += 1
         let attemptGeneration = tailScrollAttemptGeneration
         let scrollAwayGeneration = userScrollAwayGeneration
-
-        forceScrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: animatedFirstAttempt)
-        Task { @MainActor in
-            // List 首次挂载、状态条出现、Markdown 长文测高都会让第一次 scrollTo 偶发失效；
-            // 分几拍补重锚，只要用户没主动上滑，就把打开会话的默认位置稳定落到尾部。
-            for delay in [UInt64(50_000_000), 180_000_000, 420_000_000] {
-                try? await Task.sleep(nanoseconds: delay)
-                guard tailScrollAttemptGeneration == attemptGeneration,
-                      userScrollAwayGeneration == scrollAwayGeneration,
-                      sessionStore.selectedSessionID == sessionID,
-                      currentTimelineTailItemID() == expectedTailItemID,
-                      !isPreservingHistoryScroll
-                else {
-                    return
-                }
-                forceScrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: false)
+        pendingTailScrollTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled,
+                  tailScrollAttemptGeneration == attemptGeneration,
+                  userScrollAwayGeneration == scrollAwayGeneration,
+                  sessionStore.selectedSessionID == sessionID,
+                  currentTimelineTailItemID() == expectedTailItemID,
+                  !isPreservingHistoryScroll
+            else {
+                return
             }
+            forceScrollToTimelineTail(timelineItems: timelineItems, animated: animatedFirstAttempt)
+
+            guard retriesAfterLayout else {
+                return
+            }
+            // 首次挂载或 Markdown 行高变化时补一次无动画贴底；只有这个任务仍是最新请求才执行。
+            try? await Task.sleep(nanoseconds: 160_000_000)
+            guard !Task.isCancelled,
+                  tailScrollAttemptGeneration == attemptGeneration,
+                  userScrollAwayGeneration == scrollAwayGeneration,
+                  sessionStore.selectedSessionID == sessionID,
+                  currentTimelineTailItemID() == expectedTailItemID,
+                  !isPreservingHistoryScroll
+            else {
+                return
+            }
+            forceScrollToTimelineTail(timelineItems: timelineItems, animated: false)
         }
     }
 
     private func cancelPendingTailScrollAttempts() {
+        pendingTailScrollTask?.cancel()
+        pendingTailScrollTask = nil
         tailScrollAttemptGeneration += 1
     }
 
-    private func returnToTimelineTail(timelineItems: [ConversationTimelineItem], proxy: ScrollViewProxy) {
+    private func returnToTimelineTail(timelineItems: [ConversationTimelineItem]) {
         hasUnseenTailMessage = false
         shouldFollowMessageTail = true
         isTailFollowLockedByLocalSubmit = true
         isTimelineNearBottom = true
-        scrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: true)
+        queueTailScrollAttempts(
+            timelineItems: timelineItems,
+            sessionID: sessionStore.selectedSessionID,
+            expectedTailItemID: timelineItems.last?.id,
+            animatedFirstAttempt: true,
+            force: true,
+            retriesAfterLayout: false
+        )
     }
 
-    private func scrollToTimelineTail(timelineItems: [ConversationTimelineItem], proxy: ScrollViewProxy, animated: Bool) {
-        guard !timelineItems.isEmpty else {
-            return
-        }
-        guard !isPreservingHistoryScroll else {
-            return
-        }
-        guard shouldFollowMessageTail || forceNextMessageTailScroll else {
-            hasUnseenTailMessage = true
-            return
-        }
-        hasUnseenTailMessage = false
-        isTimelineNearBottom = true
-        forceNextMessageTailScroll = false
-        scrollToTimelineTail(id: Self.timelineTailSentinelID, proxy: proxy, animated: animated)
-    }
-
-    private func scrollToTimelineTail(id lastID: String, proxy: ScrollViewProxy, animated: Bool) {
+    private func scrollToTimelineTail(animated: Bool) {
         if animated {
             withAnimation(.easeOut(duration: 0.18)) {
-                proxy.scrollTo(lastID, anchor: .bottom)
+                timelineScrollPosition.scrollTo(edge: .bottom)
             }
         } else {
-            proxy.scrollTo(lastID, anchor: .bottom)
+            timelineScrollPosition.scrollTo(edge: .bottom)
         }
     }
 
