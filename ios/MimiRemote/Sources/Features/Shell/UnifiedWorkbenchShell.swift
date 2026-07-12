@@ -119,6 +119,9 @@ struct UnifiedWorkbenchShell: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, 38)
+
+            // 设置属于整个工作台而不是某个列表项，固定在侧栏底部可让顶部只保留品牌和当前内容。
+            sidebarFooter(tokens: tokens)
         }
         .background(tokens.sidebarBackground.ignoresSafeArea())
         .toolbar {
@@ -155,38 +158,42 @@ struct UnifiedWorkbenchShell: View {
                     .accessibilityLabel("Mimi Remote，\(connectionSubtitle)")
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    presentedSheet = .newSession
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 15, weight: .semibold))
-                }
-                .buttonStyle(.glassProminent)
-                .buttonBorderShape(.circle)
-                .tint(tokens.primaryAction)
-                .accessibilityLabel("新建会话")
-                .accessibilityIdentifier("sidebar.newSession")
-            }
-            // 固定间距会阻止系统把两个操作合并进同一个玻璃容器，保持为独立圆钮。
-            ToolbarSpacer(.fixed, placement: .topBarTrailing)
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    // 设置是临时配置面板，不改变用户当前所在的会话或工作区。
-                    presentedSheet = .settings
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 15, weight: .semibold))
-                }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .foregroundStyle(tokens.secondaryText)
-                .accessibilityLabel("打开设置")
-                .accessibilityIdentifier("sidebar.settings")
-            }
         }
         .task {
             await sessionStore.refreshSessionLibraryIndex()
+        }
+    }
+
+    private func sidebarFooter(tokens: ThemeTokens) -> some View {
+        HStack {
+            Button {
+                // 设置是全局配置，不改变当前会话或工作区选择。
+                presentedSheet = .settings
+            } label: {
+                Label("设置", systemImage: "gearshape")
+                    .font(themeStore.uiFont(.subheadline, weight: .medium))
+                    .padding(.horizontal, 12)
+                    .frame(height: 36)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(tokens.secondaryText)
+            .background(tokens.surface.opacity(0.72), in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(tokens.border.opacity(0.6), lineWidth: 1)
+            }
+            .accessibilityLabel("打开设置")
+            .accessibilityIdentifier("sidebar.settings")
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(tokens.sidebarBackground)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(tokens.border.opacity(0.55))
+                .frame(height: 1)
         }
     }
 
@@ -273,34 +280,59 @@ struct UnifiedWorkbenchShell: View {
                 .accessibilityElement(children: .combine)
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
+                workbenchToolbarIconButton(
+                    systemImage: "arrow.clockwise",
+                    accessibilityLabel: "刷新当前会话",
+                    tokens: tokens,
+                    isDisabled: sessionStore.isRefreshingSelectedSession || sessionStore.isLoading
+                ) {
                     Task { await sessionStore.refreshCurrentContext() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .foregroundStyle(tokens.secondaryText)
-                .disabled(sessionStore.isRefreshingSelectedSession || sessionStore.isLoading)
-                .accessibilityLabel("刷新当前会话")
             }
-            // 与主页的圆形操作保持同一节奏，同时让系统不要把刷新和详情合并成一个玻璃胶囊。
-            ToolbarSpacer(.fixed, placement: .topBarTrailing)
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
+                workbenchToolbarIconButton(
+                    systemImage: "sidebar.right",
+                    accessibilityLabel: showingInspector ? "隐藏详情" : "显示详情",
+                    tokens: tokens,
+                    isActive: showingInspector
+                ) {
                     showingInspector.toggle()
-                } label: {
-                    Image(systemName: "sidebar.right")
                 }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .foregroundStyle(showingInspector ? tokens.primaryAction : tokens.secondaryText)
-                .accessibilityLabel(showingInspector ? "隐藏详情" : "显示详情")
             }
         }
         .background(tokens.background.ignoresSafeArea())
         .themedWorkbenchNavigationChrome(tokens: tokens, colorScheme: themeStore.resolvedColorScheme(for: colorScheme))
         .sessionInspectorPresentation(isPresented: $showingInspector, layout: layout)
+    }
+
+    /// 工具栏使用单层圆形底，不再叠加系统 glass 的外圈；在浅色和深色主题下都和列表操作一致。
+    private func workbenchToolbarIconButton(
+        systemImage: String,
+        accessibilityLabel: String,
+        tokens: ThemeTokens,
+        isActive: Bool = false,
+        isDisabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .frame(width: 34, height: 34)
+                .background(
+                    isActive ? tokens.selectionFill : tokens.surface.opacity(0.72),
+                    in: Circle()
+                )
+                .overlay {
+                    Circle()
+                        .stroke(tokens.border.opacity(0.62), lineWidth: 1)
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isActive ? tokens.primaryAction : tokens.secondaryText)
+        .disabled(isDisabled)
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private var sessionTitleSubtitle: String {

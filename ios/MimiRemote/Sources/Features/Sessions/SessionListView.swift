@@ -97,23 +97,54 @@ struct SessionListView: View {
                 filterMenu(tokens: tokens)
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button {
+                sessionListToolbarButton(
+                    systemImage: "arrow.clockwise",
+                    accessibilityLabel: "刷新会话库",
+                    tokens: tokens
+                ) {
                     Task { await sessionStore.refreshSessionLibraryIndex() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
                 }
-                .accessibilityLabel("刷新会话库")
 
-                Button(action: presentNewSession) {
-                    Label("新会话", systemImage: "plus")
-                }
-                .buttonStyle(.glassProminent)
-                .tint(tokens.primaryAction)
+                sessionListToolbarButton(
+                    systemImage: "plus",
+                    accessibilityLabel: "新建会话",
+                    tokens: tokens,
+                    isPrimary: true,
+                    action: presentNewSession
+                )
+                .accessibilityIdentifier("sessions.newSession")
             }
         }
         .task {
             await sessionStore.refreshSessionLibraryIndex()
         }
+    }
+
+    /// 列表右上角保留新建入口，所有工具按钮共用单层圆形样式，避免 glass 自动样式产生双圆环。
+    private func sessionListToolbarButton(
+        systemImage: String,
+        accessibilityLabel: String,
+        tokens: ThemeTokens,
+        isPrimary: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(themeStore.uiFont(size: 15, weight: .semibold))
+                .frame(width: 34, height: 34)
+                .background(
+                    isPrimary ? tokens.primaryAction : tokens.surface.opacity(0.72),
+                    in: Circle()
+                )
+                .overlay {
+                    Circle()
+                        .stroke(isPrimary ? tokens.primaryAction.opacity(0.72) : tokens.border.opacity(0.62), lineWidth: 1)
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isPrimary ? Color.white : tokens.secondaryText)
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private var visibleSessions: [AgentSession] {
