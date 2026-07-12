@@ -776,8 +776,11 @@ struct ConversationTimelineView: View {
                     }
                 }
                 .listStyle(.plain)
-                // 尾部跟随使用内容边缘，不再把动态 List 行解析成 UICollectionView IndexPath。
-                // 会话切换或过程行折叠时，即使数据快照正在提交，也不会滚向已失效的行下标。
+                // 每个会话使用独立的 List 身份，避免 UITableView 复用上一个会话的 contentOffset。
+                // 新会话挂载时从底部创建，比事后纠正旧滚动位置更稳定。
+                .id(sessionStore.selectedSessionID)
+                // ScrollPosition 负责持续跟随；首帧和会话切换还会用已校验存在的末行 ID 兜底，
+                // 避免 List 只更新绑定、却没有真正提交底层 contentOffset。
                 .scrollPosition($timelineScrollPosition)
                 .scrollContentBackground(.hidden)
                 .scrollDismissesKeyboard(.interactively)
@@ -802,15 +805,23 @@ struct ConversationTimelineView: View {
 
                 if shouldShowReturnToTailButton(timelineItems: timelineItems) {
                     Button {
-                        returnToTimelineTail(timelineItems: timelineItems)
+                        returnToTimelineTail(timelineItems: timelineItems, proxy: proxy)
                     } label: {
                         returnToTailLabel
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(tokens.accent)
-                    .controlSize(.small)
-                    .padding(.trailing, layout.horizontalInset)
-                    .padding(.bottom, 18)
+                    // 固定尺寸的纯图标浮层不会因“新消息/回到底部”文案切换而跳宽，
+                    // 44pt 点击区也能让它稳定贴在时间线右下角。
+                    .buttonStyle(.plain)
+                    .frame(width: 44, height: 44)
+                    .background(tokens.accent, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    }
+                    .contentShape(Circle())
+                    .shadow(color: Color.black.opacity(0.16), radius: 6, y: 3)
+                    .padding(.trailing, max(layout.horizontalInset, 16))
+                    .padding(.bottom, 16)
                     .accessibilityLabel(returnToTailAccessibilityLabel)
                 }
             }
@@ -827,6 +838,19 @@ struct ConversationTimelineView: View {
                 expandedProcessedGroupIDs.removeAll()
                 timelineItemCache.removeAll()
                 cancelPendingTailScrollAttempts()
+                // ScrollPosition 是 View 级状态，不会随 selectedSessionID 自动重建；
+                // 切换会话时必须显式丢弃旧位置，并立即为已有缓存消息安排强制贴底。
+                timelineScrollPosition = ScrollPosition(edge: .bottom)
+                if newID != nil {
+                    queueTailScrollAttempts(
+                        timelineItems: timelineItems,
+                        proxy: proxy,
+                        sessionID: newID,
+                        expectedTailItemID: timelineItems.last?.id,
+                        animatedFirstAttempt: false,
+                        force: true
+                    )
+                }
             }
             .onChange(of: messages.last?.id) { _, newID in
                 guard newID != nil else {
@@ -838,6 +862,7 @@ struct ConversationTimelineView: View {
                     isTailFollowLockedByLocalSubmit = true
                     queueTailScrollAttempts(
                         timelineItems: timelineItems,
+                        proxy: proxy,
                         sessionID: sessionStore.selectedSessionID,
                         expectedTailItemID: timelineItems.last?.id,
                         animatedFirstAttempt: true,
@@ -850,6 +875,7 @@ struct ConversationTimelineView: View {
                     // 覆盖首次布局时机，确保落在真正的底部而不是空白区。
                     queueTailScrollAttempts(
                         timelineItems: timelineItems,
+                        proxy: proxy,
                         sessionID: sessionStore.selectedSessionID,
                         expectedTailItemID: timelineItems.last?.id,
                         animatedFirstAttempt: false,
@@ -859,6 +885,7 @@ struct ConversationTimelineView: View {
                 }
                 queueTailScrollAttempts(
                     timelineItems: timelineItems,
+                    proxy: proxy,
                     sessionID: sessionStore.selectedSessionID,
                     expectedTailItemID: timelineItems.last?.id,
                     animatedFirstAttempt: true,
@@ -869,6 +896,7 @@ struct ConversationTimelineView: View {
                 // 流式增量会高频改写最后一条内容；请求会自动合并，同一更新周期只滚一次。
                 queueTailScrollAttempts(
                     timelineItems: timelineItems,
+                    proxy: proxy,
                     sessionID: sessionStore.selectedSessionID,
                     expectedTailItemID: timelineItems.last?.id,
                     animatedFirstAttempt: false,
@@ -881,6 +909,7 @@ struct ConversationTimelineView: View {
                 // 监听派生 row id，确保折叠发生时底部跟随逻辑仍然有机会重锚。
                 queueTailScrollAttempts(
                     timelineItems: timelineItems,
+                    proxy: proxy,
                     sessionID: sessionStore.selectedSessionID,
                     expectedTailItemID: timelineItems.last?.id,
                     animatedFirstAttempt: false,
@@ -896,10 +925,13 @@ struct ConversationTimelineView: View {
                 // 用 task(id:) 补一条首帧重锚路径，避免 List 默认停在最早消息。
                 queueTailScrollAttempts(
                     timelineItems: timelineItems,
+                    proxy: proxy,
                     sessionID: sessionStore.selectedSessionID,
                     expectedTailItemID: timelineItems.last?.id,
                     animatedFirstAttempt: false,
-                    force: false
+                    // 首次打开/切换会话不能被尚未稳定的滚动几何拦截；
+                    // 后续新消息仍尊重用户主动上翻，不会强行抢回底部。
+                    force: forceNextMessageTailScroll
                 )
             }
             .onDisappear {
@@ -1034,12 +1066,10 @@ struct ConversationTimelineView: View {
     }
 
     private var returnToTailLabel: some View {
-        Label(returnToTailTitle, systemImage: "arrow.down.circle.fill")
-            .font(themeStore.uiFont(.caption, weight: .semibold))
-    }
-
-    private var returnToTailTitle: String {
-        hasUnseenTailMessage ? "新消息" : "回到底部"
+        Image(systemName: "arrow.down.to.line")
+            .font(themeStore.uiFont(.body, weight: .bold))
+            .foregroundStyle(Color.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var returnToTailAccessibilityLabel: String {
@@ -1094,8 +1124,12 @@ struct ConversationTimelineView: View {
         themeStore.tokens(for: colorScheme).secondaryText
     }
 
-    private func forceScrollToTimelineTail(timelineItems: [ConversationTimelineItem], animated: Bool) {
-        guard !timelineItems.isEmpty else {
+    private func forceScrollToTimelineTail(
+        timelineItems: [ConversationTimelineItem],
+        proxy: ScrollViewProxy,
+        animated: Bool
+    ) {
+        guard let tailItemID = timelineItems.last?.id else {
             return
         }
         guard !isPreservingHistoryScroll else {
@@ -1105,11 +1139,12 @@ struct ConversationTimelineView: View {
         hasUnseenTailMessage = false
         isTimelineNearBottom = true
         forceNextMessageTailScroll = false
-        scrollToTimelineTail(animated: animated)
+        scrollToTimelineTail(tailItemID: tailItemID, proxy: proxy, animated: animated)
     }
 
     private func queueTailScrollAttempts(
         timelineItems: [ConversationTimelineItem],
+        proxy: ScrollViewProxy,
         sessionID: SessionID?,
         expectedTailItemID: String?,
         animatedFirstAttempt: Bool,
@@ -1150,23 +1185,30 @@ struct ConversationTimelineView: View {
             else {
                 return
             }
-            forceScrollToTimelineTail(timelineItems: timelineItems, animated: animatedFirstAttempt)
+            forceScrollToTimelineTail(
+                timelineItems: timelineItems,
+                proxy: proxy,
+                animated: animatedFirstAttempt
+            )
 
             guard retriesAfterLayout else {
                 return
             }
-            // 首次挂载或 Markdown 行高变化时补一次无动画贴底；只有这个任务仍是最新请求才执行。
-            try? await Task.sleep(nanoseconds: 160_000_000)
-            guard !Task.isCancelled,
-                  tailScrollAttemptGeneration == attemptGeneration,
-                  userScrollAwayGeneration == scrollAwayGeneration,
-                  sessionStore.selectedSessionID == sessionID,
-                  currentTimelineTailItemID() == expectedTailItemID,
-                  !isPreservingHistoryScroll
-            else {
-                return
+            // 首次挂载、Markdown 排版和 List 快照可能分多个布局周期完成。
+            // 分两次重锚；用户一旦主动上翻，generation 检查会立刻停止后续滚动。
+            for delay in [120_000_000, 320_000_000] as [UInt64] {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled,
+                      tailScrollAttemptGeneration == attemptGeneration,
+                      userScrollAwayGeneration == scrollAwayGeneration,
+                      sessionStore.selectedSessionID == sessionID,
+                      currentTimelineTailItemID() == expectedTailItemID,
+                      !isPreservingHistoryScroll
+                else {
+                    return
+                }
+                forceScrollToTimelineTail(timelineItems: timelineItems, proxy: proxy, animated: false)
             }
-            forceScrollToTimelineTail(timelineItems: timelineItems, animated: false)
         }
     }
 
@@ -1176,13 +1218,17 @@ struct ConversationTimelineView: View {
         tailScrollAttemptGeneration += 1
     }
 
-    private func returnToTimelineTail(timelineItems: [ConversationTimelineItem]) {
+    private func returnToTimelineTail(
+        timelineItems: [ConversationTimelineItem],
+        proxy: ScrollViewProxy
+    ) {
         hasUnseenTailMessage = false
         shouldFollowMessageTail = true
         isTailFollowLockedByLocalSubmit = true
         isTimelineNearBottom = true
         queueTailScrollAttempts(
             timelineItems: timelineItems,
+            proxy: proxy,
             sessionID: sessionStore.selectedSessionID,
             expectedTailItemID: timelineItems.last?.id,
             animatedFirstAttempt: true,
@@ -1191,13 +1237,25 @@ struct ConversationTimelineView: View {
         )
     }
 
-    private func scrollToTimelineTail(animated: Bool) {
+    private func scrollToTimelineTail(
+        tailItemID: String,
+        proxy: ScrollViewProxy,
+        animated: Bool
+    ) {
         if animated {
             withAnimation(.easeOut(duration: 0.18)) {
                 timelineScrollPosition.scrollTo(edge: .bottom)
+                proxy.scrollTo(tailItemID, anchor: .bottom)
             }
         } else {
-            timelineScrollPosition.scrollTo(edge: .bottom)
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                timelineScrollPosition.scrollTo(edge: .bottom)
+                // ScrollPosition 在 List 首帧可能只更新绑定而没有落到底层 contentOffset；
+                // 对已验证仍存在的最后一行做显式定位，保证打开会话默认看到最新消息。
+                proxy.scrollTo(tailItemID, anchor: .bottom)
+            }
         }
     }
 

@@ -199,12 +199,7 @@ struct WorkspaceRootView: View {
 
     private func workspaceDetail(project: AgentProject) -> some View {
         WorkspaceDetailView(
-            project: project,
-            sessionCount: sessionStore.sessions(forProjectID: project.id).count,
-            worktreeCount: sessionStore.managedWorktrees(rootProjectID: sessionStore.rootProjectID(forProjectID: project.id)).count,
             recentSessions: Array(sessionStore.sessions(forProjectID: project.id).prefix(5)),
-            isUnavailable: sessionStore.isWorkspaceUnavailable(project.id),
-            lastActivity: lastActivityText(for: project),
             isShownInSessions: sessionStore.isWorkspaceShownInSessions(project.id),
             claudeChannelAvailable: sessionStore.hasClaudeRuntimeChannel,
             onToggleSessionVisibility: {
@@ -273,22 +268,6 @@ struct WorkspaceRootView: View {
             catalogState = .failed(error.localizedDescription)
         }
     }
-
-    private func lastActivityText(for project: AgentProject) -> String {
-        guard let date = sessionStore.sessions(forProjectID: project.id)
-            .compactMap({ $0.updatedAt ?? $0.createdAt })
-            .max()
-        else {
-            return "暂无"
-        }
-        return Self.timeFormatter.string(from: date)
-    }
-
-    private static let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
 
     private enum CatalogState: Equatable {
         case idle
@@ -375,12 +354,7 @@ private struct WorkspaceDetailView: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
 
-    let project: AgentProject
-    let sessionCount: Int
-    let worktreeCount: Int
     let recentSessions: [AgentSession]
-    let isUnavailable: Bool
-    let lastActivity: String
     let isShownInSessions: Bool
     let claudeChannelAvailable: Bool
     let onToggleSessionVisibility: () -> Void
@@ -393,7 +367,8 @@ private struct WorkspaceDetailView: View {
 
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                workspaceSummary(tokens: tokens)
+                // 项目名称、路径和状态已在上方选中卡片中展示，这里直接进入操作区，
+                // 避免同一屏重复一整套工作区摘要。
                 workspaceActions(tokens: tokens)
                 recentSessionsSection(tokens: tokens)
             }
@@ -404,76 +379,6 @@ private struct WorkspaceDetailView: View {
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .background(tokens.background.ignoresSafeArea())
-    }
-
-    private func workspaceSummary(tokens: ThemeTokens) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: isUnavailable ? "folder.badge.questionmark" : "folder.fill")
-                    .font(themeStore.uiFont(size: 20, weight: .semibold))
-                    .foregroundStyle(isUnavailable ? tokens.warning : tokens.primaryAction)
-                    .frame(width: 42, height: 42)
-                    .background((isUnavailable ? tokens.warning : tokens.primaryAction).opacity(0.12), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(project.name)
-                        .font(themeStore.uiFont(.headline, weight: .semibold))
-                        .foregroundStyle(tokens.primaryText)
-                        .lineLimit(1)
-                    Text(project.path)
-                        .font(themeStore.uiFont(.caption))
-                        .foregroundStyle(tokens.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                }
-
-                Spacer(minLength: 8)
-
-                Label(isUnavailable ? "需要重试" : "可访问", systemImage: isUnavailable ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                    .font(themeStore.uiFont(.caption, weight: .semibold))
-                    .foregroundStyle(isUnavailable ? tokens.warning : tokens.success)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background((isUnavailable ? tokens.warning : tokens.success).opacity(0.11), in: Capsule())
-            }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    summaryMetric(value: "\(sessionCount)", title: "会话", systemImage: "bubble.left.and.bubble.right", tokens: tokens)
-                    summaryMetric(value: "\(worktreeCount)", title: "Worktree", systemImage: "arrow.triangle.branch", tokens: tokens)
-                    summaryMetric(value: lastActivity, title: "最近活动", systemImage: "clock", tokens: tokens)
-                }
-
-                VStack(spacing: 8) {
-                    summaryMetric(value: "\(sessionCount)", title: "会话", systemImage: "bubble.left.and.bubble.right", tokens: tokens)
-                    summaryMetric(value: "\(worktreeCount)", title: "Worktree", systemImage: "arrow.triangle.branch", tokens: tokens)
-                    summaryMetric(value: lastActivity, title: "最近活动", systemImage: "clock", tokens: tokens)
-                }
-            }
-        }
-        .padding(16)
-        .background(tokens.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(tokens.border.opacity(0.72), lineWidth: 1)
-        }
-    }
-
-    private func summaryMetric(value: String, title: String, systemImage: String, tokens: ThemeTokens) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .foregroundStyle(tokens.primaryAction)
-            Text(value)
-                .fontWeight(.semibold)
-                .foregroundStyle(tokens.primaryText)
-            Text(title)
-                .foregroundStyle(tokens.secondaryText)
-        }
-        .font(themeStore.uiFont(.caption))
-        .padding(.horizontal, 10)
-        .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-        .background(tokens.elevatedSurface.opacity(0.72), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func workspaceActions(tokens: ThemeTokens) -> some View {

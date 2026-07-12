@@ -1,5 +1,7 @@
 import XCTest
 import Combine
+import SwiftUI
+import UIKit
 @testable import MimiRemote
 
 @MainActor
@@ -141,6 +143,63 @@ final class ConversationDataFlowTests: XCTestCase {
             isTailFollowLockedByLocalSubmit: false,
             isTimelineNearBottom: false
         ))
+    }
+
+    func testConversationTimelineStartsAtTailAfterSwitchingFromScrolledSession() async throws {
+        let firstSessionID = "tail-position-first"
+        let secondSessionID = "tail-position-second"
+        let conversationStore = ConversationStore()
+        for index in 0..<36 {
+            conversationStore.appendSystem("会话 A 消息 \(index)", sessionID: firstSessionID)
+            conversationStore.appendSystem("会话 B 消息 \(index)", sessionID: secondSessionID)
+        }
+
+        let sessionStore = SessionStore(
+            appStore: AppStore(),
+            conversationStore: conversationStore,
+            logStore: LogStore()
+        )
+        sessionStore.selectedSessionID = firstSessionID
+        let themeSuiteName = "TailPositionTests.\(UUID().uuidString)"
+        let themeDefaults = try XCTUnwrap(UserDefaults(suiteName: themeSuiteName))
+        let themeStore = ThemeStore(defaults: themeDefaults)
+
+        let view = ConversationView()
+            .environmentObject(sessionStore)
+            .environmentObject(conversationStore)
+            .environmentObject(themeStore)
+            .environment(\.colorScheme, .light)
+        let host = UIHostingController(rootView: view)
+        let windowScene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        let window = UIWindow(windowScene: windowScene)
+        window.frame = CGRect(x: 0, y: 0, width: 420, height: 820)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            themeDefaults.removePersistentDomain(forName: themeSuiteName)
+        }
+
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        try await Task.sleep(nanoseconds: 700_000_000)
+
+        let firstScrollView = try XCTUnwrap(conversationTimelineScrollView(in: host.view))
+        XCTAssertLessThanOrEqual(distanceFromBottom(firstScrollView), 4)
+
+        // 先把会话 A 人工停在顶部，再切换会话；会话 B 必须丢弃旧 contentOffset 并默认展示最新消息。
+        firstScrollView.setContentOffset(
+            CGPoint(x: 0, y: -firstScrollView.adjustedContentInset.top),
+            animated: false
+        )
+        sessionStore.selectedSessionID = secondSessionID
+        try await Task.sleep(nanoseconds: 900_000_000)
+        host.view.layoutIfNeeded()
+
+        let secondScrollView = try XCTUnwrap(conversationTimelineScrollView(in: host.view))
+        XCTAssertLessThanOrEqual(distanceFromBottom(secondScrollView), 4)
     }
 
     func testTimestampCaptionMarksFallbackTimes() {
@@ -15800,4 +15859,33 @@ private func makeSession(
         preview: preview,
         activeTurnID: activeTurnID
     )
+}
+
+@MainActor
+private func conversationTimelineScrollView(in rootView: UIView) -> UIScrollView? {
+    var candidates: [UIScrollView] = []
+
+    func collect(from view: UIView) {
+        if let scrollView = view as? UIScrollView,
+           scrollView.bounds.width >= rootView.bounds.width * 0.75,
+           scrollView.contentSize.height > scrollView.bounds.height + 80 {
+            candidates.append(scrollView)
+        }
+        view.subviews.forEach(collect)
+    }
+
+    collect(from: rootView)
+    // Composer 里也可能包含 UIScrollView；时间线的内容高度最大，按此稳定选中 List。
+    return candidates.max { lhs, rhs in
+        lhs.contentSize.height < rhs.contentSize.height
+    }
+}
+
+@MainActor
+private func distanceFromBottom(_ scrollView: UIScrollView) -> CGFloat {
+    let maximumOffsetY = max(
+        -scrollView.adjustedContentInset.top,
+        scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    )
+    return abs(maximumOffsetY - scrollView.contentOffset.y)
 }
