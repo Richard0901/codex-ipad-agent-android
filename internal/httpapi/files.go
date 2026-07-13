@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"mime"
 	"net/http"
 	"os"
@@ -47,10 +46,7 @@ func (r *Router) fileReadHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var payload fileReadRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 

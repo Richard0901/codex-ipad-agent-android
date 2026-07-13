@@ -334,6 +334,12 @@ struct RuntimeActivityDisplay: Equatable {
                 tone: .warning,
                 systemImage: "wifi.slash"
             )
+        case .terminated(let reason):
+            return RuntimeActivityDisplay(
+                detailText: "\(runningText) · \(reason.title) · 无法确认运行状态",
+                tone: .warning,
+                systemImage: "lock.trianglebadge.exclamationmark"
+            )
         }
     }
 
@@ -2647,6 +2653,24 @@ struct AgentErrorPayload: Codable, Hashable {
     let retryable: Bool?
 }
 
+enum ConnectionTerminationStatus: Equatable {
+    case credentialsInvalid
+
+    var title: String {
+        switch self {
+        case .credentialsInvalid:
+            return "需要重新配对"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .credentialsInvalid:
+            return "访问码已失效，已停止自动重试。请打开连接管理并重新扫描 Mac 上的配对二维码。"
+        }
+    }
+}
+
 enum ConnectionStatus: Equatable {
     case idle
     case testing
@@ -2672,6 +2696,7 @@ enum WebSocketStatus: Equatable {
     case connecting
     case connected
     case failed(String)
+    case terminated(ConnectionTerminationStatus)
 
     var title: String {
         switch self {
@@ -2683,6 +2708,8 @@ enum WebSocketStatus: Equatable {
             return "实时连接"
         case .failed:
             return "连接失败"
+        case .terminated(let reason):
+            return reason.title
         }
     }
 }

@@ -154,7 +154,7 @@ func main() {
 	var findThreadPrefix string
 	var useStateDBOnly bool
 
-	defaultConfig := filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "codex-ipad-agent", "config.json")
+	defaultConfig := defaultAgentDConfigPath()
 	flag.StringVar(&endpoint, "endpoint", "", "Mac 的 Tailscale agentd endpoint，例如 http://100.x.y.z:8787（必填）")
 	flag.StringVar(&token, "token", os.Getenv("AGENTD_TOKEN"), "agentd Bearer token；默认读 AGENTD_TOKEN 或 config")
 	flag.StringVar(&configPath, "config", defaultConfig, "本机 agentd config.json，用于读取 token")
@@ -799,6 +799,27 @@ func loadToken(configPath string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(cfg.Auth.Token), nil
+}
+
+func defaultAgentDConfigPath() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "config.json"
+	}
+	return resolveDefaultAgentDConfigPath(configDir, func(path string) bool {
+		info, statErr := os.Stat(path)
+		return statErr == nil && !info.IsDir()
+	})
+}
+
+func resolveDefaultAgentDConfigPath(configDir string, exists func(string) bool) string {
+	current := filepath.Join(configDir, "mimi-remote", "config.json")
+	legacy := filepath.Join(configDir, "codex-ipad-agent", "config.json")
+	// 新目录不存在时只读兼容旧安装；setup/doctor 仍负责把正式配置迁移到新目录。
+	if !exists(current) && exists(legacy) {
+		return legacy
+	}
+	return current
 }
 
 func fetchAppServerConfig(ctx context.Context, endpoint string, token string) (appServerConfig, error) {

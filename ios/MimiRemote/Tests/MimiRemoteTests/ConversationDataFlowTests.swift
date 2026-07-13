@@ -1,11 +1,388 @@
 import XCTest
 import Combine
+import Security
 import SwiftUI
 import UIKit
 @testable import MimiRemote
 
 @MainActor
 final class ConversationDataFlowTests: XCTestCase {
+    func testConnectionCommitFailureKeepsPreviousConnectionAndSessionState() async throws {
+        let suiteName = "ConversationDataFlowTests.ConnectionCommitFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let oldEndpoint = "http://100.64.0.10:8787"
+        let oldToken = "old-token"
+        defaults.set(oldEndpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(itemData: Data(oldToken.utf8))
+        let appStore = AppStore(
+            defaults: defaults,
+            tokenStore: TokenStore(keychain: keychain)
+        )
+        let project = makeProject(id: "proj_connection_commit_failure")
+        let running = makeSession(
+            id: "sess_connection_commit_failure",
+            projectID: project.id,
+            title: "保留中的会话",
+            status: "running",
+            source: "codex"
+        )
+        let client = MockSessionStoreClient(projects: [project], sessions: [running])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        let socket = try XCTUnwrap(sockets.first)
+        socket.emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        let oldGeneration = appStore.connectionGeneration
+
+        // 模拟系统 Keychain 暂时不可写。提交失败后不能先拆旧 WebSocket，也不能清空会话列表。
+        keychain.forcedUpdateStatus = errSecInteractionNotAllowed
+        XCTAssertThrowsError(
+            try store.commitPreparedConnection(
+                PreparedConnectionSettings(
+                    endpoint: "http://100.64.0.20:8787",
+                    token: "new-token"
+                )
+            )
+        )
+
+        XCTAssertEqual(appStore.endpoint, oldEndpoint)
+        XCTAssertEqual(appStore.token, oldToken)
+        XCTAssertEqual(appStore.connectionGeneration, oldGeneration)
+        XCTAssertEqual(defaults.string(forKey: "agentd.endpoint"), oldEndpoint)
+        XCTAssertEqual(keychain.itemData, Data(oldToken.utf8))
+        XCTAssertEqual(socket.disconnectCallCount, 0)
+        XCTAssertEqual(socket.connectedSessionIDs, [running.id])
+        XCTAssertEqual(sockets.count, 1)
+        XCTAssertEqual(store.webSocketStatus, .connected)
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertEqual(store.sessions.map(\.id), [running.id])
+        XCTAssertEqual(store.selectedProjectID, project.id)
+        XCTAssertEqual(store.selectedSessionID, running.id)
+    }
+
+    func testConnectionProfileSwitchCommitsBeforeRetiringOldWebSocket() async throws {
+        let suiteName = "ConversationDataFlowTests.ProfileSwitchSuccess.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "Mac A", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+            ConnectionProfile(id: "mac-b", displayName: "Mac B", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+        ]
+        defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+        let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let project = makeProject(id: "proj_profile_switch")
+        let running = makeSession(id: "sess_profile_switch", projectID: project.id, title: "旧 Mac 会话", status: "running", source: "codex")
+        let client = MockSessionStoreClient(projects: [project], sessions: [running])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        let oldSocket = try XCTUnwrap(sockets.first)
+        oldSocket.emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        let validatedAt = Date(timeIntervalSince1970: 1_720_000_000)
+
+        let changed = try store.commitPreparedConnection(PreparedConnectionSettings(
+            endpoint: profiles[1].endpoint,
+            token: "token-b",
+            profileTarget: .existingProfile(id: "mac-b"),
+            validatedAt: validatedAt
+        ))
+
+        XCTAssertTrue(changed)
+        XCTAssertEqual(appStore.activeConnectionProfileID, "mac-b")
+        XCTAssertEqual(appStore.endpoint, profiles[1].endpoint)
+        XCTAssertEqual(appStore.token, "token-b")
+        XCTAssertEqual(appStore.activeConnectionProfile?.lastSuccessfulAt, validatedAt)
+        XCTAssertEqual(oldSocket.disconnectCallCount, 1)
+        XCTAssertEqual(sockets.count, 1, "提交只退役旧连接，不应同时连接两台 Mac")
+        XCTAssertTrue(store.projects.isEmpty)
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertNil(store.selectedSessionID)
+    }
+
+    func testConnectionProfileSwitchKeychainFailureKeepsOldConnection() async throws {
+        let suiteName = "ConversationDataFlowTests.ProfileSwitchKeychainFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "Mac A", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+            ConnectionProfile(id: "mac-b", displayName: "Mac B", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+        ]
+        defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+        let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let project = makeProject(id: "proj_profile_keychain_failure")
+        let running = makeSession(id: "sess_profile_keychain_failure", projectID: project.id, title: "必须保留", status: "running", source: "codex")
+        let client = MockSessionStoreClient(projects: [project], sessions: [running])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        let oldSocket = try XCTUnwrap(sockets.first)
+        oldSocket.emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        keychain.forcedUpdateStatus = errSecInteractionNotAllowed
+
+        XCTAssertThrowsError(try store.commitPreparedConnection(PreparedConnectionSettings(
+            endpoint: profiles[1].endpoint,
+            token: "token-b",
+            profileTarget: .existingProfile(id: "mac-b")
+        )))
+
+        XCTAssertEqual(appStore.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(appStore.endpoint, profiles[0].endpoint)
+        XCTAssertEqual(appStore.token, "token-a")
+        XCTAssertEqual(oldSocket.disconnectCallCount, 0)
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertEqual(store.sessions.map(\.id), [running.id])
+        XCTAssertEqual(store.selectedSessionID, running.id)
+    }
+
+    func testConnectionProfileValidationFailureNeverRetiresOldConnection() async throws {
+        let suiteName = "ConversationDataFlowTests.ProfileSwitchValidationFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "Mac A", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+            ConnectionProfile(id: "mac-b", displayName: "Mac B", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+        ]
+        defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+        let appStore = AppStore(
+            defaults: defaults,
+            tokenStore: TokenStore(keychain: keychain),
+            routeProbeTimeout: 0.1
+        ) { _, _, _ in
+            throw URLError(.cannotConnectToHost)
+        }
+        let project = makeProject(id: "proj_profile_validation_failure")
+        let running = makeSession(id: "sess_profile_validation_failure", projectID: project.id, title: "旧连接", status: "running", source: "codex")
+        let client = MockSessionStoreClient(projects: [project], sessions: [running])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        let oldSocket = try XCTUnwrap(sockets.first)
+        oldSocket.emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        appStore.connectionStatus = .connected("旧 Mac")
+        appStore.lastError = "旧连接现场"
+
+        do {
+            _ = try await store.switchConnectionProfile(id: "mac-b")
+            XCTFail("目标 Mac 验证失败时不应提交切换")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cannotConnectToHost)
+        }
+
+        XCTAssertEqual(appStore.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(appStore.token, "token-a")
+        XCTAssertEqual(appStore.connectionStatus, .connected("旧 Mac"))
+        XCTAssertEqual(appStore.lastError, "旧连接现场")
+        XCTAssertEqual(oldSocket.disconnectCallCount, 0)
+        XCTAssertEqual(store.selectedSessionID, running.id)
+        XCTAssertEqual(sockets.count, 1)
+    }
+
+    func testConcurrentProfileChangeIsRejectedAndCancelledChangeCannotCommit() async throws {
+        let fixture = try await makeConnectedProfileFixture(testName: "ConcurrentCancel")
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        let gate = PreparedConnectionGate()
+        let prepared = PreparedConnectionSettings(
+            endpoint: "http://100.64.0.20:8787",
+            token: "token-b",
+            profileTarget: .existingProfile(id: "mac-b")
+        )
+        let firstTask = Task { @MainActor in
+            try await fixture.store.performPreparedConnectionChange {
+                await gate.wait()
+                return prepared
+            }
+        }
+        await gate.waitUntilStarted()
+
+        var didRunSecondPrepare = false
+        do {
+            _ = try await fixture.store.performPreparedConnectionChange {
+                didRunSecondPrepare = true
+                return prepared
+            }
+            XCTFail("已有连接切换时不应启动第二个 prepare")
+        } catch let error as ConnectionProfileError {
+            XCTAssertEqual(error, .operationInProgress)
+        }
+        XCTAssertFalse(didRunSecondPrepare)
+
+        firstTask.cancel()
+        await gate.release()
+        do {
+            _ = try await firstTask.value
+            XCTFail("已取消任务不能越过提交门")
+        } catch is CancellationError {
+            // 预期路径。
+        }
+
+        XCTAssertEqual(fixture.appStore.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(fixture.appStore.token, "token-a")
+        XCTAssertEqual(fixture.socket.disconnectCallCount, 0)
+        XCTAssertEqual(fixture.store.selectedSessionID, fixture.session.id)
+        XCTAssertEqual(fixture.store.webSocketStatus, .connected)
+    }
+
+    func testRenamingActiveProfileDoesNotRetireWebSocketOrClearSession() async throws {
+        let fixture = try await makeConnectedProfileFixture(testName: "RenameActive")
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        let generation = fixture.appStore.connectionGeneration
+        let endpoint = fixture.appStore.endpoint
+        let token = fixture.appStore.token
+
+        XCTAssertTrue(try fixture.appStore.renameConnectionProfile(
+            id: "mac-a",
+            displayName: "重命名后的 Mac"
+        ))
+
+        XCTAssertEqual(fixture.appStore.activeConnectionProfile?.displayName, "重命名后的 Mac")
+        XCTAssertEqual(fixture.appStore.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(fixture.appStore.endpoint, endpoint)
+        XCTAssertEqual(fixture.appStore.token, token)
+        XCTAssertEqual(fixture.appStore.connectionGeneration, generation)
+        XCTAssertEqual(fixture.appStore.connectionStatus, .connected("旧 Mac"))
+        XCTAssertEqual(fixture.socket.disconnectCallCount, 0)
+        XCTAssertEqual(fixture.store.webSocketStatus, .connected)
+        XCTAssertEqual(fixture.store.selectedSessionID, fixture.session.id)
+        XCTAssertTrue(fixture.store.sessions.contains(where: { $0.id == fixture.session.id }))
+    }
+
+    func testBackgroundInvalidatesPendingProfileChangeBeforeCommit() async throws {
+        let fixture = try await makeConnectedProfileFixture(testName: "BackgroundCancel")
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        let gate = PreparedConnectionGate()
+        let prepared = PreparedConnectionSettings(
+            endpoint: "http://100.64.0.20:8787",
+            token: "token-b",
+            profileTarget: .existingProfile(id: "mac-b")
+        )
+        let task = Task { @MainActor in
+            try await fixture.store.performPreparedConnectionChange {
+                await gate.wait()
+                return prepared
+            }
+        }
+        await gate.waitUntilStarted()
+
+        fixture.store.suspendForBackground()
+        await gate.release()
+        do {
+            _ = try await task.value
+            XCTFail("退后台后不能提交仍在途的档案切换")
+        } catch is CancellationError {
+            // 预期路径。
+        }
+
+        XCTAssertEqual(fixture.appStore.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(fixture.appStore.token, "token-a")
+        XCTAssertEqual(fixture.socket.disconnectCallCount, 1, "仅允许后台生命周期退役旧 WS")
+        XCTAssertEqual(fixture.store.webSocketStatus, .disconnected)
+        XCTAssertEqual(fixture.store.selectedSessionID, fixture.session.id)
+    }
+
+    func testFailedProfileChangeDoesNotOverwriteCredentialTerminalStateArrivingInFlight() async throws {
+        let fixture = try await makeConnectedProfileFixture(testName: "TerminalDuringSwitch")
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        let gate = PreparedConnectionGate()
+        fixture.appStore.connectionStatus = .connected("旧 Mac")
+        let task = Task { @MainActor in
+            try await fixture.store.performPreparedConnectionChange {
+                await gate.wait()
+                throw URLError(.cannotConnectToHost)
+            }
+        }
+        await gate.waitUntilStarted()
+
+        fixture.socket.emitStatus(.terminated(.credentialsInvalid))
+        try await waitForWebSocketStatus(.terminated(.credentialsInvalid), store: fixture.store)
+        await gate.release()
+        do {
+            _ = try await task.value
+            XCTFail("目标档案验证应失败")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .cannotConnectToHost)
+        }
+
+        XCTAssertEqual(fixture.appStore.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(fixture.store.connectionTermination, .credentialsInvalid)
+        XCTAssertEqual(fixture.store.webSocketStatus, .terminated(.credentialsInvalid))
+        XCTAssertEqual(
+            fixture.appStore.connectionStatus,
+            .failed(ConnectionTerminationStatus.credentialsInvalid.message)
+        )
+        XCTAssertEqual(fixture.appStore.lastError, ConnectionTerminationStatus.credentialsInvalid.message)
+    }
+
     func testThemeStorePersistsThemePresetFontsAndFontScale() throws {
         let suiteName = "ThemeStoreTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -3853,6 +4230,231 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertTrue(reminderStore.load(endpoint: appStore.endpoint).isEmpty)
     }
 
+    func testSessionReminderPermissionDeniedKeepsLocalStateButPastRequestDoesNotPersist() async throws {
+        let project = makeProject(id: "proj_reminder_permission")
+        let session = makeSession(
+            id: "session_reminder_permission",
+            projectID: project.id,
+            title: "检查权限结果",
+            status: "history",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        let reminderStore = makeSessionReminderStore()
+        let scheduler = FakeSessionReminderScheduler(scheduleOutcome: .permissionDenied)
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            sessionReminderStore: reminderStore,
+            sessionReminderScheduler: scheduler,
+            clientFactory: { MockSessionStoreClient(projects: [project], sessions: [session]) }
+        )
+        let now = Date()
+
+        await store.scheduleSessionReminder(session, after: 30 * 60, now: now)
+
+        let saved = try XCTUnwrap(store.sessionReminder(for: session.id))
+        XCTAssertEqual(reminderStore.load(endpoint: appStore.endpoint)[session.id], saved)
+        XCTAssertEqual(scheduler.scheduled, [saved])
+        XCTAssertTrue(store.statusMessage?.contains("已保存 App 内提醒") == true)
+        XCTAssertTrue(store.statusMessage?.contains("系统通知未开启") == true)
+        XCTAssertFalse(store.statusMessage?.contains("已设置提醒") == true)
+
+        await store.scheduleSessionReminder(session, after: -1, now: now)
+
+        XCTAssertNil(store.sessionReminder(for: session.id))
+        XCTAssertTrue(reminderStore.load(endpoint: appStore.endpoint).isEmpty)
+        XCTAssertEqual(scheduler.scheduled, [saved], "已过期请求不能再进入系统通知调度")
+        XCTAssertEqual(scheduler.canceledSessionIDs, [session.id])
+        XCTAssertTrue(store.statusMessage?.contains("提醒时间已过") == true)
+    }
+
+    func testSessionReminderReloadAndForegroundPruneExpiredStateWithoutTimer() async throws {
+        let suiteName = "ConversationDataFlowTests.ReminderPrune.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appStore = AppStore(
+            defaults: defaults,
+            tokenStore: TokenStore(keychain: TestKeychainOperations())
+        )
+        let reminderStore = SessionReminderStore(defaults: defaults, key: "test.sessionReminders")
+        var now = Date(timeIntervalSince1970: 1_000)
+        let expiredAtReload = SessionReminder(
+            sessionID: "reminder_expired_reload",
+            title: "启动前已到期",
+            fireAt: now.addingTimeInterval(-1),
+            createdAt: now.addingTimeInterval(-100)
+        )
+        let expiresInBackground = SessionReminder(
+            sessionID: "reminder_expires_background",
+            title: "后台期间到期",
+            fireAt: now.addingTimeInterval(60),
+            createdAt: now
+        )
+        reminderStore.save(
+            [
+                expiredAtReload.sessionID: expiredAtReload,
+                expiresInBackground.sessionID: expiresInBackground
+            ],
+            endpoint: appStore.endpoint
+        )
+        let scheduler = FakeSessionReminderScheduler()
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            sessionReminderStore: reminderStore,
+            sessionReminderScheduler: scheduler,
+            sessionReminderNow: { now },
+            clientFactory: { MockSessionStoreClient(projects: [], sessions: []) }
+        )
+
+        XCTAssertNil(store.sessionReminder(for: expiredAtReload.sessionID))
+        XCTAssertEqual(store.sessionReminder(for: expiresInBackground.sessionID), expiresInBackground)
+        XCTAssertEqual(
+            reminderStore.load(endpoint: appStore.endpoint),
+            [expiresInBackground.sessionID: expiresInBackground]
+        )
+        XCTAssertEqual(scheduler.canceledSessionIDs, [expiredAtReload.sessionID])
+
+        now = now.addingTimeInterval(120)
+        await store.resumeFromForeground()
+
+        XCTAssertNil(store.sessionReminder(for: expiresInBackground.sessionID))
+        XCTAssertTrue(reminderStore.load(endpoint: appStore.endpoint).isEmpty)
+        XCTAssertEqual(
+            scheduler.canceledSessionIDs,
+            [expiredAtReload.sessionID, expiresInBackground.sessionID]
+        )
+    }
+
+    func testNotificationPayloadUsesActiveProfileAndCurrentMacRefreshSelectsSession() async throws {
+        let suiteName = "ConversationDataFlowTests.NotificationCurrentProfile.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profile = ConnectionProfile(
+            id: "mac-current",
+            displayName: "当前 Mac",
+            endpoint: "http://100.64.0.10:8787",
+            lastSuccessfulAt: nil
+        )
+        defaults.set(try JSONEncoder().encode([profile]), forKey: "agentd.connectionProfiles.v1")
+        defaults.set(profile.id, forKey: "agentd.activeConnectionProfileID.v1")
+        defaults.set(profile.endpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("current-secret-token".utf8), account: "agentd-profile.\(profile.id)")
+        let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let project = makeProject(id: "proj_notification_current")
+        let session = makeSession(
+            id: "session_notification_current",
+            projectID: project.id,
+            title: "通知打开目标",
+            status: "history",
+            source: "codex"
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            projectPages: [project.id: SessionsPage(sessions: [session])]
+        )
+        let scheduler = FakeSessionReminderScheduler()
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            sessionReminderScheduler: scheduler,
+            clientFactory: { client },
+            webSocketFactory: { MockWebSocketClient() }
+        )
+
+        await store.scheduleSessionReminder(session, after: 600, now: Date(timeIntervalSince1970: 1_000))
+        let route = try XCTUnwrap(scheduler.reminderRoutes.first)
+        XCTAssertEqual(route.version, SessionNotificationRoute.currentVersion)
+        XCTAssertEqual(route.profileID, profile.id)
+        XCTAssertEqual(route.projectID, project.id)
+        XCTAssertEqual(route.sessionID, session.id)
+        XCTAssertEqual(SessionNotificationRoute(userInfo: route.userInfo), route)
+        XCTAssertFalse(String(describing: route.userInfo).contains("current-secret-token"), "系统通知 payload 绝不能包含 Token")
+
+        let outcome = await store.openSessionFromNotification(route)
+
+        XCTAssertEqual(outcome, .opened)
+        XCTAssertEqual(store.selectedProjectID, project.id)
+        XCTAssertEqual(store.selectedSessionID, session.id)
+        XCTAssertEqual(client.requestedProjectIDs, [project.id], "暂未加载时只做一次当前工作区首屏刷新")
+        XCTAssertEqual(appStore.activeConnectionProfileID, profile.id)
+    }
+
+    func testNotificationFromOtherMacOnlyPromptsForProfileSwitch() async throws {
+        let suiteName = "ConversationDataFlowTests.NotificationOtherProfile.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "当前 Mac", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+            ConnectionProfile(id: "mac-b", displayName: "备用 Mac", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+        ]
+        defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+        defaults.set(profiles[0].id, forKey: "agentd.activeConnectionProfileID.v1")
+        defaults.set(profiles[0].endpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+        let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let client = MockSessionStoreClient(projects: [], sessions: [])
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+        let generationBeforeTap = appStore.connectionGeneration
+        let route = SessionNotificationRoute.current(
+            profileID: "mac-b",
+            projectID: "proj_other_mac",
+            sessionID: "session_other_mac"
+        )
+
+        let outcome = await store.openSessionFromNotification(route)
+
+        XCTAssertEqual(outcome, .requiresProfileSwitch(displayName: "备用 Mac"))
+        XCTAssertEqual(appStore.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(appStore.connectionGeneration, generationBeforeTap)
+        XCTAssertNil(store.selectedSessionID)
+        XCTAssertTrue(client.requestedProjectIDs.isEmpty, "错 Mac 通知不能向当前或目标 Mac 发任何会话请求")
+        XCTAssertTrue(store.statusMessage?.contains("切换连接档案") == true)
+    }
+
+    func testNotificationResponseAdapterKeepsColdStartPendingAndIgnoresMalformedPayload() throws {
+        let adapter = SessionNotificationResponseAdapter()
+        XCTAssertFalse(adapter.receive(userInfo: [
+            "mimi.route.sessionID": "legacy-session"
+        ]))
+        XCTAssertFalse(adapter.receive(userInfo: [
+            "mimi.route.version": 0,
+            "mimi.route.profileID": "mac-a",
+            "mimi.route.projectID": "proj-a",
+            "mimi.route.sessionID": "session-a"
+        ]))
+        XCTAssertNil(adapter.pendingRoute, "旧版或畸形 payload 必须安全忽略")
+
+        let route = SessionNotificationRoute.current(
+            profileID: "mac-a",
+            projectID: "proj-a",
+            sessionID: "session-a"
+        )
+        XCTAssertTrue(adapter.receive(userInfo: route.userInfo))
+        XCTAssertEqual(adapter.pendingRoute, route, "冷启动时消费者尚未建立也必须保留一次点击路由")
+
+        adapter.consume(route)
+        XCTAssertNil(adapter.pendingRoute)
+        adapter.consume(route)
+        XCTAssertNil(adapter.pendingRoute, "已消费路由不能重复触发")
+    }
+
     func testPreviewFileWritesDecodedPayloadToTemporaryFile() async throws {
         let filePath = "/repo/report.pdf"
         let payload = Data("preview-payload".utf8)
@@ -4558,6 +5160,585 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(Set(store.filteredSidebarProjects.map(\.id)), Set([firstProject.id, secondProject.id]))
     }
 
+    func testThreadSearchDebouncesLatestQueryAndKeepsLocalSessionsWhenCleared() async throws {
+        let project = makeProject(id: "proj_thread_search_debounce")
+        let local = makeSession(
+            id: "local_thread_search",
+            projectID: project.id,
+            title: "本地已加载会话",
+            status: "history",
+            source: "codex"
+        )
+        let remote = makeSession(
+            id: "remote_thread_search",
+            projectID: project.id,
+            title: "远端正文命中",
+            status: "history",
+            source: "codex",
+            preview: "needle 位于更早的消息正文"
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            projectSessions: [project.id: [local]],
+            threadSearchHandler: { query, _, _ in
+                ThreadSearchPage(results: [ThreadSearchResult(session: remote, snippet: "\(query) 位于更早的消息正文")])
+            }
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 50_000_000
+        )
+        await store.selectProject(project)
+        store.selectedSessionID = local.id
+
+        store.sessionSearchQuery = "旧关键词"
+        try await Task.sleep(nanoseconds: 5_000_000)
+        store.sessionSearchQuery = "needle"
+        for _ in 0..<100 where client.requestedThreadSearchQueries.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(client.requestedThreadSearchQueries, ["needle"], "防抖窗口内只应发送最后一个查询")
+        XCTAssertEqual(store.sessionLibrarySessions.map(\.id), [remote.id])
+        XCTAssertEqual(store.selectedSessionID, local.id, "搜索结果合并不能改写当前选择")
+
+        store.sessionSearchQuery = ""
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(client.requestedThreadSearchQueries, ["needle"], "空查询不能发 thread/search")
+        XCTAssertEqual(store.sessions.map(\.id), [local.id], "清空搜索不能删除已加载会话")
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty)
+        XCTAssertEqual(store.selectedSessionID, local.id)
+    }
+
+    func testThreadSearchIgnoresCanceledLateResponse() async throws {
+        let project = makeProject(id: "proj_thread_search_stale")
+        let first = makeSession(
+            id: "remote_first_stale",
+            projectID: project.id,
+            title: "first",
+            status: "history",
+            source: "codex",
+            preview: "first"
+        )
+        let second = makeSession(
+            id: "remote_second_current",
+            projectID: project.id,
+            title: "second",
+            status: "history",
+            source: "codex",
+            preview: "second"
+        )
+        let gate = ThreadSearchResponseGate()
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            threadSearchHandler: { query, _, _ in
+                try await gate.search(query: query)
+            }
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 0
+        )
+
+        store.sessionSearchQuery = "first"
+        try await waitForThreadSearchQueries(gate, count: 1)
+        store.sessionSearchQuery = "second"
+        try await waitForThreadSearchQueries(gate, count: 2)
+
+        gate.resolve(
+            query: "second",
+            page: ThreadSearchPage(results: [ThreadSearchResult(session: second, snippet: "second")])
+        )
+        for _ in 0..<100 where store.remoteSessionSearchResults.map(\.id) != [second.id] {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        gate.resolve(
+            query: "first",
+            page: ThreadSearchPage(results: [ThreadSearchResult(session: first, snippet: "first")])
+        )
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(store.remoteSessionSearchResults.map(\.id), [second.id])
+        XCTAssertFalse(store.sessions.contains(where: { $0.id == first.id }), "已取消查询的迟到响应不能污染基础缓存")
+    }
+
+    func testThreadSearchUnavailableSilentlyFallsBackToLocalResults() async throws {
+        let project = makeProject(id: "proj_thread_search_fallback")
+        let local = makeSession(
+            id: "local_thread_search_fallback",
+            projectID: project.id,
+            title: "旧服务也能本地搜索",
+            status: "history",
+            source: "codex",
+            preview: "fallback needle"
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            projectSessions: [project.id: [local]],
+            threadSearchHandler: { _, _, _ in
+                throw CodexAppServerSessionRuntimeError.threadSearchUnavailable
+            }
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 0
+        )
+        await store.selectProject(project)
+        let statusBeforeSearch = store.statusMessage
+
+        store.sessionSearchQuery = "fallback needle"
+        for _ in 0..<100 where client.requestedThreadSearchQueries.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(store.filteredSessions.map(\.id), [local.id])
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.statusMessage, statusBeforeSearch, "搜索失败不能改写全局状态提示")
+        XCTAssertNil(store.connectionTermination)
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty)
+    }
+
+    func testThreadSearchInitialLoadingCoversDebounceAndFinishesOnSuccessAndFailure() async throws {
+        let project = makeProject(id: "proj_thread_search_initial_loading")
+        let local = makeSession(
+            id: "thread_search_initial_loading_local",
+            projectID: project.id,
+            title: "本地 local 命中",
+            status: "history",
+            source: "codex"
+        )
+        let remote = makeSession(
+            id: "thread_search_initial_loading_remote",
+            projectID: project.id,
+            title: "远端正文命中",
+            status: "history",
+            source: "codex"
+        )
+        let gate = ThreadSearchResponseGate()
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            projectSessions: [project.id: [local]],
+            threadSearchHandler: { query, cursor, _ in
+                try await gate.search(query: query, cursor: cursor)
+            }
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 50_000_000
+        )
+        await store.selectProject(project)
+        let statusBeforeSearch = store.statusMessage
+
+        store.sessionSearchQuery = "local"
+        XCTAssertTrue(store.isSearchingRemoteSessionResults, "首屏 loading 必须从防抖阶段开始")
+        XCTAssertTrue(gate.requests.isEmpty, "防抖未结束前不应提前发请求")
+        XCTAssertEqual(store.sessionLibrarySessions.map(\.id), [local.id], "已有本地命中不能被首屏 loading 覆盖")
+        try await waitForThreadSearchQueries(gate, count: 1)
+        XCTAssertTrue(store.isSearchingRemoteSessionResults)
+
+        gate.resolve(
+            query: "local",
+            page: ThreadSearchPage(results: [ThreadSearchResult(session: remote, snippet: "local 正文命中")])
+        )
+        for _ in 0..<100 where store.isSearchingRemoteSessionResults {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(store.isSearchingRemoteSessionResults)
+        XCTAssertEqual(Set(store.sessionLibrarySessions.map(\.id)), Set([local.id, remote.id]))
+
+        store.sessionSearchQuery = "failure"
+        XCTAssertTrue(store.isSearchingRemoteSessionResults)
+        try await waitForThreadSearchQueries(gate, count: 2)
+        gate.fail(query: "failure", error: URLError(.timedOut))
+        for _ in 0..<100 where store.isSearchingRemoteSessionResults {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertFalse(store.isSearchingRemoteSessionResults)
+        XCTAssertFalse(store.isLoadingMoreSessionSearchResults)
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty, "首屏失败只静默回退本地过滤")
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.statusMessage, statusBeforeSearch)
+        XCTAssertNil(store.connectionTermination)
+    }
+
+    func testThreadSearchInitialLoadingIgnoresOldQueryAndResetsAfterMacSwitch() async throws {
+        let suiteName = "ConversationDataFlowTests.ThreadSearchInitialLoadingConnection.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://100.64.0.10:8787", forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(itemData: Data("old-token".utf8))
+        let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let project = makeProject(id: "proj_thread_search_initial_loading_stale")
+        let oldResult = makeSession(
+            id: "thread_search_initial_loading_old",
+            projectID: project.id,
+            title: "旧查询结果",
+            status: "history",
+            source: "codex"
+        )
+        let currentResult = makeSession(
+            id: "thread_search_initial_loading_current",
+            projectID: project.id,
+            title: "旧 Mac 结果",
+            status: "history",
+            source: "codex"
+        )
+        let gate = ThreadSearchResponseGate()
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            threadSearchHandler: { query, cursor, _ in
+                try await gate.search(query: query, cursor: cursor)
+            }
+        )
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 0
+        )
+
+        store.sessionSearchQuery = "old"
+        try await waitForThreadSearchQueries(gate, count: 1)
+        XCTAssertTrue(store.isSearchingRemoteSessionResults)
+
+        store.sessionSearchQuery = "current"
+        try await waitForThreadSearchQueries(gate, count: 2)
+        XCTAssertTrue(store.isSearchingRemoteSessionResults)
+        gate.resolve(
+            query: "old",
+            page: ThreadSearchPage(results: [ThreadSearchResult(session: oldResult, snippet: "不得落地")])
+        )
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(store.isSearchingRemoteSessionResults, "旧 query 的迟到 defer 不能清掉新 query 的 loading")
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty)
+
+        let oldConnectionGeneration = appStore.connectionGeneration
+        XCTAssertTrue(try store.commitPreparedConnection(PreparedConnectionSettings(
+            endpoint: "http://100.64.0.20:8787",
+            token: "new-token"
+        )))
+        XCTAssertGreaterThan(appStore.connectionGeneration, oldConnectionGeneration)
+        XCTAssertEqual(store.sessionSearchQuery, "")
+        XCTAssertFalse(store.isSearchingRemoteSessionResults)
+        XCTAssertFalse(store.isLoadingMoreSessionSearchResults)
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty)
+
+        gate.resolve(
+            query: "current",
+            page: ThreadSearchPage(results: [ThreadSearchResult(session: currentResult, snippet: "旧 Mac 不得回填")])
+        )
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(store.isSearchingRemoteSessionResults)
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty, "旧 Mac 的迟到响应不能恢复结果或 loading")
+    }
+
+    func testThreadSearchPaginationMergesByIDUpdatesSnippetAndStopsOnSameCursor() async throws {
+        let project = makeProject(id: "proj_thread_search_page_merge")
+        let canonical = makeSession(
+            id: "thread_page_duplicate",
+            projectID: project.id,
+            title: "本地权威标题",
+            status: "history",
+            source: "codex",
+            preview: "本地 preview 不能被搜索覆盖"
+        )
+        let remoteFirst = makeSession(
+            id: canonical.id,
+            projectID: project.id,
+            title: "远端首屏标题",
+            status: "history",
+            source: "codex",
+            updatedAt: Date(timeIntervalSince1970: 3)
+        )
+        let remoteUpdated = makeSession(
+            id: canonical.id,
+            projectID: project.id,
+            title: "远端分页更新标题",
+            status: "history",
+            source: "codex",
+            updatedAt: Date(timeIntervalSince1970: 4)
+        )
+        let remoteSecond = makeSession(
+            id: "thread_page_second",
+            projectID: project.id,
+            title: "分页新增",
+            status: "history",
+            source: "codex",
+            updatedAt: Date(timeIntervalSince1970: 2)
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            projectSessions: [project.id: [canonical]],
+            threadSearchHandler: { _, cursor, _ in
+                switch cursor {
+                case nil:
+                    return ThreadSearchPage(
+                        results: [ThreadSearchResult(session: remoteFirst, snippet: "首屏 snippet")],
+                        nextCursor: "cursor-1"
+                    )
+                case "cursor-1":
+                    return ThreadSearchPage(
+                        results: [
+                            ThreadSearchResult(session: remoteUpdated, snippet: "分页更新 snippet"),
+                            ThreadSearchResult(session: remoteSecond, snippet: "分页新增 snippet")
+                        ],
+                        nextCursor: "cursor-1"
+                    )
+                default:
+                    throw MockError.unimplemented
+                }
+            }
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 0
+        )
+        await store.selectProject(project)
+
+        store.sessionSearchQuery = "needle"
+        for _ in 0..<100 where store.sessionSearchNextCursor != "cursor-1" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        await store.loadMoreSessionSearchResults()
+
+        XCTAssertEqual(Set(store.remoteSessionSearchResults.map(\.id)), Set([canonical.id, remoteSecond.id]))
+        XCTAssertEqual(store.remoteSessionSearchResults.first(where: { $0.id == canonical.id })?.title, remoteUpdated.title)
+        XCTAssertEqual(store.sessionSearchSnippet(for: canonical.id), "分页更新 snippet")
+        XCTAssertEqual(store.sessions.first(where: { $0.id == canonical.id })?.title, canonical.title)
+        XCTAssertEqual(store.sessions.first(where: { $0.id == canonical.id })?.preview, canonical.preview)
+        XCTAssertNil(store.sessionSearchNextCursor, "服务端返回本次请求 cursor 时必须终止，避免死循环")
+        XCTAssertFalse(store.sessionSearchHasMore)
+
+        await store.loadMoreSessionSearchResults()
+        XCTAssertEqual(client.requestedThreadSearchCursors, [nil, "cursor-1"], "终止后再次点击不能继续发请求")
+    }
+
+    func testThreadSearchPaginationDeduplicatesClicksAndRetainsCursorForRetry() async throws {
+        let project = makeProject(id: "proj_thread_search_page_retry")
+        let first = makeSession(
+            id: "thread_page_retry_first",
+            projectID: project.id,
+            title: "首屏结果",
+            status: "history",
+            source: "codex"
+        )
+        let second = makeSession(
+            id: "thread_page_retry_second",
+            projectID: project.id,
+            title: "重试结果",
+            status: "history",
+            source: "codex"
+        )
+        let gate = ThreadSearchResponseGate()
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            threadSearchHandler: { query, cursor, _ in
+                if cursor == nil {
+                    return ThreadSearchPage(
+                        results: [ThreadSearchResult(session: first, snippet: "首屏")],
+                        nextCursor: "retry-cursor"
+                    )
+                }
+                return try await gate.search(query: query, cursor: cursor)
+            }
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 0
+        )
+
+        store.sessionSearchQuery = "retry"
+        for _ in 0..<100 where store.sessionSearchNextCursor != "retry-cursor" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let statusBeforePage = store.statusMessage
+        let firstPageTask = Task { @MainActor in
+            await store.loadMoreSessionSearchResults()
+        }
+        try await waitForThreadSearchQueries(gate, count: 1)
+
+        await store.loadMoreSessionSearchResults()
+        XCTAssertEqual(gate.requests.count, 1, "分页在途时重复点击只能保留一个请求")
+        XCTAssertTrue(store.isLoadingMoreSessionSearchResults)
+
+        gate.fail(query: "retry", cursor: "retry-cursor", error: URLError(.timedOut))
+        await firstPageTask.value
+        XCTAssertEqual(store.remoteSessionSearchResults.map(\.id), [first.id])
+        XCTAssertEqual(store.sessionSearchNextCursor, "retry-cursor")
+        XCTAssertTrue(store.sessionSearchHasMore)
+        XCTAssertFalse(store.isLoadingMoreSessionSearchResults)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.statusMessage, statusBeforePage)
+        XCTAssertNil(store.connectionTermination)
+
+        let retryTask = Task { @MainActor in
+            await store.loadMoreSessionSearchResults()
+        }
+        try await waitForThreadSearchQueries(gate, count: 2)
+        gate.resolve(
+            query: "retry",
+            cursor: "retry-cursor",
+            page: ThreadSearchPage(
+                results: [ThreadSearchResult(session: second, snippet: "重试成功")]
+            )
+        )
+        await retryTask.value
+
+        XCTAssertEqual(Set(store.remoteSessionSearchResults.map(\.id)), Set([first.id, second.id]))
+        XCTAssertEqual(gate.requests.count, 2, "失败后应允许使用同一 cursor 显式重试")
+        XCTAssertFalse(store.sessionSearchHasMore)
+    }
+
+    func testThreadSearchPaginationDropsLatePagesAfterNewQueryAndConnectionChange() async throws {
+        let suiteName = "ConversationDataFlowTests.ThreadSearchPaginationConnection.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://100.64.0.10:8787", forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(itemData: Data("old-token".utf8))
+        let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let project = makeProject(id: "proj_thread_search_page_stale")
+        let oldFirst = makeSession(
+            id: "thread_page_old_first",
+            projectID: project.id,
+            title: "旧查询首屏",
+            status: "history",
+            source: "codex"
+        )
+        let oldLate = makeSession(
+            id: "thread_page_old_late",
+            projectID: project.id,
+            title: "旧查询迟到页",
+            status: "history",
+            source: "codex"
+        )
+        let currentFirst = makeSession(
+            id: "thread_page_current_first",
+            projectID: project.id,
+            title: "新查询首屏",
+            status: "history",
+            source: "codex"
+        )
+        let currentLate = makeSession(
+            id: "thread_page_current_late",
+            projectID: project.id,
+            title: "旧 Mac 迟到页",
+            status: "history",
+            source: "codex"
+        )
+        let gate = ThreadSearchResponseGate()
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            threadSearchHandler: { query, cursor, _ in
+                switch (query, cursor) {
+                case ("old", nil):
+                    return ThreadSearchPage(
+                        results: [ThreadSearchResult(session: oldFirst, snippet: "旧首屏")],
+                        nextCursor: "old-cursor"
+                    )
+                case ("current", nil):
+                    return ThreadSearchPage(
+                        results: [ThreadSearchResult(session: currentFirst, snippet: "新首屏")],
+                        nextCursor: "current-cursor"
+                    )
+                default:
+                    return try await gate.search(query: query, cursor: cursor)
+                }
+            }
+        )
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionSearchDebounceNanoseconds: 0
+        )
+
+        store.sessionSearchQuery = "old"
+        for _ in 0..<100 where store.sessionSearchNextCursor != "old-cursor" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let oldPageTask = Task { @MainActor in
+            await store.loadMoreSessionSearchResults()
+        }
+        try await waitForThreadSearchQueries(gate, count: 1)
+
+        store.sessionSearchQuery = "current"
+        for _ in 0..<100 where store.sessionSearchNextCursor != "current-cursor" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        gate.resolve(
+            query: "old",
+            cursor: "old-cursor",
+            page: ThreadSearchPage(
+                results: [ThreadSearchResult(session: oldLate, snippet: "不得落地")],
+                nextCursor: "old-next"
+            )
+        )
+        await oldPageTask.value
+        XCTAssertEqual(store.remoteSessionSearchResults.map(\.id), [currentFirst.id])
+        XCTAssertEqual(store.sessionSearchNextCursor, "current-cursor")
+        XCTAssertFalse(store.isLoadingMoreSessionSearchResults)
+
+        let currentPageTask = Task { @MainActor in
+            await store.loadMoreSessionSearchResults()
+        }
+        try await waitForThreadSearchQueries(gate, count: 2)
+        let oldConnectionGeneration = appStore.connectionGeneration
+        XCTAssertTrue(try store.commitPreparedConnection(PreparedConnectionSettings(
+            endpoint: "http://100.64.0.20:8787",
+            token: "new-token"
+        )))
+        XCTAssertGreaterThan(appStore.connectionGeneration, oldConnectionGeneration)
+        XCTAssertEqual(store.sessionSearchQuery, "", "切换 Mac 后不能保留旧 Mac 的搜索词")
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty)
+        XCTAssertNil(store.sessionSearchNextCursor)
+        XCTAssertFalse(store.sessionSearchHasMore)
+        XCTAssertFalse(store.isLoadingMoreSessionSearchResults)
+
+        gate.resolve(
+            query: "current",
+            cursor: "current-cursor",
+            page: ThreadSearchPage(
+                results: [ThreadSearchResult(session: currentLate, snippet: "旧 Mac 不得回填")],
+                nextCursor: "current-next"
+            )
+        )
+        await currentPageTask.value
+        XCTAssertTrue(store.remoteSessionSearchResults.isEmpty)
+        XCTAssertNil(store.sessionSearchNextCursor)
+        XCTAssertFalse(store.isLoadingMoreSessionSearchResults)
+    }
+
     func testSessionStoreRefreshesGitStatusForSelectedSessionPath() async {
         let project = makeProject(id: "proj_1")
         let session = makeSession(id: "codex_git", projectID: project.id, title: "检查 Git", status: "history", source: "codex", resumeID: "git")
@@ -5064,6 +6245,21 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertNil(store.capabilityErrorMessage)
     }
 
+    func testWorktreeDescriptorKeepsUnknownGitStateFailClosedForLegacyServer() throws {
+        let current = try JSONDecoder().decode(
+            WorktreeDescriptor.self,
+            from: Data(#"{"path":"/tmp/wt","repository_path":"/tmp/repo","base":"main","git_state":"clean","dirty":false,"root_project_id":"repo","root_project_name":"Repo","root_project_path":"/tmp/repo"}"#.utf8)
+        )
+        XCTAssertEqual(current.gitState, "clean")
+        XCTAssertFalse(current.dirty)
+
+        let legacy = try JSONDecoder().decode(
+            WorktreeDescriptor.self,
+            from: Data(#"{"path":"/tmp/wt","repository_path":"/tmp/repo","base":"main","dirty":false,"root_project_id":"repo","root_project_name":"Repo","root_project_path":"/tmp/repo"}"#.utf8)
+        )
+        XCTAssertEqual(legacy.gitState, "unknown", "旧服务缺少 git_state 时不能把 dirty=false 当成已证明干净")
+    }
+
     func testSessionStoreRefreshesWorktreeBranches() async {
         let project = makeProject(id: "proj_1")
         let response = WorktreeBranchListResponse(
@@ -5451,6 +6647,54 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(store.worktreeErrorMessage, "该 Worktree 还有运行中的会话，先停止会话后再删除。")
     }
 
+    func testSessionStoreAppliesDeletedWorktreeBeforeRegistryCleanupWarning() async {
+        let project = makeProject(id: "proj_delete_registry_warning")
+        let workspace = makeChildWorkspace(id: "ws_delete_registry_warning", name: "deleted-checkout", root: project)
+        let item = WorktreeListItem(
+            workspace: workspace,
+            worktree: WorktreeDescriptor(
+                path: workspace.path,
+                repositoryPath: project.path,
+                base: "main",
+                branch: "mimi/deleted-checkout",
+                rootProjectID: project.id,
+                rootProjectName: project.name,
+                rootProjectPath: project.path
+            )
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            worktreeListResult: .success([item]),
+            worktreeDeleteResults: [
+                workspace.path: .success(WorktreeDeleteResponse(
+                    deletedPath: workspace.path,
+                    worktrees: [item],
+                    workspace: workspace,
+                    worktree: item.worktree,
+                    registryCleanupError: "registry 文件只读"
+                ))
+            ]
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshManagedWorktrees()
+        let deleted = await store.deleteManagedWorktree(item)
+
+        XCTAssertTrue(deleted, "checkout 已删除时 registry 收尾失败仍应返回成功")
+        XCTAssertTrue(store.managedWorktrees.isEmpty, "陈旧的 response.worktrees 不能把已删除 checkout 放回 UI")
+        XCTAssertEqual(store.statusMessage, "已删除 Git Worktree deleted-checkout，但管理登记仍需清理")
+        XCTAssertEqual(
+            store.worktreeErrorMessage,
+            "Git Worktree 已删除，但清理管理登记失败：registry 文件只读。可稍后使用“清理丢失登记”重试。"
+        )
+    }
+
     func testSessionStorePrunesMissingManagedWorktreeRegistry() async {
         let project = makeProject(id: "proj_1")
         let workspace = AgentWorkspace(
@@ -5494,6 +6738,193 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(client.worktreePruneCallCount, 1)
         XCTAssertTrue(store.managedWorktrees.isEmpty)
         XCTAssertNil(store.worktreeErrorMessage)
+    }
+
+    func testSessionStoreAppliesPrunedPathsBeforeReportingPartialRegistryFailure() async {
+        let project = makeProject(id: "proj_prune_partial")
+        let prunedWorkspace = makeChildWorkspace(id: "ws_pruned", name: "missing-pruned", root: project)
+        let failedWorkspace = makeChildWorkspace(id: "ws_failed", name: "missing-failed", root: project)
+        let prunedItem = WorktreeListItem(
+            workspace: prunedWorkspace,
+            worktree: WorktreeDescriptor(
+                path: prunedWorkspace.path,
+                repositoryPath: project.path,
+                base: "main",
+                branch: "mimi/missing-pruned",
+                rootProjectID: project.id,
+                rootProjectName: project.name,
+                rootProjectPath: project.path
+            )
+        )
+        let failedItem = WorktreeListItem(
+            workspace: failedWorkspace,
+            worktree: WorktreeDescriptor(
+                path: failedWorkspace.path,
+                repositoryPath: project.path,
+                base: "main",
+                branch: "mimi/missing-failed",
+                rootProjectID: project.id,
+                rootProjectName: project.name,
+                rootProjectPath: project.path
+            )
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            worktreeListResult: .success([prunedItem, failedItem]),
+            worktreePruneResult: .success(WorktreePruneResponse(
+                prunedPaths: [prunedWorkspace.path],
+                worktrees: [failedItem],
+                failedPaths: [failedWorkspace.path: "registry 文件只读"]
+            ))
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        await store.refreshManagedWorktrees()
+        let prunedCount = await store.pruneMissingManagedWorktrees()
+
+        XCTAssertEqual(prunedCount, 1, "返回值只统计已经成功 prune 的路径")
+        XCTAssertEqual(store.managedWorktrees.map(\.workspace.id), [failedWorkspace.id])
+        XCTAssertEqual(store.statusMessage, "已清理 1 条 Worktree 登记，另有项目失败")
+        XCTAssertEqual(
+            store.worktreeErrorMessage,
+            "已清理 1 条丢失的 Worktree 登记，但另有 1 条失败：\(failedWorkspace.path)：registry 文件只读"
+        )
+    }
+
+    func testSessionStorePreviewsAndExecutesOnlyEligibleWorktreeCleanup() async throws {
+        let project = makeProject(id: "proj_cleanup")
+        let eligible = makeWorktreeCleanupItem(
+            project: project,
+            workspaceID: "ws_old",
+            name: "old-clean",
+            eligible: true
+        )
+        let blocked = makeWorktreeCleanupItem(
+            project: project,
+            workspaceID: "ws_dirty",
+            name: "dirty",
+            eligible: false,
+            blockers: [WorktreeCleanupBlocker(rawValue: "git_dirty")]
+        )
+        let preview = makeWorktreeCleanupResponse(
+            items: [eligible, blocked],
+            candidatePaths: [eligible.worktree.path]
+        )
+        let executed = makeWorktreeCleanupResponse(
+            items: [blocked],
+            candidatePaths: [],
+            deletedPaths: [eligible.worktree.path]
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            worktreeListResult: .success([]),
+            worktreeCleanupPreviewResult: .success(preview),
+            worktreeCleanupExecutionResult: .success(executed)
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        let loadedPreview = try await store.previewManagedWorktreeCleanup()
+        let response = try await store.cleanupManagedWorktrees(
+            paths: [eligible.worktree.path],
+            preview: loadedPreview
+        )
+
+        XCTAssertEqual(client.worktreeCleanupPreviewCallCount, 1)
+        XCTAssertEqual(client.requestedWorktreeCleanupPaths, [[eligible.worktree.path]])
+        XCTAssertEqual(client.requestedWorktreeCleanupPlanIDs, ["wtc_test_plan"])
+        XCTAssertEqual(response.deletedPaths, [eligible.worktree.path])
+        XCTAssertEqual(client.worktreeListCallCount, 1, "执行后应刷新 managed Worktree 列表")
+        XCTAssertEqual(store.statusMessage, "已清理 1 个 Git Worktree")
+        XCTAssertNil(store.worktreeErrorMessage)
+    }
+
+    func testSessionStoreRejectsBlockedWorktreeWithoutCallingCleanupAPI() async {
+        let project = makeProject(id: "proj_cleanup_blocked")
+        let blocked = makeWorktreeCleanupItem(
+            project: project,
+            workspaceID: "ws_running",
+            name: "running",
+            eligible: false,
+            blockers: [WorktreeCleanupBlocker(rawValue: "session_running")]
+        )
+        let preview = makeWorktreeCleanupResponse(items: [blocked], candidatePaths: [])
+        let client = MockSessionStoreClient(projects: [project], sessions: [])
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        do {
+            _ = try await store.cleanupManagedWorktrees(paths: [blocked.worktree.path], preview: preview)
+            XCTFail("包含 blocker 的路径不能进入清理 API")
+        } catch {
+            XCTAssertEqual(error as? WorktreeCleanupSelectionError, .containsBlockedPath)
+        }
+        XCTAssertTrue(client.requestedWorktreeCleanupPaths.isEmpty)
+    }
+
+    func testSessionStoreRefreshesDeletedWorktreesBeforeReportingPartialCleanupFailure() async throws {
+        let project = makeProject(id: "proj_cleanup_partial")
+        let first = makeWorktreeCleanupItem(
+            project: project,
+            workspaceID: "ws_cleanup_first",
+            name: "old-first",
+            eligible: true
+        )
+        let second = makeWorktreeCleanupItem(
+            project: project,
+            workspaceID: "ws_cleanup_second",
+            name: "old-second",
+            eligible: true
+        )
+        let preview = makeWorktreeCleanupResponse(
+            items: [first, second],
+            candidatePaths: [first.worktree.path, second.worktree.path]
+        )
+        let executed = makeWorktreeCleanupResponse(
+            items: [first, second],
+            candidatePaths: [first.worktree.path, second.worktree.path],
+            deletedPaths: [first.worktree.path],
+            failedPath: second.worktree.path,
+            error: "git worktree remove 失败"
+        )
+        let client = MockSessionStoreClient(
+            projects: [project],
+            sessions: [],
+            worktreeListResult: .success([]),
+            worktreeCleanupExecutionResult: .success(executed)
+        )
+        let store = SessionStore(
+            appStore: AppStore(),
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client }
+        )
+
+        let response = try await store.cleanupManagedWorktrees(
+            paths: [second.worktree.path, first.worktree.path],
+            preview: preview
+        )
+
+        XCTAssertTrue(response.hasPartialFailure)
+        XCTAssertEqual(client.requestedWorktreeCleanupPaths, [[first.worktree.path, second.worktree.path].sorted()])
+        XCTAssertEqual(client.worktreeListCallCount, 1, "部分成功也必须刷新 managed Worktree 列表")
+        XCTAssertEqual(store.statusMessage, "已清理 1 个 Git Worktree，另有项目清理失败")
+        XCTAssertEqual(store.worktreeErrorMessage, response.partialFailureMessage)
     }
 
     func testSessionStoreProjectIndexKeepsPreviousSelectionAfterRefresh() async {
@@ -9791,6 +11222,173 @@ final class ConversationDataFlowTests: XCTestCase {
         }
     }
 
+    func testBackgroundSuspensionRetiresGhostSocketWithoutFailingLocalMessages() async throws {
+        let project = makeProject(id: "proj_background_suspend")
+        let running = makeSession(
+            id: "sess_background_suspend",
+            projectID: project.id,
+            title: "后台挂起",
+            status: "running",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let conversationStore = ConversationStore()
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        let socket = try XCTUnwrap(sockets.first)
+        socket.emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        let sentImmediately = await store.sendTurn(CodexAppServerTurnPayload(prompt: "发送中消息"))
+        XCTAssertTrue(sentImmediately)
+        socket.emitEvent(.turnStarted(AgentEventMetadata(
+            seq: 1,
+            sessionID: running.id,
+            turnID: "turn_background_active",
+            itemID: nil,
+            messageID: nil,
+            clientMessageID: nil,
+            revision: nil,
+            createdAt: nil
+        )))
+        try await waitForSelectedActiveTurnID("turn_background_active", store: store)
+        let queuedForLater = await store.sendTurn(CodexAppServerTurnPayload(prompt: "后台期间保留的排队消息"))
+        XCTAssertTrue(queuedForLater)
+        let messagesBeforeBackground = conversationStore.messages(for: running.id)
+
+        store.suspendForBackground()
+        await store.refreshAll(autoAttach: true) // 后台前已启动的刷新不能重新创建第二条 socket。
+        socket.emitStatus(.connected) // 旧 URLSession 的迟到回调不能复活幽灵连接。
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(sockets.count, 1)
+        XCTAssertEqual(socket.disconnectCallCount, 1)
+        XCTAssertEqual(store.webSocketStatus, .disconnected)
+        XCTAssertEqual(store.selectedProjectID, project.id)
+        XCTAssertEqual(store.selectedSessionID, running.id)
+        XCTAssertEqual(conversationStore.messages(for: running.id), messagesBeforeBackground)
+        XCTAssertEqual(
+            conversationStore.messages(for: running.id).first { $0.content == "发送中消息" }?.sendStatus,
+            .sending
+        )
+        XCTAssertEqual(
+            conversationStore.messages(for: running.id).first { $0.content == "后台期间保留的排队消息" }?.sendStatus,
+            .local
+        )
+    }
+
+    func testForegroundResumeRebuildsBackgroundSocketExactlyOnceWithoutContentReplay() async throws {
+        let project = makeProject(id: "proj_background_resume")
+        let running = makeSession(
+            id: "sess_background_resume",
+            projectID: project.id,
+            title: "前台恢复",
+            status: "running",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        store.suspendForBackground()
+        await store.resumeFromForeground()
+        for _ in 0..<80 where sockets.count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(sockets.count, 2)
+        XCTAssertEqual(sockets[0].disconnectCallCount, 1)
+        XCTAssertEqual(sockets[1].connectedSessionIDs, [running.id])
+        XCTAssertEqual(sockets[1].replayBufferedEventsByConnect, [false])
+    }
+
+    func testForegroundResumeWhileOfflineDefersBackgroundReconnectUntilPathRecovery() async throws {
+        let project = makeProject(id: "proj_background_offline")
+        let running = makeSession(
+            id: "sess_background_offline",
+            projectID: project.id,
+            title: "后台离线",
+            status: "running",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let pathSource = TestNetworkPathStatusSource(initialStatus: .satisfied)
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: []) },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            },
+            networkPathStatusSource: pathSource
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        store.suspendForBackground()
+        pathSource.emit(.unsatisfied)
+        try await waitForNetworkReachability(.unsatisfied, store: store)
+        await store.resumeFromForeground()
+        XCTAssertEqual(sockets.count, 1, "已知离线时回前台不能抢先创建 WebSocket")
+
+        pathSource.emit(.satisfied)
+        try await waitForNetworkReachability(.satisfied, store: store)
+        for _ in 0..<80 where sockets.count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(sockets.count, 2)
+        XCTAssertEqual(sockets[1].connectedSessionIDs, [running.id])
+    }
+
     func testBufferedStateReplayKeepsCompletedContentEvents() {
         // thread/read 快照不含 commandExecution 过程 item；状态级回放必须保留 completed
         // 内容事件，否则离开期间完成的命令卡会永久丢失。流式 delta/日志仍不补播。
@@ -10565,6 +12163,506 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertNil(store.errorMessage)
     }
 
+    func testRefreshAfterConnectionCommitRetriesUntilProjectsLoad() async {
+        let project = makeProject(id: "proj_pairing_projects_recovery")
+        let client = FlakyBootstrapClient(
+            failuresBeforeSuccess: 2,
+            projects: [project],
+            sessions: []
+        )
+        let appStore = AppStore()
+        appStore.token = "committed-token"
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionListSleep: { _ in }
+        )
+
+        let didLoad = await store.refreshAfterConnectionCommit(maxWait: 45)
+
+        XCTAssertTrue(didLoad)
+        XCTAssertEqual(client.projectsCallCount, 3)
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testRefreshAfterConnectionCommitRetriesUntilGatewaySessionsLoad() async {
+        let project = makeProject(id: "proj_pairing_gateway_recovery")
+        let session = makeSession(
+            id: "thread_pairing_gateway_recovery",
+            projectID: project.id,
+            title: "首配恢复",
+            status: "history",
+            source: "codex"
+        )
+        let client = FlakyBootstrapClient(
+            failuresBeforeSuccess: 0,
+            sessionFailuresBeforeSuccess: 2,
+            projects: [project],
+            sessions: [session]
+        )
+        let appStore = AppStore()
+        appStore.token = "committed-token"
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            recentWorkspaceStore: makeRecentWorkspaceStore(
+                workspaces: [AgentWorkspace(project: project)],
+                endpoint: appStore.endpoint
+            ),
+            clientFactory: { client },
+            sessionListSleep: { _ in }
+        )
+
+        let didLoad = await store.refreshAfterConnectionCommit(maxWait: 45)
+
+        XCTAssertTrue(didLoad)
+        XCTAssertEqual(client.sessionsCallCount, 3)
+        XCTAssertEqual(store.filteredSessions.map(\.id), [session.id])
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testRefreshAfterConnectionCommitTimeoutKeepsCommittedCredentials() async throws {
+        let suiteName = "ConversationDataFlowTests.PairingRefreshTimeout.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let keychain = TestKeychainOperations()
+        let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let client = FlakyBootstrapClient(
+            failuresBeforeSuccess: 1,
+            projects: [],
+            sessions: []
+        )
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionListSleep: { _ in }
+        )
+        let endpoint = "http://100.64.0.88:8787"
+        let token = "committed-after-pairing"
+        XCTAssertTrue(try store.commitPreparedConnection(PreparedConnectionSettings(
+            endpoint: endpoint,
+            token: token
+        )))
+
+        let didLoad = await store.refreshAfterConnectionCommit(maxWait: 0)
+
+        XCTAssertFalse(didLoad)
+        XCTAssertEqual(client.projectsCallCount, 1)
+        XCTAssertEqual(appStore.endpoint, endpoint)
+        XCTAssertEqual(appStore.token, token)
+        XCTAssertTrue(appStore.isConfigured)
+        XCTAssertTrue(appStore.lastError?.contains("连接凭据已安全保存") == true)
+        XCTAssertEqual(store.errorMessage, appStore.lastError)
+
+        // 重建 AppStore 验证凭据仍在持久化档案和 Keychain 中，而不是只留在当前内存。
+        let reloaded = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        XCTAssertEqual(reloaded.endpoint, endpoint)
+        XCTAssertEqual(reloaded.token, token)
+        XCTAssertTrue(reloaded.isConfigured)
+
+        // 设置页 preflight 恢复健康后会再次进入同一短恢复入口；下一次成功必须清掉首配错误。
+        let retryDidLoad = await store.refreshAfterConnectionCommit(maxWait: 10)
+        XCTAssertTrue(retryDidLoad)
+        XCTAssertEqual(client.projectsCallCount, 2)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testBootstrapStopsImmediatelyWhenCredentialsAreRejected() async {
+        let client = CredentialRejectingBootstrapClient(status: 401)
+        let appStore = AppStore()
+        appStore.token = "expired-token"
+        var requestedSleeps: [UInt64] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            sessionListSleep: { requestedSleeps.append($0) }
+        )
+
+        await store.bootstrap()
+
+        XCTAssertEqual(client.projectsCallCount, 1, "确定性的鉴权失败不能进入 45 秒冷启动轮询")
+        XCTAssertTrue(requestedSleeps.isEmpty)
+        XCTAssertEqual(store.connectionTermination, .credentialsInvalid)
+        XCTAssertEqual(store.webSocketStatus, .terminated(.credentialsInvalid))
+        XCTAssertTrue(appStore.requiresRePairing)
+        XCTAssertEqual(store.errorMessage, ConnectionTerminationStatus.credentialsInvalid.message)
+    }
+
+    func testWebSocketClientPublishesCredentialTerminalStatusForHandshakeRejection() async throws {
+        let project = makeProject(id: "proj_ws_auth_rejected")
+
+        for status in [401, 403] {
+            let runtime = CodexAppServerSessionRuntime(
+                endpoint: "http://127.0.0.1:8787",
+                token: "expired-token",
+                transportFactory: { CredentialRejectingCodexAppServerTransport(status: status) },
+                configProvider: { makeDirectAppServerConfig(project: project) }
+            )
+            let socket = CodexAppServerSessionWebSocketClient(runtime: runtime)
+            var statuses: [WebSocketStatus] = []
+            socket.onStatus = { statuses.append($0) }
+
+            socket.connect(sessionID: "thread_auth_\(status)")
+            try await waitForStatus(.terminated(.credentialsInvalid), in: { statuses })
+
+            XCTAssertEqual(statuses.first, .connecting)
+            XCTAssertTrue(statuses.contains(.terminated(.credentialsInvalid)))
+            XCTAssertFalse(statuses.contains { value in
+                if case .failed = value { return true }
+                return false
+            })
+            socket.disconnect()
+        }
+    }
+
+    func testCredentialTerminalStatusStopsReconnectAndPreservesLocalSessionState() async throws {
+        let project = makeProject(id: "proj_ws_auth_terminal")
+        let running = makeSession(
+            id: "sess_ws_auth_terminal",
+            projectID: project.id,
+            title: "保留中的会话",
+            status: "running",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        appStore.token = "expired-token"
+        let conversationStore = ConversationStore()
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            },
+            webSocketReconnectDelayNanoseconds: { _ in 0 }
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        let socket = try XCTUnwrap(sockets.first)
+        socket.emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        conversationStore.appendSystem("访问码失效前已经保存在本地的消息", sessionID: running.id)
+        let messagesBeforeTermination = conversationStore.messages(for: running.id)
+
+        socket.emitStatus(.terminated(.credentialsInvalid))
+        try await waitForWebSocketStatus(.terminated(.credentialsInvalid), store: store)
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(sockets.count, 1, "访问码失效后不能继续创建 WebSocket 重连")
+        XCTAssertEqual(socket.disconnectCallCount, 1)
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertEqual(store.sessions.map(\.id), [running.id])
+        XCTAssertEqual(store.selectedProjectID, project.id)
+        XCTAssertEqual(store.selectedSessionID, running.id)
+        XCTAssertEqual(conversationStore.messages(for: running.id), messagesBeforeTermination)
+        XCTAssertEqual(store.connectionTermination, .credentialsInvalid)
+        XCTAssertTrue(appStore.requiresRePairing)
+    }
+
+    func testLateOlderNetworkPathUpdateCannotOverwriteSatisfiedState() async throws {
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let pathSource = TestNetworkPathStatusSource(initialStatus: .unsatisfied)
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { MockSessionStoreClient(projects: [], sessions: [], messagesResult: []) },
+            networkPathStatusSource: pathSource
+        )
+
+        // monitor 先观察到离线(1)、再观察到在线(2)，这里只把主线程交付顺序反转，
+        // 确定性模拟旧 Task 在新 Task 之后才执行。
+        pathSource.deliver(.satisfied, sequence: 2)
+        try await waitForNetworkReachability(.satisfied, store: store)
+        pathSource.deliver(.unsatisfied, sequence: 1)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(store.networkReachabilityStatus, .satisfied)
+        XCTAssertFalse(store.isNetworkUnavailable)
+        XCTAssertNotEqual(store.statusMessage, "网络不可用，恢复后自动重连")
+    }
+
+    func testUnknownToSatisfiedRecoversExistingNetworkErrorExactlyOnce() async throws {
+        let project = makeProject(id: "proj_unknown_network_recovery")
+        let running = makeSession(
+            id: "sess_unknown_network_recovery",
+            projectID: project.id,
+            title: "首次网络状态恢复",
+            status: "history",
+            source: "codex"
+        )
+        let page = SessionsPage(sessions: [running])
+        let client = SequencedSessionListClient(
+            projects: [project],
+            results: [
+                .success(page),
+                .failure(CodexAppServerSessionRuntimeError.gatewayUnavailable),
+                .success(page)
+            ]
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let pathSource = TestNetworkPathStatusSource(initialStatus: .unknown)
+        var now = Date(timeIntervalSince1970: 0)
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            recentWorkspaceStore: makeRecentWorkspaceStore(
+                workspaces: [AgentWorkspace(project: project, lastOpenedAt: now)],
+                endpoint: appStore.endpoint
+            ),
+            clientFactory: { client },
+            networkPathStatusSource: pathSource,
+            sessionListNow: { now }
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        now = Date(timeIntervalSince1970: 10) // 让下一次请求绕过 2 秒首屏短缓存。
+        await store.refreshSelectedProjectSessions()
+        XCTAssertEqual(client.sessionsPageCallCount, 2)
+        XCTAssertNotNil(store.errorMessage)
+
+        pathSource.emit(.satisfied)
+        pathSource.emit(.satisfied) // 重复在线事件不能启动第二个恢复任务。
+        for _ in 0..<80 where client.sessionsPageCallCount < 3 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(store.networkReachabilityStatus, .satisfied)
+        XCTAssertEqual(client.sessionsPageCallCount, 3)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testOfflineSuspendsReconnectAndPreservesSessionQueueAndMessages() async throws {
+        let project = makeProject(id: "proj_network_offline")
+        let running = makeSession(
+            id: "sess_network_offline",
+            projectID: project.id,
+            title: "离线保留",
+            status: "running",
+            source: "codex",
+            activeTurnID: "turn_network_active"
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let conversationStore = ConversationStore()
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
+        let pathSource = TestNetworkPathStatusSource(initialStatus: .satisfied)
+        let delayRecorder = ReconnectDelayRecorder()
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            },
+            webSocketReconnectSleep: { delay in await delayRecorder.record(delay) },
+            networkPathStatusSource: pathSource
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        let socket = try XCTUnwrap(sockets.first)
+        socket.emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        let queued = await store.sendTurn(CodexAppServerTurnPayload(prompt: "网络恢复后仍等待当前 Turn 完成"))
+        XCTAssertTrue(queued)
+        conversationStore.appendSystem("离线前本地消息", sessionID: running.id)
+        let messagesBeforeOffline = conversationStore.messages(for: running.id)
+
+        pathSource.emit(.unsatisfied)
+        try await waitForNetworkReachability(.unsatisfied, store: store)
+        try await waitForWebSocketStatus(.disconnected, store: store)
+        socket.emitStatus(.failed("late network callback"))
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(sockets.count, 1)
+        XCTAssertEqual(socket.disconnectCallCount, 1)
+        let offlineDelays = await delayRecorder.snapshot()
+        XCTAssertEqual(offlineDelays, [], "离线后不能继续安排 WebSocket 退避")
+        XCTAssertEqual(store.projects.map(\.id), [project.id])
+        XCTAssertEqual(store.sessions.map(\.id), [running.id])
+        XCTAssertEqual(store.selectedProjectID, project.id)
+        XCTAssertEqual(store.selectedSessionID, running.id)
+        XCTAssertEqual(conversationStore.messages(for: running.id), messagesBeforeOffline)
+        XCTAssertEqual(
+            conversationStore.messages(for: running.id).first { $0.content == "网络恢复后仍等待当前 Turn 完成" }?.sendStatus,
+            .local
+        )
+        XCTAssertEqual(store.statusMessage, "网络不可用，恢复后自动重连")
+    }
+
+    func testNetworkRecoveryReconnectsExactlyOnce() async throws {
+        let project = makeProject(id: "proj_network_recovery")
+        let running = makeSession(
+            id: "sess_network_recovery",
+            projectID: project.id,
+            title: "恢复一次",
+            status: "running",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let pathSource = TestNetworkPathStatusSource(initialStatus: .satisfied)
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            },
+            networkPathStatusSource: pathSource
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        pathSource.emit(.unsatisfied)
+        try await waitForNetworkReachability(.unsatisfied, store: store)
+        pathSource.emit(.satisfied)
+        pathSource.emit(.satisfied) // NWPathMonitor 可能重复报告同一状态，恢复逻辑必须去重。
+        try await waitForNetworkReachability(.satisfied, store: store)
+        for _ in 0..<80 where sockets.count < 2 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(sockets.count, 2)
+        XCTAssertEqual(sockets[1].connectedSessionIDs, [running.id])
+    }
+
+    func testCredentialTerminalStateDoesNotRecoverWhenNetworkReturns() async throws {
+        let project = makeProject(id: "proj_auth_before_network_recovery")
+        let running = makeSession(
+            id: "sess_auth_before_network_recovery",
+            projectID: project.id,
+            title: "认证终态",
+            status: "running",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        appStore.token = "expired-token"
+        let pathSource = TestNetworkPathStatusSource(initialStatus: .satisfied)
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: []) },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            },
+            networkPathStatusSource: pathSource
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+        sockets[0].emitStatus(.terminated(.credentialsInvalid))
+        try await waitForWebSocketStatus(.terminated(.credentialsInvalid), store: store)
+
+        pathSource.emit(.unsatisfied)
+        pathSource.emit(.satisfied)
+        try await waitForNetworkReachability(.satisfied, store: store)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(sockets.count, 1)
+        XCTAssertEqual(store.webSocketStatus, .terminated(.credentialsInvalid))
+        XCTAssertEqual(store.connectionTermination, .credentialsInvalid)
+        XCTAssertTrue(appStore.requiresRePairing)
+    }
+
+    func testTransientReconnectUsesExponentialJitterAndMaximumDelay() async throws {
+        let project = makeProject(id: "proj_reconnect_jitter")
+        let running = makeSession(
+            id: "sess_reconnect_jitter",
+            projectID: project.id,
+            title: "退避",
+            status: "running",
+            source: "codex"
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let delayRecorder = ReconnectDelayRecorder()
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            clientFactory: { MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: []) },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            },
+            webSocketReconnectRandom: { 1.0 },
+            webSocketReconnectSleep: { delay in await delayRecorder.record(delay) },
+            networkPathStatusSource: TestNetworkPathStatusSource(initialStatus: .satisfied)
+        )
+
+        store.selectedProjectID = project.id
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        for attempt in 0..<6 {
+            sockets[attempt].emitStatus(.failed("transient \(attempt)"))
+            for _ in 0..<100 where sockets.count < attempt + 2 {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            XCTAssertEqual(sockets.count, attempt + 2)
+        }
+
+        let recordedDelays = await delayRecorder.snapshot()
+        XCTAssertEqual(
+            recordedDelays,
+            [1_200_000_000, 2_400_000_000, 4_800_000_000, 9_600_000_000, 19_200_000_000, 30_000_000_000]
+        )
+    }
+
     func testBootstrapRetriesUntilSessionsLoadWhenGatewayStartsLate() async {
         let project = makeProject(id: "proj_late_gateway")
         let session = makeSession(id: "codex_late", projectID: project.id, title: "首启恢复", status: "history", source: "codex", resumeID: "history")
@@ -10842,6 +12940,62 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(Set(client.requestedWorkspaceIDs), Set(projects.map(\.id)))
     }
 
+    func testSessionStoreStartsOnlyValidatedInlineReviewTargets() async {
+        let project = makeProject(id: "proj_review")
+        let session = makeSession(
+            id: "thread_review",
+            projectID: project.id,
+            title: "发布前检查",
+            status: "idle",
+            source: "codex",
+            runtimeProvider: "codex"
+        )
+        let client = MockSessionStoreClient(projects: [project], sessions: [session])
+        let appStore = AppStore()
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: ConversationStore(),
+            logStore: LogStore(),
+            recentWorkspaceStore: makeRecentWorkspaceStore(
+                workspaces: [AgentWorkspace(project: project)],
+                endpoint: appStore.endpoint
+            ),
+            clientFactory: { client }
+        )
+
+        let startedBaseBranch = await store.startReview(session, target: .baseBranch(" main "))
+        XCTAssertTrue(startedBaseBranch)
+        XCTAssertEqual(client.requestedSessionReviews, [
+            RequestedSessionReview(
+                threadID: session.id,
+                target: .baseBranch("main"),
+                delivery: .inline
+            )
+        ])
+
+        let startedCompatibilityReview = await store.reviewUncommittedChanges(session)
+        XCTAssertTrue(startedCompatibilityReview)
+        XCTAssertEqual(client.requestedSessionReviews.last?.target, .uncommittedChanges)
+        XCTAssertEqual(client.requestedSessionReviews.last?.delivery, .inline)
+
+        let rejectedEmptyCommit = await store.startReview(session, target: .commit(sha: " \n "))
+        let rejectedCustom = await store.startReview(session, target: .custom("绕过安全入口"))
+        let running = makeSession(
+            id: "thread_running_review",
+            projectID: project.id,
+            title: "正在运行",
+            status: "running",
+            source: "codex",
+            runtimeProvider: "codex"
+        )
+        let rejectedRunning = await store.startReview(running, target: .uncommittedChanges)
+
+        XCTAssertFalse(rejectedEmptyCommit)
+        XCTAssertFalse(rejectedCustom)
+        XCTAssertFalse(rejectedRunning)
+        XCTAssertEqual(client.requestedSessionReviews.count, 2)
+    }
+
     func testMultiRuntimeHistoryPreservesEconomyAndFullLoadModes() async throws {
         let project = AgentProject(id: "proj_multi_history_mode", name: "History Mode", path: "/tmp/multi-history-mode")
         let config = makeDirectAppServerConfig(
@@ -10896,6 +13050,46 @@ final class ConversationDataFlowTests: XCTestCase {
         transportResponse(codexTransport, id: fullRequest.id, result: #"{"data":[],"nextCursor":null}"#)
         let fullPage = try await fullTask.value
         XCTAssertEqual(fullPage.loadMode, .full)
+    }
+}
+
+private final class TestNetworkPathStatusSource: NetworkPathStatusSource {
+    private(set) var currentStatus: NetworkReachabilityStatus
+    var onStatusChange: ((NetworkPathStatusUpdate) -> Void)?
+    private var nextSequence: UInt64 = 0
+
+    init(initialStatus: NetworkReachabilityStatus) {
+        self.currentStatus = initialStatus
+    }
+
+    func start() {}
+
+    func stop() {
+        onStatusChange = nil
+    }
+
+    func emit(_ status: NetworkReachabilityStatus) {
+        currentStatus = status
+        nextSequence &+= 1
+        onStatusChange?(NetworkPathStatusUpdate(sequence: nextSequence, status: status))
+    }
+
+    func deliver(_ status: NetworkReachabilityStatus, sequence: UInt64) {
+        // 不改 currentStatus：该入口模拟 monitor 已观察到新状态，但旧 MainActor Task 才刚迟到。
+        nextSequence = max(nextSequence, sequence)
+        onStatusChange?(NetworkPathStatusUpdate(sequence: sequence, status: status))
+    }
+}
+
+private actor ReconnectDelayRecorder {
+    private var delays: [UInt64] = []
+
+    func record(_ delay: UInt64) {
+        delays.append(delay)
+    }
+
+    func snapshot() -> [UInt64] {
+        delays
     }
 }
 
@@ -11126,17 +13320,39 @@ private struct RequestedThreadGoalSet: Equatable {
     let tokenBudget: Int64?
 }
 
+private struct RequestedSessionReview: Equatable {
+    let threadID: String
+    let target: CodexAppServerReviewTarget
+    let delivery: CodexAppServerReviewDelivery?
+}
+
 private final class FakeSessionReminderScheduler: SessionReminderScheduling {
     private(set) var scheduled: [SessionReminder] = []
+    private(set) var reminderRoutes: [SessionNotificationRoute] = []
     private(set) var runtimeNotifications: [SessionRuntimeNotification] = []
+    private(set) var runtimeNotificationRoutes: [SessionNotificationRoute] = []
     private(set) var canceledSessionIDs: [SessionID] = []
+    var scheduleOutcome: SessionReminderScheduleOutcome
 
-    func schedule(_ reminder: SessionReminder) async throws {
-        scheduled.append(reminder)
+    init(scheduleOutcome: SessionReminderScheduleOutcome = .scheduled) {
+        self.scheduleOutcome = scheduleOutcome
     }
 
-    func notify(_ notification: SessionRuntimeNotification) async throws {
+    func schedule(
+        _ reminder: SessionReminder,
+        route: SessionNotificationRoute
+    ) async throws -> SessionReminderScheduleOutcome {
+        scheduled.append(reminder)
+        reminderRoutes.append(route)
+        return scheduleOutcome
+    }
+
+    func notify(
+        _ notification: SessionRuntimeNotification,
+        route: SessionNotificationRoute
+    ) async throws {
         runtimeNotifications.append(notification)
+        runtimeNotificationRoutes.append(route)
     }
 
     func cancel(sessionID: SessionID) {
@@ -11144,7 +13360,69 @@ private final class FakeSessionReminderScheduler: SessionReminderScheduling {
     }
 }
 
+private struct ThreadSearchGateRequest: Hashable {
+    let query: String
+    let cursor: String?
+}
+
+private final class ThreadSearchResponseGate {
+    private let lock = NSLock()
+    private var requestsStorage: [ThreadSearchGateRequest] = []
+    private var continuations: [ThreadSearchGateRequest: [CheckedContinuation<ThreadSearchPage, Error>]] = [:]
+
+    var queries: [String] {
+        lock.withLock { requestsStorage.map(\.query) }
+    }
+
+    var requests: [ThreadSearchGateRequest] {
+        lock.withLock { requestsStorage }
+    }
+
+    func search(query: String, cursor: String? = nil) async throws -> ThreadSearchPage {
+        let request = ThreadSearchGateRequest(query: query, cursor: cursor)
+        return try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                requestsStorage.append(request)
+                continuations[request, default: []].append(continuation)
+            }
+        }
+    }
+
+    func resolve(query: String, cursor: String? = nil, page: ThreadSearchPage) {
+        let continuation = takeContinuation(query: query, cursor: cursor)
+        continuation?.resume(returning: page)
+    }
+
+    func fail(query: String, cursor: String? = nil, error: Error) {
+        let continuation = takeContinuation(query: query, cursor: cursor)
+        continuation?.resume(throwing: error)
+    }
+
+    private func takeContinuation(
+        query: String,
+        cursor: String?
+    ) -> CheckedContinuation<ThreadSearchPage, Error>? {
+        let request = ThreadSearchGateRequest(query: query, cursor: cursor)
+        return lock.withLock {
+            guard var pending = continuations[request], !pending.isEmpty else {
+                return nil
+            }
+            let continuation = pending.removeFirst()
+            if pending.isEmpty {
+                continuations.removeValue(forKey: request)
+            } else {
+                continuations[request] = pending
+            }
+            return continuation
+        }
+    }
+}
+
 private final class MockSessionStoreClient: SessionStoreAPIClient {
+    private let requestLogLock = NSLock()
+    private var requestedProjectIDsStorage: [String?] = []
+    private var requestedWorkspaceIDsStorage: [String] = []
+
     let projectsResult: [AgentProject]
     let sessionsResult: [AgentSession]
     let projectSessions: [String: [AgentSession]]
@@ -11168,6 +13446,8 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     let worktreeListResult: Result<[WorktreeListItem], Error>?
     let worktreeDeleteResults: [String: Result<WorktreeDeleteResponse, Error>]
     let worktreePruneResult: Result<WorktreePruneResponse, Error>?
+    let worktreeCleanupPreviewResult: Result<WorktreeCleanupResponse, Error>?
+    let worktreeCleanupExecutionResult: Result<WorktreeCleanupResponse, Error>?
     let directoryListResults: [String: Result<DirectoryListResponse, Error>]
     let fileReadResults: [String: Result<FileReadResponse, Error>]
     let historyMediaResults: [String: Result<FileReadResponse, Error>]
@@ -11183,14 +13463,30 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     let messagesError: Error?
     let modelOptionsResult: [CodexAppServerModelOption]
     let modelOptionsError: Error?
-    var requestedProjectIDs: [String?] = []
-    var requestedWorkspaceIDs: [String] = []
+    let threadSearchHandler: ((String, String?, Int?) async throws -> ThreadSearchPage)?
+    var requestedProjectIDs: [String?] {
+        requestLogLock.withLock { requestedProjectIDsStorage }
+    }
+    var requestedWorkspaceIDs: [String] {
+        requestLogLock.withLock { requestedWorkspaceIDsStorage }
+    }
+    var requestedThreadSearchQueries: [String] {
+        requestLogLock.withLock { requestedThreadSearchQueriesStorage }
+    }
+    private var requestedThreadSearchQueriesStorage: [String] = []
+    var requestedThreadSearchCursors: [String?] {
+        requestLogLock.withLock { requestedThreadSearchCursorsStorage }
+    }
+    private var requestedThreadSearchCursorsStorage: [String?] = []
     var requestedCapabilityPaths: [String?] = []
     var requestedResolvePaths: [String] = []
     var requestedWorktreeCreates: [RequestedWorktreeCreate] = []
     var requestedWorktreeBranchPaths: [String] = []
     var requestedWorktreeDeletes: [RequestedWorktreeDelete] = []
     private(set) var worktreePruneCallCount = 0
+    private(set) var worktreeCleanupPreviewCallCount = 0
+    private(set) var requestedWorktreeCleanupPaths: [[String]] = []
+    private(set) var requestedWorktreeCleanupPlanIDs: [String] = []
     var requestedDirectoryPaths: [String] = []
     var requestedFileReadPaths: [String] = []
     var requestedHistoryMediaIDs: [String] = []
@@ -11208,6 +13504,7 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     var requestedSessionArchives: [RequestedSessionArchive] = []
     var requestedSessionForks: [RequestedSessionFork] = []
     var requestedThreadGoalSets: [RequestedThreadGoalSet] = []
+    var requestedSessionReviews: [RequestedSessionReview] = []
     var requestedMessageSessionIDs: [String] = []
     var requestedMessageCursors: [String?] = []
     var createPayloads: [CreateSessionRequest] = []
@@ -11238,6 +13535,8 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         worktreeListResult: Result<[WorktreeListItem], Error>? = nil,
         worktreeDeleteResults: [String: Result<WorktreeDeleteResponse, Error>] = [:],
         worktreePruneResult: Result<WorktreePruneResponse, Error>? = nil,
+        worktreeCleanupPreviewResult: Result<WorktreeCleanupResponse, Error>? = nil,
+        worktreeCleanupExecutionResult: Result<WorktreeCleanupResponse, Error>? = nil,
         directoryListResults: [String: Result<DirectoryListResponse, Error>] = [:],
         fileReadResults: [String: Result<FileReadResponse, Error>] = [:],
         historyMediaResults: [String: Result<FileReadResponse, Error>] = [:],
@@ -11252,7 +13551,8 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         gitPullRequestStatusResults: [String: Result<GitPullRequestStatusResponse, Error>] = [:],
         messagesError: Error? = nil,
         modelOptions: [CodexAppServerModelOption] = [],
-        modelOptionsError: Error? = nil
+        modelOptionsError: Error? = nil,
+        threadSearchHandler: ((String, String?, Int?) async throws -> ThreadSearchPage)? = nil
     ) {
         self.projectsResult = projects
         self.sessionsResult = sessions
@@ -11280,6 +13580,8 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         self.worktreeListResult = worktreeListResult
         self.worktreeDeleteResults = worktreeDeleteResults
         self.worktreePruneResult = worktreePruneResult
+        self.worktreeCleanupPreviewResult = worktreeCleanupPreviewResult
+        self.worktreeCleanupExecutionResult = worktreeCleanupExecutionResult
         self.directoryListResults = directoryListResults
         self.fileReadResults = fileReadResults
         self.historyMediaResults = historyMediaResults
@@ -11295,6 +13597,7 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         self.messagesError = messagesError
         self.modelOptionsResult = modelOptions
         self.modelOptionsError = modelOptionsError
+        self.threadSearchHandler = threadSearchHandler
     }
 
     func projects() async throws -> [AgentProject] {
@@ -11385,6 +13688,31 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
         worktreePruneCallCount += 1
         switch worktreePruneResult {
+        case .success(let response):
+            return response
+        case .failure(let error):
+            throw error
+        case .none:
+            throw MockError.unimplemented
+        }
+    }
+
+    func previewWorktreeCleanup() async throws -> WorktreeCleanupResponse {
+        worktreeCleanupPreviewCallCount += 1
+        switch worktreeCleanupPreviewResult {
+        case .success(let response):
+            return response
+        case .failure(let error):
+            throw error
+        case .none:
+            throw MockError.unimplemented
+        }
+    }
+
+    func executeWorktreeCleanup(paths: [String], planID: String) async throws -> WorktreeCleanupResponse {
+        requestedWorktreeCleanupPaths.append(paths)
+        requestedWorktreeCleanupPlanIDs.append(planID)
+        switch worktreeCleanupExecutionResult {
         case .success(let response):
             return response
         case .failure(let error):
@@ -11540,7 +13868,11 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     }
 
     func sessionsPage(workspace: AgentWorkspace, cursor: String?, limit: Int?) async throws -> SessionsPage {
-        requestedWorkspaceIDs.append(workspace.id)
+        // 最近会话会并发读取多个工作区；测试请求日志也必须保证线程安全，
+        // 否则并发 append 会让 Array 内存损坏并掩盖真实业务结果。
+        requestLogLock.withLock {
+            requestedWorkspaceIDsStorage.append(workspace.id)
+        }
         if let error = workspaceSessionsError[workspace.id] {
             throw error
         }
@@ -11555,7 +13887,9 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     }
 
     func sessions(projectID: String?, cursor: String?, limit: Int?) async throws -> [AgentSession] {
-        requestedProjectIDs.append(projectID)
+        requestLogLock.withLock {
+            requestedProjectIDsStorage.append(projectID)
+        }
         if let projectID, let sessions = projectSessions[projectID] {
             return sessions
         }
@@ -11563,7 +13897,9 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
     }
 
     func sessionsPage(projectID: String?, cursor: String?, limit: Int?) async throws -> SessionsPage {
-        requestedProjectIDs.append(projectID)
+        requestLogLock.withLock {
+            requestedProjectIDsStorage.append(projectID)
+        }
         if let cursor, let page = cursorPages[cursor] {
             return page
         }
@@ -11574,6 +13910,17 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
             return SessionsPage(sessions: sessions)
         }
         return SessionsPage(sessions: sessionsResult)
+    }
+
+    func searchSessions(query: String, cursor: String?, limit: Int?) async throws -> ThreadSearchPage {
+        requestLogLock.withLock {
+            requestedThreadSearchQueriesStorage.append(query)
+            requestedThreadSearchCursorsStorage.append(cursor)
+        }
+        guard let threadSearchHandler else {
+            throw MockError.unimplemented
+        }
+        return try await threadSearchHandler(query, cursor, limit)
     }
 
     func session(id: String, afterSeq: EventSequence?) async throws -> SessionResponse {
@@ -11634,6 +13981,19 @@ private final class MockSessionStoreClient: SessionStoreAPIClient {
         case .none:
             throw MockError.unimplemented
         }
+    }
+
+    func startReview(
+        threadID: String,
+        target: CodexAppServerReviewTarget,
+        delivery: CodexAppServerReviewDelivery?
+    ) async throws -> CodexAppServerReviewStartResult {
+        requestedSessionReviews.append(RequestedSessionReview(
+            threadID: threadID,
+            target: target,
+            delivery: delivery
+        ))
+        return CodexAppServerReviewStartResult(reviewThreadID: threadID, turnID: "turn-review")
     }
 
     func forkSession(threadID: String, workspace: AgentWorkspace) async throws -> AgentSession {
@@ -12261,6 +14621,20 @@ private func waitForWebSocketStatus(_ expected: WebSocketStatus, store: SessionS
 }
 
 @MainActor
+private func waitForNetworkReachability(
+    _ expected: NetworkReachabilityStatus,
+    store: SessionStore
+) async throws {
+    for _ in 0..<80 {
+        if store.networkReachabilityStatus == expected {
+            return
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("网络状态未变为 \(expected)，当前为 \(store.networkReachabilityStatus)")
+}
+
+@MainActor
 private func waitForStatus(
     _ expected: WebSocketStatus,
     in statuses: () -> [WebSocketStatus]
@@ -12347,6 +14721,57 @@ private func waitForSelectedThreadGoalStatus(_ expected: ThreadGoalStatus, store
 
 @MainActor
 extension ConversationDataFlowTests {
+    func testDirectRuntimeThreadSearchParsesSnippetAndCursors() async throws {
+        let project = AgentProject(id: "proj_search_runtime", name: "Search Runtime", path: "/tmp/search-runtime")
+        let transport = FakeCodexAppServerTransport()
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { transport },
+            configProvider: {
+                makeDirectAppServerConfig(
+                    project: project,
+                    allowedMethods: ["initialize", "initialized", "thread/search"]
+                )
+            }
+        )
+
+        let searchTask = Task {
+            try await runtime.searchSessions(query: "  历史正文  ", cursor: "cursor-in", limit: 25)
+        }
+        let initialize = try await waitForFakeAppServerRequest(transport, method: "initialize")
+        assertInitializeEnablesExperimentalAPI(initialize)
+        transportResponse(transport, id: initialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+
+        let request = try await waitForFakeAppServerRequest(transport, method: "thread/search", after: 1)
+        let params = try XCTUnwrap(request.params?.objectValue)
+        XCTAssertEqual(params["searchTerm"]?.stringValue, "历史正文")
+        XCTAssertEqual(params["cursor"]?.stringValue, "cursor-in")
+        XCTAssertEqual(params["limit"]?.intValue, 25)
+        XCTAssertNil(params["cwd"])
+
+        let authorizedManagedWorktree = appServerThreadJSON(
+            id: "thr_search_runtime",
+            cwd: "/tmp/authorized-managed-worktree",
+            source: "cli",
+            updatedAt: 1_780_491_100
+        )
+        transportResponse(
+            transport,
+            id: request.id,
+            result: #"{"data":[{"thread":\#(authorizedManagedWorktree),"snippet":"命中的历史正文片段"}],"nextCursor":"cursor-next","backwardsCursor":"cursor-back"}"#
+        )
+
+        let page = try await searchTask.value
+        let result = try XCTUnwrap(page.results.first)
+        XCTAssertEqual(page.nextCursor, "cursor-next")
+        XCTAssertEqual(page.backwardsCursor, "cursor-back")
+        XCTAssertEqual(result.session.id, "thr_search_runtime")
+        XCTAssertEqual(result.session.dir, "/tmp/authorized-managed-worktree")
+        XCTAssertEqual(result.session.preview, "thr_search_runtime", "搜索 snippet 不能覆盖 canonical preview")
+        XCTAssertEqual(result.snippet, "命中的历史正文片段")
+    }
+
     func testCodexAppServerConnectionMatchesResponsesByRequestID() async throws {
         let transport = FakeCodexAppServerTransport()
         let connection = CodexAppServerConnection(transport: transport, requestTimeout: 2)
@@ -15852,6 +18277,40 @@ extension ConversationDataFlowTests {
 }
 
 // 冷启动重试用的客户端：前 N 次 projects() 抛错模拟隧道未就绪，之后成功返回。
+private final class CredentialRejectingBootstrapClient: SessionStoreAPIClient {
+    private let status: Int
+    private(set) var projectsCallCount = 0
+
+    init(status: Int) {
+        self.status = status
+    }
+
+    func projects() async throws -> [AgentProject] {
+        projectsCallCount += 1
+        throw AgentAPIError.credentialsInvalid(status: status)
+    }
+
+    func sessions(projectID: String?, cursor: String?, limit: Int?) async throws -> [AgentSession] {
+        throw MockError.unimplemented
+    }
+
+    func session(id: String, afterSeq: EventSequence?) async throws -> SessionResponse {
+        throw MockError.unimplemented
+    }
+
+    func createSession(_ payload: CreateSessionRequest) async throws -> CreateSessionResponse {
+        throw MockError.unimplemented
+    }
+
+    func stopSession(id: String) async throws {
+        throw MockError.unimplemented
+    }
+
+    func messages(sessionID: String, before: String?, limit: Int?) async throws -> [CodexHistoryMessage] {
+        []
+    }
+}
+
 private final class FlakyBootstrapClient: SessionStoreAPIClient {
     private let failuresBeforeSuccess: Int
     private let sessionFailuresBeforeSuccess: Int
@@ -15917,6 +18376,28 @@ private enum FakeCodexAppServerTransportError: LocalizedError {
     var errorDescription: String? {
         "fake app-server receive failed"
     }
+}
+
+private final class CredentialRejectingCodexAppServerTransport: CodexAppServerTransport {
+    private let status: Int
+
+    init(status: Int) {
+        self.status = status
+    }
+
+    func connect(url: URL, token: String) async throws {
+        throw AgentAPIError.credentialsInvalid(status: status)
+    }
+
+    func send(_ text: String) async throws {
+        throw AgentAPIError.credentialsInvalid(status: status)
+    }
+
+    func receive() async throws -> String? {
+        throw AgentAPIError.credentialsInvalid(status: status)
+    }
+
+    func close() async {}
 }
 
 private func occurrenceCount(of needle: String, in haystack: String) -> Int {
@@ -16167,6 +18648,21 @@ private func waitForRuntimeConnectionToBecomeUnavailable(
     XCTFail("Timed out waiting for app-server runtime connection to become unavailable", file: file, line: line)
 }
 
+private func waitForThreadSearchQueries(
+    _ gate: ThreadSearchResponseGate,
+    count: Int,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async throws {
+    for _ in 0..<100 {
+        if gate.queries.count >= count {
+            return
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("Timed out waiting for \(count) thread/search requests", file: file, line: line)
+}
+
 private func makeDirectAppServerConfig(
     project: AgentProject,
     gatewayAvailable: Bool = true,
@@ -16329,8 +18825,158 @@ private func sessionListPolicyError(retryAfterMs: Int) -> Error {
     ))
 }
 
+private struct ConnectedProfileFixture {
+    let suiteName: String
+    let defaults: UserDefaults
+    let appStore: AppStore
+    let store: SessionStore
+    let session: AgentSession
+    let socket: MockWebSocketClient
+}
+
+private actor PreparedConnectionGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var didStart = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            didStart = true
+            let waiters = startWaiters
+            startWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    func waitUntilStarted() async {
+        if didStart { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+@MainActor
+private func makeConnectedProfileFixture(testName: String) async throws -> ConnectedProfileFixture {
+    let suiteName = "ConversationDataFlowTests.ProfileState.\(testName).\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defaults.removePersistentDomain(forName: suiteName)
+    let profiles = [
+        ConnectionProfile(id: "mac-a", displayName: "Mac A", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+        ConnectionProfile(id: "mac-b", displayName: "Mac B", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+    ]
+    defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+    defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+    defaults.set(profiles[0].endpoint, forKey: "agentd.endpoint")
+    let keychain = TestKeychainOperations()
+    keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+    keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+    let appStore = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+    appStore.connectionStatus = .connected("旧 Mac")
+    let project = makeProject(id: "proj_profile_state_\(testName)")
+    let session = makeSession(
+        id: "sess_profile_state_\(testName)",
+        projectID: project.id,
+        title: "旧 Mac 会话",
+        status: "running",
+        source: "codex"
+    )
+    let client = MockSessionStoreClient(projects: [project], sessions: [session])
+    var sockets: [MockWebSocketClient] = []
+    let store = SessionStore(
+        appStore: appStore,
+        conversationStore: ConversationStore(),
+        logStore: LogStore(),
+        clientFactory: { client },
+        webSocketFactory: {
+            let socket = MockWebSocketClient()
+            sockets.append(socket)
+            return socket
+        }
+    )
+    await store.refreshAll(autoAttach: false)
+    store.takeOverSession(session)
+    await store.selectSession(session)
+    let socket = try XCTUnwrap(sockets.first)
+    socket.emitStatus(.connected)
+    try await waitForWebSocketStatus(.connected, store: store)
+    return ConnectedProfileFixture(
+        suiteName: suiteName,
+        defaults: defaults,
+        appStore: appStore,
+        store: store,
+        session: session,
+        socket: socket
+    )
+}
+
 private func makeProject(id: String) -> AgentProject {
     AgentProject(id: id, name: id, path: "/tmp/\(id)")
+}
+
+private func makeWorktreeCleanupItem(
+    project: AgentProject,
+    workspaceID: String,
+    name: String,
+    eligible: Bool,
+    blockers: [WorktreeCleanupBlocker] = []
+) -> WorktreeCleanupItem {
+    let path = "/tmp/mimi-worktrees/\(project.id)/\(name)"
+    let workspace = AgentWorkspace(
+        id: workspaceID,
+        name: name,
+        path: path,
+        rootProjectID: project.id,
+        rootProjectName: project.name,
+        rootProjectPath: project.path
+    )
+    return WorktreeCleanupItem(
+        workspace: workspace,
+        worktree: WorktreeDescriptor(
+            path: path,
+            repositoryPath: project.path,
+            base: "main",
+            branch: "mimi/\(name)",
+            gitState: eligible ? "clean" : "dirty",
+            rootProjectID: project.id,
+            rootProjectName: project.name,
+            rootProjectPath: project.path
+        ),
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        lastUsedAt: Date(timeIntervalSince1970: 1_700_086_400),
+        eligible: eligible,
+        blockers: blockers
+    )
+}
+
+private func makeWorktreeCleanupResponse(
+    items: [WorktreeCleanupItem],
+    candidatePaths: [String],
+    deletedPaths: [String] = [],
+    failedPath: String? = nil,
+    error: String? = nil
+) -> WorktreeCleanupResponse {
+    WorktreeCleanupResponse(
+        dryRun: deletedPaths.isEmpty && failedPath == nil && error == nil,
+        planID: "wtc_test_plan",
+        policy: WorktreeCleanupPolicy(
+            autoDelete: false,
+            candidateAfterDays: 30,
+            keepLatestPerProject: 3
+        ),
+        generatedAt: Date(timeIntervalSince1970: 1_800_000_000),
+        worktrees: items,
+        candidatePaths: candidatePaths,
+        deletedPaths: deletedPaths,
+        failedPath: failedPath,
+        error: error
+    )
 }
 
 private func makeChildWorkspace(id: String, name: String, root: AgentProject) -> AgentWorkspace {

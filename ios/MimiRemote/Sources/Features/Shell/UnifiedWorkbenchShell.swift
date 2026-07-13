@@ -15,6 +15,7 @@ private enum AppSheetDestination: String, Identifiable {
 
 /// iPad 和 iPhone 共用同一套导航状态；iPad 展开为单侧栏，窄屏由系统自动折叠成 push 导航。
 struct UnifiedWorkbenchShell: View {
+    @EnvironmentObject private var appStore: AppStore
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
@@ -40,6 +41,13 @@ struct UnifiedWorkbenchShell: View {
             .navigationSplitViewStyle(.balanced)
         }
         .background(tokens.background.ignoresSafeArea())
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if appStore.requiresRePairing {
+                credentialsInvalidBanner(tokens: tokens)
+            } else if sessionStore.isNetworkUnavailable {
+                networkUnavailableBanner(tokens: tokens)
+            }
+        }
         .sheet(item: $presentedSheet) { sheet in
             switch sheet {
             case .newSession:
@@ -71,6 +79,68 @@ struct UnifiedWorkbenchShell: View {
             guard let sessionID else { return }
             selection = .session(sessionID)
         }
+    }
+
+    private func credentialsInvalidBanner(tokens: ThemeTokens) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "lock.trianglebadge.exclamationmark")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(tokens.warning)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("访问码已失效")
+                    .font(themeStore.uiFont(.subheadline, weight: .semibold))
+                    .foregroundStyle(tokens.primaryText)
+                Text("已停止自动重试；现有会话仍保留，请重新扫描 Mac 上的配对二维码。")
+                    .font(themeStore.uiFont(.caption))
+                    .foregroundStyle(tokens.secondaryText)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("重新配对") {
+                presentedSheet = .settings
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .accessibilityIdentifier("connection.repairPairing")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(tokens.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(tokens.border)
+                .frame(height: 1)
+        }
+    }
+
+    private func networkUnavailableBanner(tokens: ThemeTokens) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(tokens.warning)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("网络不可用")
+                    .font(themeStore.uiFont(.subheadline, weight: .semibold))
+                    .foregroundStyle(tokens.primaryText)
+                Text("已暂停同步和重连；网络恢复后会自动重新连接，现有会话和排队消息不会清空。")
+                    .font(themeStore.uiFont(.caption))
+                    .foregroundStyle(tokens.secondaryText)
+            }
+
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(tokens.elevatedSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(tokens.border)
+                .frame(height: 1)
+        }
+        .accessibilityIdentifier("connection.networkUnavailable")
     }
 
     private func sidebar(tokens: ThemeTokens) -> some View {
@@ -360,14 +430,24 @@ struct UnifiedWorkbenchShell: View {
     }
 
     private var connectionSubtitle: String {
-        sessionStore.webSocketStatus == .connected ? "Mac 已连接" : "远程开发工作台"
+        if appStore.requiresRePairing {
+            return "需要重新配对"
+        }
+        if sessionStore.isNetworkUnavailable {
+            return "网络不可用，等待自动重连"
+        }
+        return sessionStore.webSocketStatus == .connected ? "Mac 已连接" : "远程开发工作台"
     }
 
     private func connectionTone(tokens: ThemeTokens) -> Color {
+        if sessionStore.isNetworkUnavailable, !appStore.requiresRePairing {
+            return tokens.warning
+        }
         switch sessionStore.webSocketStatus {
         case .connected: return tokens.success
         case .connecting: return tokens.warning
         case .failed: return .red
+        case .terminated: return .red
         case .disconnected: return tokens.tertiaryText
         }
     }

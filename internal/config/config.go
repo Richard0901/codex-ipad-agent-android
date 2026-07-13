@@ -99,6 +99,12 @@ func DefaultPath() string {
 	if v := strings.TrimSpace(os.Getenv("AGENTD_CONFIG")); v != "" {
 		return v
 	}
+	return PlatformDefaultPath()
+}
+
+// PlatformDefaultPath 返回 Homebrew service 固定读取的平台默认配置路径。
+// 它故意忽略 AGENTD_CONFIG，避免后台命令拿自定义配置做就绪检查，实际 launchd 却启动默认配置。
+func PlatformDefaultPath() string {
 	dir, err := UserConfigDir()
 	if err != nil {
 		return "config.json"
@@ -184,7 +190,7 @@ func defaults() Config {
 			Listen:    defaultAppServerListen,
 		},
 		Voice: VoiceConfig{
-			TranscriptionProvider:     "auto",
+			TranscriptionProvider:     "openai",
 			TranscriptionModel:        "gpt-4o-mini-transcribe",
 			TranscriptionBaseURL:      "https://api.openai.com/v1",
 			CodexTranscriptionBaseURL: "https://chatgpt.com/backend-api",

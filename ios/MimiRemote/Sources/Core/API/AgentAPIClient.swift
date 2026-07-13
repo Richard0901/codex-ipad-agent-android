@@ -1,31 +1,251 @@
 import Foundation
 
-enum AgentAPIError: LocalizedError {
+protocol CredentialInvalidatingError {
+    var invalidatesCredentials: Bool { get }
+}
+
+func isCredentialInvalidatingError(_ error: Error) -> Bool {
+    (error as? any CredentialInvalidatingError)?.invalidatesCredentials == true
+}
+
+enum AgentAPIError: LocalizedError, CredentialInvalidatingError {
     case invalidEndpoint
+    case insecurePublicHTTPEndpoint(host: String)
     case invalidResponse
+    case credentialsInvalid(status: Int)
     case server(status: Int, message: String)
     case decoding(Error)
+
+    var invalidatesCredentials: Bool {
+        switch self {
+        case .credentialsInvalid:
+            return true
+        case .server(let status, let message):
+            return Self.isCredentialRejection(status: status, message: message, authenticationChallenge: nil)
+        case .invalidEndpoint, .insecurePublicHTTPEndpoint, .invalidResponse, .decoding:
+            return false
+        }
+    }
 
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint:
-            return "Endpoint 无效"
+            return "连接地址无效。请输入 Mac 助手地址，例如 http://100.64.0.1:8787；地址中不要包含路径、账号或查询参数。"
+        case .insecurePublicHTTPEndpoint(let host):
+            return "已阻止公网 HTTP 地址 \(host)。为避免访问码和 Codex 内容被明文传输，请改用 HTTPS，或在 Mac 运行 agentd pair 后扫描 Tailscale 二维码。"
         case .invalidResponse:
             return "agentd 返回了无效响应"
+        case .credentialsInvalid:
+            return ConnectionTerminationStatus.credentialsInvalid.message
         case .server(let status, let message):
             return "HTTP \(status)：\(message)"
         case .decoding(let error):
             return "解析响应失败：\(error.localizedDescription)"
         }
     }
+
+    static func isCredentialRejection(
+        status: Int,
+        message: String,
+        authenticationChallenge: String?
+    ) -> Bool {
+        if status == 401 {
+            return true
+        }
+        guard status == 403 else {
+            return false
+        }
+        if authenticationChallenge?.lowercased().contains("bearer") == true {
+            return true
+        }
+        // agentd 自身的目录、操作审批也会返回 403，不能把这些业务拒绝误报为访问码失效。
+        // 这里只接受反向代理和鉴权层常见的通用认证文本。
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "forbidden"
+            || normalized == "unauthorized"
+            || normalized.contains("invalid token")
+            || normalized.contains("invalid bearer")
+            || normalized.contains("authentication required")
+            || normalized.contains("credential")
+            || normalized.contains("访问码失效")
+            || normalized.contains("认证失败")
+            || normalized.contains("鉴权失败")
+    }
+}
+
+struct EndpointTransportAssessment: Equatable {
+    enum Status: Equatable {
+        case empty
+        case invalid
+        case allowedPrivateHTTP
+        case allowedHTTPS
+        case blockedPublicHTTP
+    }
+
+    let status: Status
+    let host: String?
+    let normalizedEndpoint: String?
+
+    var isAllowed: Bool {
+        status == .allowedPrivateHTTP || status == .allowedHTTPS
+    }
+
+    var title: String {
+        switch status {
+        case .empty:
+            return "等待输入连接地址"
+        case .invalid:
+            return "连接地址格式无效"
+        case .allowedPrivateHTTP:
+            return "私网 HTTP 地址可连接"
+        case .allowedHTTPS:
+            return "HTTPS 地址可连接"
+        case .blockedPublicHTTP:
+            return "已阻止公网 HTTP"
+        }
+    }
+
+    var guidance: String {
+        switch status {
+        case .empty:
+            return "推荐扫描 Mac 上 agentd pair 生成的 Tailscale 二维码。"
+        case .invalid:
+            return "请输入主机和端口，例如 http://100.64.0.1:8787；不要附加路径、账号或查询参数。"
+        case .allowedPrivateHTTP:
+            return "HTTP 仅允许 loopback、Tailscale、局域网私有地址和 .local 主机；不要把 agentd 端口映射到公网。"
+        case .allowedHTTPS:
+            return "公网域名只允许通过 HTTPS 连接。"
+        case .blockedPublicHTTP:
+            let displayHost = host.map { "（\($0)）" } ?? ""
+            return "公网 HTTP\(displayHost) 会明文传输访问码和 Codex 内容。请改用 HTTPS，或在 Mac 运行 agentd pair 后扫描 Tailscale 二维码。"
+        }
+    }
+}
+
+enum EndpointTransportPolicy {
+    static func assess(_ raw: String) -> EndpointTransportAssessment {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return EndpointTransportAssessment(status: .empty, host: nil, normalizedEndpoint: nil)
+        }
+
+        let candidate = trimmed.contains("://") ? trimmed : "http://" + trimmed
+        guard var components = URLComponents(string: candidate),
+              let rawScheme = components.scheme,
+              let rawHost = components.host,
+              !rawHost.isEmpty
+        else {
+            return EndpointTransportAssessment(status: .invalid, host: nil, normalizedEndpoint: nil)
+        }
+
+        let scheme = rawScheme.lowercased()
+        guard scheme == "http" || scheme == "https" else {
+            return EndpointTransportAssessment(status: .invalid, host: rawHost, normalizedEndpoint: nil)
+        }
+        components.scheme = scheme
+        if components.path == "/" {
+            components.path = ""
+        }
+        guard components.path.isEmpty,
+              components.query == nil,
+              components.fragment == nil,
+              components.user == nil,
+              components.password == nil,
+              let url = components.url
+        else {
+            return EndpointTransportAssessment(status: .invalid, host: rawHost, normalizedEndpoint: nil)
+        }
+
+        let normalizedEndpoint = url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if scheme == "https" {
+            return EndpointTransportAssessment(
+                status: .allowedHTTPS,
+                host: normalizedHost(rawHost),
+                normalizedEndpoint: normalizedEndpoint
+            )
+        }
+        guard isAllowedInsecureHost(rawHost) else {
+            return EndpointTransportAssessment(
+                status: .blockedPublicHTTP,
+                host: normalizedHost(rawHost),
+                normalizedEndpoint: nil
+            )
+        }
+        return EndpointTransportAssessment(
+            status: .allowedPrivateHTTP,
+            host: normalizedHost(rawHost),
+            normalizedEndpoint: normalizedEndpoint
+        )
+    }
+
+    static func validatedEndpoint(_ raw: String) throws -> String {
+        let assessment = assess(raw)
+        switch assessment.status {
+        case .allowedPrivateHTTP, .allowedHTTPS:
+            guard let endpoint = assessment.normalizedEndpoint else {
+                throw AgentAPIError.invalidEndpoint
+            }
+            return endpoint
+        case .blockedPublicHTTP:
+            throw AgentAPIError.insecurePublicHTTPEndpoint(host: assessment.host ?? "未知主机")
+        case .empty, .invalid:
+            throw AgentAPIError.invalidEndpoint
+        }
+    }
+
+    static func validatedURL(_ raw: String) throws -> URL {
+        let endpoint = try validatedEndpoint(raw)
+        guard let url = URL(string: endpoint) else {
+            throw AgentAPIError.invalidEndpoint
+        }
+        return url
+    }
+
+    private static func isAllowedInsecureHost(_ host: String) -> Bool {
+        let value = normalizedHost(host)
+        guard !value.isEmpty else {
+            return false
+        }
+        if value == "localhost" || value == "::1" || value.hasSuffix(".local") || value.hasSuffix(".ts.net") {
+            return true
+        }
+        if value.contains(":") && (value.hasPrefix("fe80:") || value.hasPrefix("fc") || value.hasPrefix("fd")) {
+            return true
+        }
+        let parts = value.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4, parts.allSatisfy({ 0...255 ~= $0 }) else {
+            return false
+        }
+        switch parts[0] {
+        case 10, 127:
+            return true
+        case 100:
+            return 64...127 ~= parts[1]
+        case 169:
+            return parts[1] == 254
+        case 172:
+            return 16...31 ~= parts[1]
+        case 192:
+            return parts[1] == 168
+        default:
+            return false
+        }
+    }
+
+    private static func normalizedHost(_ host: String) -> String {
+        host.trimmingCharacters(in: CharacterSet(charactersIn: "[]").union(.whitespacesAndNewlines)).lowercased()
+    }
 }
 
 struct AgentAPIClient {
     let endpoint: String
     let token: String
+    private let session: URLSession
 
-    private var baseURL: URL? {
-        URL(string: Self.normalizedEndpoint(endpoint))
+    init(endpoint: String, token: String, session: URLSession = .shared) {
+        self.endpoint = endpoint
+        self.token = token
+        self.session = session
     }
 
     func health() async throws -> HealthResponse {
@@ -92,6 +312,17 @@ struct AgentAPIClient {
 
     func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
         try await request(path: "/api/worktrees/prune", method: "POST", body: Optional<Data>.none)
+    }
+
+    func previewWorktreeCleanup() async throws -> WorktreeCleanupResponse {
+        let body = try JSONEncoder().encode(WorktreeCleanupRequest.preview)
+        return try await request(path: "/api/worktrees/cleanup", method: "POST", body: body)
+    }
+
+    func executeWorktreeCleanup(paths: [String], planID: String) async throws -> WorktreeCleanupResponse {
+        // 执行请求固定带 dry_run=false + confirm=true，不提供 force 或绕过 blocker 的参数。
+        let body = try JSONEncoder().encode(WorktreeCleanupRequest.confirmed(paths: paths, planID: planID))
+        return try await request(path: "/api/worktrees/cleanup", method: "POST", body: body)
     }
 
     func listDirectories(path: String) async throws -> DirectoryListResponse {
@@ -179,9 +410,8 @@ struct AgentAPIClient {
         body: Data?,
         timeout: TimeInterval = 20
     ) async throws -> T {
-        guard let baseURL else {
-            throw AgentAPIError.invalidEndpoint
-        }
+        // ATS 为兼容 Tailscale 裸 IP 需要允许 HTTP；每次真正发请求前仍由应用层策略重新校验，避免未来调用点绕过设置页。
+        let baseURL = try EndpointTransportPolicy.validatedURL(endpoint)
         guard let url = makeURL(baseURL: baseURL, path: path) else {
             throw AgentAPIError.invalidEndpoint
         }
@@ -196,12 +426,20 @@ struct AgentAPIClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw AgentAPIError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw AgentAPIError.server(status: http.statusCode, message: decodeError(data))
+            let message = decodeError(data)
+            if AgentAPIError.isCredentialRejection(
+                status: http.statusCode,
+                message: message,
+                authenticationChallenge: http.value(forHTTPHeaderField: "WWW-Authenticate")
+            ) {
+                throw AgentAPIError.credentialsInvalid(status: http.statusCode)
+            }
+            throw AgentAPIError.server(status: http.statusCode, message: message)
         }
         if T.self == EmptyResponse.self {
             return EmptyResponse() as! T

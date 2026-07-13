@@ -129,10 +129,7 @@ func (r *Router) gitStatusHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var payload gitStatusRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 
@@ -172,10 +169,7 @@ func (r *Router) gitActionHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var payload gitActionRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 
@@ -232,10 +226,7 @@ func (r *Router) gitCommitHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var payload gitCommitRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 
@@ -280,10 +271,7 @@ func (r *Router) gitPushHandler(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var payload gitPushRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 
@@ -312,10 +300,7 @@ func (r *Router) gitPullRequestHandler(w http.ResponseWriter, req *http.Request)
 	}
 
 	var payload gitPullRequestRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 
@@ -344,10 +329,7 @@ func (r *Router) gitPullRequestStatusHandler(w http.ResponseWriter, req *http.Re
 	}
 
 	var payload gitPullRequestStatusRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 

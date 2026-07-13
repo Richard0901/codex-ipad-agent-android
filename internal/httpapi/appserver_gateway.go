@@ -24,19 +24,24 @@ import (
 )
 
 const (
-	appServerGatewayPath           = "/api/app-server/ws"
-	appServerPolicyErrorCode       = -32080
-	appServerGatewayWriteWindow    = 10 * time.Second
+	appServerGatewayPath        = "/api/app-server/ws"
+	appServerPolicyErrorCode    = -32080
+	appServerGatewayWriteWindow = 10 * time.Second
+	// 个人/小团队场景通常只有 1–2 个移动端。保留重连余量，同时限制一个泄漏的 token
+	// 无限建立“移动端 WS + 本机 upstream WS”连接，避免耗尽文件描述符和 goroutine。
+	appServerGatewayMaxConnections = 8
 	appServerGatewayThreadCacheMax = 2048
 	appServerGatewayThreadCacheTTL = 24 * time.Hour
 	defaultCodexReasoningEffort    = "xhigh"
 	appServerMediaRedactNotifyEnv  = "AGENTD_MEDIA_REDACT_NOTIFICATIONS"
 
-	appServerGatewayThreadTurnsDefaultLimit = 20
-	appServerGatewayThreadTurnsMaxLimit     = 50
-	appServerGatewayThreadTurnsFullMaxLimit = 20
-	appServerGatewayThreadListMaxLimit      = 50
-	appServerGatewayInitialTurnsMaxLimit    = 5
+	appServerGatewayThreadTurnsDefaultLimit  = 20
+	appServerGatewayThreadTurnsMaxLimit      = 50
+	appServerGatewayThreadTurnsFullMaxLimit  = 20
+	appServerGatewayThreadListMaxLimit       = 50
+	appServerGatewayThreadSearchMaxLimit     = appServerGatewayThreadListMaxLimit
+	appServerGatewayThreadSearchTermMaxBytes = 512
+	appServerGatewayInitialTurnsMaxLimit     = 5
 )
 
 var (
@@ -64,21 +69,39 @@ var appServerAllowedMethods = map[string]struct{}{
 	"initialize":              {},
 	"initialized":             {},
 	"thread/list":             {},
+	"thread/search":           {},
 	"thread/start":            {},
 	"thread/resume":           {},
 	"thread/fork":             {},
 	"thread/read":             {},
 	"thread/turns/list":       {},
+	"thread/name/set":         {},
+	"thread/compact/start":    {},
+	"thread/unsubscribe":      {},
 	"thread/archive":          {},
 	"thread/unarchive":        {},
 	"thread/goal/get":         {},
 	"thread/goal/set":         {},
 	"thread/goal/clear":       {},
+	"review/start":            {},
 	"turn/start":              {},
 	"turn/steer":              {},
 	"turn/interrupt":          {},
 	"model/list":              {},
 	"account/rateLimits/read": {},
+}
+
+// appServerAllowedServerRequestMethods 是反向 RPC 的显式能力边界。
+// app-server 新增 Server Request 时不能直接落到移动端；只有 iOS 已实现响应协议的方法才能加入这里，
+// 未知方法会由 gateway 立即回错，避免上游一直等待一个移动端永远不会发出的响应。
+var appServerAllowedServerRequestMethods = map[string]struct{}{
+	"applyPatchApproval":                    {},
+	"execCommandApproval":                   {},
+	"item/commandExecution/requestApproval": {},
+	"item/fileChange/requestApproval":       {},
+	"item/permissions/requestApproval":      {},
+	"item/tool/requestUserInput":            {},
+	"mcpServer/elicitation/request":         {},
 }
 
 var appServerClaudeAllowedMethods = map[string]struct{}{
@@ -149,6 +172,9 @@ type appServerChannelCapability struct {
 	Goals            bool `json:"goals"`
 	Archive          bool `json:"archive"`
 	Fork             bool `json:"fork"`
+	Rename           bool `json:"rename"`
+	Compact          bool `json:"compact"`
+	Review           bool `json:"review"`
 	RateLimits       bool `json:"rate_limits"`
 }
 
@@ -189,6 +215,7 @@ type appServerGatewayPolicy struct {
 	router    *Router
 	runtimeID string
 	mu        sync.Mutex
+	closed    bool
 
 	pendingThreads        map[string]appServerGatewayPendingThreadRequest
 	pendingClientRequests map[string]appServerGatewayPendingClientRequest
@@ -196,13 +223,18 @@ type appServerGatewayPolicy struct {
 	pendingHistory        map[string]appServerGatewayPendingHistoryRequest
 	historyBudgets        map[string]appServerGatewayHistoryBudget
 	allowedThreads        map[string]appServerGatewayAllowedThread
+	beforePendingRemember func()
+	beforeManagedComplete func()
 }
 
 type appServerGatewayPendingThreadRequest struct {
-	method    string
-	cwd       string
-	scopeID   string
-	createdAt time.Time
+	method              string
+	cwd                 string
+	scopeID             string
+	responseLimit       int64
+	responseLimitSet    bool
+	managedWorktreePath string
+	createdAt           time.Time
 }
 
 type appServerGatewayPendingClientRequest struct {
@@ -216,17 +248,18 @@ type appServerGatewayPendingServerRequest struct {
 }
 
 type appServerGatewayPendingHistoryRequest struct {
-	method         string
-	threadID       string
-	cwd            string
-	cursor         string
-	limit          int64
-	sortDirection  string
-	itemsView      string
-	useStateDBOnly string
-	includeTurns   bool
-	fingerprint    string
-	inflightOwner  string
+	method            string
+	threadID          string
+	cwd               string
+	cursor            string
+	limit             int64
+	sortDirection     string
+	itemsView         string
+	useStateDBOnly    string
+	filterFingerprint string
+	includeTurns      bool
+	fingerprint       string
+	inflightOwner     string
 	// redactOnly 请求（thread/resume）只做图片改写，不记预算、不做 cap 阻断：
 	// resume 是发消息前的绑定步骤，被阻断会直接废掉大线程的消息发送。
 	redactOnly bool
@@ -242,10 +275,11 @@ type appServerGatewayHistoryBudget struct {
 }
 
 type appServerGatewayValidatedParams struct {
-	cwd        string
-	hasCWD     bool
-	cwdScope   gatewayScope
-	cwdScopeOK bool
+	cwd                        string
+	hasCWD                     bool
+	cwdScope                   gatewayScope
+	cwdScopeOK                 bool
+	pendingManagedWorktreePath string
 }
 
 // gatewayScope 描述一个 cwd 的授权来源。命中 projects allowlist 时是项目作用域，
@@ -378,6 +412,9 @@ func (r *Router) appServerChannels(req *http.Request) []appServerChannel {
 			Goals:            true,
 			Archive:          true,
 			Fork:             true,
+			Rename:           true,
+			Compact:          true,
+			Review:           true,
 			RateLimits:       true,
 		},
 		Policy: appServerChannelPolicy{
@@ -460,30 +497,31 @@ func (r *Router) appServerGatewayWS(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) appServerCodexGatewayWS(w http.ResponseWriter, req *http.Request) {
+	// 必须先验证外侧请求确实要升级 WebSocket。普通 GET 或畸形握手不能触发本机
+	// app-server 拨号，否则一个有效的外侧 token 就能被用来批量消耗 upstream 连接。
+	if !websocket.IsWebSocketUpgrade(req) {
+		writeError(w, http.StatusBadRequest, "app-server gateway 需要 WebSocket Upgrade")
+		return
+	}
+	if !r.acquireCodexGatewaySlot() {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "Codex gateway 连接数已达上限，请稍后重试")
+		return
+	}
+	defer r.releaseCodexGatewaySlot()
+
 	upstreamURL, err := r.appServerUpstreamWebSocketURL()
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		// 底层错误可能带配置内容；外侧只返回可操作但不泄漏本机信息的固定文案。
+		writeError(w, http.StatusServiceUnavailable, "Codex app-server 上游配置不可用，请在电脑运行 agentd doctor")
 		return
 	}
 	upstreamHeaders, err := r.appServerUpstreamHeaders()
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		// token file 错误通常含电脑绝对路径，不能回显给移动端。
+		writeError(w, http.StatusServiceUnavailable, "Codex app-server 上游鉴权不可用，请在电脑运行 agentd doctor")
 		return
 	}
-
-	// 上游是 loopback app-server，就绪时握手是亚毫秒级；冷启动上游还没起来时，端口未监听会立刻
-	// ECONNREFUSED，只有“端口已开但还没接受握手”才会卡到这里。把超时收紧到 4s，让 iPad 端能更快
-	// 拿到 502 重试，而不是每次都白等 10s。
-	dialer := websocket.Dialer{HandshakeTimeout: 4 * time.Second}
-	dialStart := time.Now()
-	upstream, _, err := dialer.DialContext(req.Context(), upstreamURL, upstreamHeaders)
-	dialDuration := time.Since(dialStart)
-	if err != nil {
-		r.monitor.recordGatewayDialFailure(dialDuration)
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("连接 app-server gateway 上游失败：%v", err))
-		return
-	}
-	defer upstream.Close()
 
 	client, err := r.upgrader.Upgrade(w, req, nil)
 	if err != nil {
@@ -492,9 +530,57 @@ func (r *Router) appServerCodexGatewayWS(w http.ResponseWriter, req *http.Reques
 	}
 	defer client.Close()
 
+	// 上游是 loopback app-server，就绪时握手是亚毫秒级；冷启动上游还没起来时，端口未监听会立刻
+	// ECONNREFUSED，只有“端口已开但还没接受握手”才会卡到这里。把超时收紧到 4s，让 iPad 端能更快
+	// 收到可重试错误，而不是每次都白等 10s。外侧握手已完成后才拨号，确保畸形握手不会占用 upstream。
+	dialer := websocket.Dialer{HandshakeTimeout: 4 * time.Second}
+	dialStart := time.Now()
+	upstream, _, err := dialer.DialContext(req.Context(), upstreamURL, upstreamHeaders)
+	dialDuration := time.Since(dialStart)
+	if err != nil {
+		r.monitor.recordGatewayDialFailure(dialDuration, err)
+		writeCodexGatewayRuntimeError(client, "CODEX_UPSTREAM_UNAVAILABLE", "Codex app-server 暂时不可用，请稍后重试")
+		return
+	}
+	defer upstream.Close()
+
 	log.Printf("app-server gateway connected upstream=%s", sanitizeGatewayURL(upstreamURL))
 	monitor := r.monitor.startGatewayConnection(requestRemoteHost(req), req.Host, sanitizeGatewayURL(upstreamURL), dialDuration)
 	r.proxyAppServerGateway(req.Context(), client, upstream, monitor)
+}
+
+func (r *Router) acquireCodexGatewaySlot() bool {
+	r.codexGatewayMu.Lock()
+	defer r.codexGatewayMu.Unlock()
+	if r.activeCodexGateway >= appServerGatewayMaxConnections {
+		return false
+	}
+	r.activeCodexGateway++
+	return true
+}
+
+func (r *Router) releaseCodexGatewaySlot() {
+	r.codexGatewayMu.Lock()
+	if r.activeCodexGateway > 0 {
+		r.activeCodexGateway--
+	}
+	r.codexGatewayMu.Unlock()
+}
+
+func writeCodexGatewayRuntimeError(conn *websocket.Conn, code string, message string) {
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      nil,
+		"error": map[string]any{
+			"code":    appServerPolicyErrorCode,
+			"message": code + ": " + message,
+		},
+	})
+	if err != nil {
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(appServerGatewayWriteWindow))
+	_ = conn.WriteMessage(websocket.TextMessage, payload)
 }
 
 func (r *Router) appServerUpstreamWebSocketURL() (string, error) {
@@ -583,6 +669,7 @@ func (r *Router) proxyAppServerGateway(ctx context.Context, client *websocket.Co
 		allowedThreads:        map[string]appServerGatewayAllowedThread{},
 	}
 	defer policy.releaseAllHistoryInflight()
+	defer policy.close()
 
 	go func() {
 		done <- r.copyClientFramesToAppServer(client, upstream, &clientWriteMu, &upstreamWriteMu, policy, monitor)
@@ -591,8 +678,7 @@ func (r *Router) proxyAppServerGateway(ctx context.Context, client *websocket.Co
 		done <- copyWebSocketFrames(ctx, upstream, client, &upstreamWriteMu, &clientWriteMu, policy, monitor)
 	}()
 	go func() {
-		pingGatewayConnections(ctx, client, upstream, &clientWriteMu, &upstreamWriteMu)
-		done <- "ping_failed_or_context_done"
+		done <- pingGatewayConnections(ctx, client, upstream, &clientWriteMu, &upstreamWriteMu)
 	}()
 
 	reason := <-done
@@ -610,20 +696,20 @@ func configureGatewayReadConn(conn *websocket.Conn) {
 	})
 }
 
-func pingGatewayConnections(ctx context.Context, client *websocket.Conn, upstream *websocket.Conn, clientWriteMu *sync.Mutex, upstreamWriteMu *sync.Mutex) {
+func pingGatewayConnections(ctx context.Context, client *websocket.Conn, upstream *websocket.Conn, clientWriteMu *sync.Mutex, upstreamWriteMu *sync.Mutex) string {
 	ticker := time.NewTicker(appServerGatewayPingPeriod)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return "context_done"
 		case <-ticker.C:
 			deadline := time.Now().Add(appServerGatewayWriteWindow)
 			if err := writeWebSocketControl(client, clientWriteMu, websocket.PingMessage, nil, deadline); err != nil {
-				return
+				return gatewayCloseReason("client_ping_write", err)
 			}
 			if err := writeWebSocketControl(upstream, upstreamWriteMu, websocket.PingMessage, nil, deadline); err != nil {
-				return
+				return gatewayCloseReason("upstream_ping_write", err)
 			}
 		}
 	}
@@ -697,13 +783,6 @@ func copyWebSocketFrames(ctx context.Context, from *websocket.Conn, to *websocke
 	}
 }
 
-func gatewayCloseReason(prefix string, err error) string {
-	if err == nil {
-		return prefix
-	}
-	return prefix + ": " + trimRelayString(err.Error(), 120)
-}
-
 func writeWebSocketFrame(conn *websocket.Conn, mu *sync.Mutex, messageType int, payload []byte) error {
 	if mu != nil {
 		mu.Lock()
@@ -722,6 +801,9 @@ func writeWebSocketControl(conn *websocket.Conn, mu *sync.Mutex, messageType int
 }
 
 func (p *appServerGatewayPolicy) validateClientFrame(messageType int, payload []byte) ([]byte, *appServerGatewayPolicyError) {
+	if p.isClosed() {
+		return nil, &appServerGatewayPolicyError{message: "app-server gateway 连接已关闭"}
+	}
 	if messageType != websocket.TextMessage {
 		return nil, &appServerGatewayPolicyError{message: "app-server gateway 只允许 JSON text frame"}
 	}
@@ -755,6 +837,7 @@ func (p *appServerGatewayPolicy) validateClientFrame(messageType int, payload []
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 	}
 	if err := p.validateThreadCapability(&frame, method, params, validated); err != nil {
+		p.router.releaseManagedWorktreePendingUse(validated.pendingManagedWorktreePath)
 		return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 	}
 	if policyErr := p.reserveHistoryRequest(frame.ID, method, params, len(payload)); policyErr != nil {
@@ -771,6 +854,11 @@ func (p *appServerGatewayPolicy) validateClientFrame(messageType int, payload []
 		if err := p.rememberPendingClientRequest(frame.ID, method); err != nil {
 			return nil, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 		}
+	}
+	if p.isClosed() {
+		p.cancelPendingHistoryRequest(frame.ID)
+		p.forgetPending(frame.ID)
+		return nil, &appServerGatewayPolicyError{id: frame.ID, message: "app-server gateway 连接已关闭"}
 	}
 	logGatewayForwardedClientTurnSummary(method, rewritten)
 	return rewritten, nil
@@ -793,7 +881,20 @@ func (p *appServerGatewayPolicy) validateThreadCapability(frame *appServerGatewa
 				return err
 			}
 		}
-		if err := p.rememberPendingThreadResponse(frame.ID, method, cwd, scope.id); err != nil {
+		if err := p.rememberPendingThreadResponseWithManagedUse(frame.ID, method, cwd, scope.id, validated.pendingManagedWorktreePath); err != nil {
+			return err
+		}
+	case "thread/search":
+		if err := validateGatewayThreadSearchParams(params); err != nil {
+			return err
+		}
+		limit := int64(0)
+		limitSet := false
+		if value, ok := params["limit"]; ok && value != nil {
+			limit, _ = gatewayJSONNumberInt64(value)
+			limitSet = true
+		}
+		if err := p.rememberPendingThreadSearchResponse(frame.ID, limit, limitSet); err != nil {
 			return err
 		}
 	case "thread/resume":
@@ -811,7 +912,7 @@ func (p *appServerGatewayPolicy) validateThreadCapability(frame *appServerGatewa
 		if !scopeOK || scope.id != thread.scopeID {
 			return fmt.Errorf("%s.cwd 必须匹配已授权 thread 的工作区", method)
 		}
-		if err := p.rememberPendingThreadResponse(frame.ID, method, cwd, scope.id); err != nil {
+		if err := p.rememberPendingThreadResponseWithManagedUse(frame.ID, method, cwd, scope.id, validated.pendingManagedWorktreePath); err != nil {
 			return err
 		}
 	case "thread/fork":
@@ -825,10 +926,11 @@ func (p *appServerGatewayPolicy) validateThreadCapability(frame *appServerGatewa
 		if !scopeOK {
 			return fmt.Errorf("%s.cwd 必须来自已授权工作区", method)
 		}
-		if err := p.rememberPendingThreadResponse(frame.ID, method, cwd, scope.id); err != nil {
+		if err := p.rememberPendingThreadResponseWithManagedUse(frame.ID, method, cwd, scope.id, validated.pendingManagedWorktreePath); err != nil {
 			return err
 		}
-	case "thread/read", "thread/turns/list", "thread/goal/get", "thread/goal/set", "thread/goal/clear":
+	case "thread/read", "thread/turns/list", "thread/name/set", "thread/compact/start", "thread/unsubscribe",
+		"thread/goal/get", "thread/goal/set", "thread/goal/clear", "review/start":
 		threadID, ok := gatewayStringParam(params, "threadId")
 		if !ok {
 			return fmt.Errorf("%s.threadId 不能为空", method)
@@ -848,6 +950,16 @@ func (p *appServerGatewayPolicy) validateThreadCapability(frame *appServerGatewa
 		}
 		if method == "thread/goal/set" {
 			if err := validateGatewayGoalSetParams(params); err != nil {
+				return err
+			}
+		}
+		if method == "thread/name/set" {
+			if err := validateGatewayThreadSetNameParams(params); err != nil {
+				return err
+			}
+		}
+		if method == "review/start" {
+			if err := validateGatewayReviewStartParams(params); err != nil {
 				return err
 			}
 		}
@@ -979,6 +1091,8 @@ func rewriteGatewaySafeDefaults(payload []byte, runtimeID string, method string,
 		sanitized = map[string]any{}
 	case "thread/list":
 		sanitized = sanitizedGatewayThreadListParams(params)
+	case "thread/search":
+		sanitized = sanitizedGatewayThreadSearchParams(params)
 	case "thread/read":
 		sanitized = copyGatewayParams(params, "threadId", "includeTurns")
 	case "thread/turns/list":
@@ -987,8 +1101,14 @@ func rewriteGatewaySafeDefaults(payload []byte, runtimeID string, method string,
 		sanitized = copyGatewayParams(params, "threadId")
 	case "thread/goal/set":
 		sanitized = sanitizedGatewayGoalSetParams(params)
+	case "thread/name/set":
+		sanitized = copyGatewayParams(params, "threadId", "name")
+	case "thread/compact/start", "thread/unsubscribe":
+		sanitized = copyGatewayParams(params, "threadId")
 	case "thread/archive", "thread/unarchive":
 		sanitized = copyGatewayParams(params, "threadId")
+	case "review/start":
+		sanitized = sanitizedGatewayReviewStartParams(params)
 	case "thread/start", "thread/resume", "thread/fork":
 		sanitized = sanitizedGatewayThreadParams(runtimeID, method, params)
 	case "turn/start":
@@ -1028,6 +1148,82 @@ func sanitizedGatewayGoalSetParams(params map[string]any) map[string]any {
 	return safe
 }
 
+func validateGatewayThreadSetNameParams(params map[string]any) error {
+	name, ok := gatewayStringParam(params, "name")
+	if !ok {
+		return fmt.Errorf("thread/name/set.name 必须是非空字符串")
+	}
+	// 名称只是列表展示字段，限制到足够日常使用的长度，避免移动端误把正文当作标题上传。
+	if len(name) > 256 {
+		return fmt.Errorf("thread/name/set.name 不能超过 256 bytes")
+	}
+	return nil
+}
+
+func validateGatewayReviewStartParams(params map[string]any) error {
+	if delivery, exists := params["delivery"]; exists && delivery != nil {
+		value, ok := delivery.(string)
+		if !ok || strings.TrimSpace(value) != "inline" {
+			// detached 会创建一个新 thread；第一批先只开放原 thread 内 review，避免绕过 thread 授权登记。
+			return fmt.Errorf("review/start.delivery 只允许 inline")
+		}
+	}
+	target, ok := params["target"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("review/start.target 必须是对象")
+	}
+	targetType, ok := gatewayStringParam(target, "type")
+	if !ok {
+		return fmt.Errorf("review/start.target.type 不能为空")
+	}
+	requireNonEmptyString := func(key string) error {
+		if _, ok := gatewayStringParam(target, key); !ok {
+			return fmt.Errorf("review/start.target.%s 不能为空", key)
+		}
+		return nil
+	}
+	switch targetType {
+	case "uncommittedChanges":
+		return nil
+	case "baseBranch":
+		return requireNonEmptyString("branch")
+	case "commit":
+		if err := requireNonEmptyString("sha"); err != nil {
+			return err
+		}
+		if title, exists := target["title"]; exists && title != nil {
+			if _, ok := title.(string); !ok {
+				return fmt.Errorf("review/start.target.title 必须是字符串或 null")
+			}
+		}
+		return nil
+	case "custom":
+		// custom 等价于一段自由提示词，会绕过 turn/start 对沙盒和审批参数的统一改写。
+		return fmt.Errorf("review/start.target.type 不允许远程使用：custom")
+	default:
+		return fmt.Errorf("review/start.target.type 不支持：%s", targetType)
+	}
+}
+
+func sanitizedGatewayReviewStartParams(params map[string]any) map[string]any {
+	target, _ := params["target"].(map[string]any)
+	targetType, _ := gatewayStringParam(target, "type")
+	safeTarget := map[string]any{"type": targetType}
+	switch targetType {
+	case "baseBranch":
+		copyGatewayParam(safeTarget, target, "branch")
+	case "commit":
+		copyGatewayParam(safeTarget, target, "sha")
+		copyGatewayParam(safeTarget, target, "title")
+	}
+	return map[string]any{
+		"threadId": params["threadId"],
+		"target":   safeTarget,
+		// 强制 inline，确保响应不会产生一个尚未进入 gateway 授权缓存的新 thread。
+		"delivery": "inline",
+	}
+}
+
 func sanitizedGatewayThreadTurnsListParams(params map[string]any) map[string]any {
 	safe := copyGatewayParams(params, "threadId", "cursor", "sortDirection", "itemsView")
 	limit := int64(appServerGatewayThreadTurnsDefaultLimit)
@@ -1049,6 +1245,93 @@ func sanitizedGatewayThreadTurnsListParams(params map[string]any) map[string]any
 
 func sanitizedGatewayThreadListParams(params map[string]any) map[string]any {
 	return copyGatewayParams(params, "cwd", "limit", "cursor", "sortKey", "sortDirection", "archived", "useStateDbOnly")
+}
+
+func sanitizedGatewayThreadSearchParams(params map[string]any) map[string]any {
+	// searchTerm 是唯一必填字段，统一 trim；其余只重建 0.144.2 schema 中的字段，
+	// 未知字段一律丢弃，避免未来/恶意 JSON 绕过 gateway 的显式策略边界。
+	safe := copyGatewayParams(params, "cursor", "limit", "sortDirection", "sortKey", "archived", "sourceKinds")
+	if searchTerm, ok := params["searchTerm"].(string); ok {
+		safe["searchTerm"] = strings.TrimSpace(searchTerm)
+	}
+	return safe
+}
+
+func validateGatewayThreadSearchParams(params map[string]any) error {
+	rawSearchTerm, ok := params["searchTerm"]
+	if !ok {
+		return fmt.Errorf("thread/search.searchTerm 不能为空")
+	}
+	searchTerm, ok := rawSearchTerm.(string)
+	if !ok || strings.TrimSpace(searchTerm) == "" {
+		return fmt.Errorf("thread/search.searchTerm 必须是非空字符串")
+	}
+	if len(strings.TrimSpace(searchTerm)) > appServerGatewayThreadSearchTermMaxBytes {
+		return fmt.Errorf("thread/search.searchTerm 不能超过 %d bytes", appServerGatewayThreadSearchTermMaxBytes)
+	}
+	if value, ok := params["limit"]; ok {
+		if value != nil {
+			limit, parsed := gatewayJSONNumberInt64(value)
+			if !parsed || limit < 0 {
+				return fmt.Errorf("thread/search.limit 必须是非负整数")
+			}
+		}
+		if gatewayJSONNumberGreaterThan(value, appServerGatewayThreadSearchMaxLimit) {
+			return fmt.Errorf("thread/search.limit 不能超过 %d", appServerGatewayThreadSearchMaxLimit)
+		}
+	}
+	if value, ok := params["cursor"]; ok && value != nil {
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("thread/search.cursor 必须是字符串")
+		}
+	}
+	if value, ok := params["sortDirection"]; ok && value != nil {
+		sortDirection, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("thread/search.sortDirection 必须是字符串")
+		}
+		switch sortDirection {
+		case "asc", "desc":
+		default:
+			return fmt.Errorf("thread/search.sortDirection 不支持：%s", sortDirection)
+		}
+	}
+	if value, ok := params["sortKey"]; ok && value != nil {
+		sortKey, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("thread/search.sortKey 必须是字符串")
+		}
+		switch sortKey {
+		case "created_at", "updated_at", "recency_at":
+		default:
+			return fmt.Errorf("thread/search.sortKey 不支持：%s", sortKey)
+		}
+	}
+	if value, ok := params["archived"]; ok && value != nil {
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("thread/search.archived 必须是布尔值")
+		}
+	}
+	if value, ok := params["sourceKinds"]; ok && value != nil {
+		sourceKinds, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("thread/search.sourceKinds 必须是字符串数组")
+		}
+		allowed := map[string]struct{}{
+			"cli": {}, "vscode": {}, "exec": {}, "appServer": {}, "subAgent": {},
+			"subAgentReview": {}, "subAgentCompact": {}, "subAgentThreadSpawn": {}, "subAgentOther": {}, "unknown": {},
+		}
+		for _, value := range sourceKinds {
+			sourceKind, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("thread/search.sourceKinds 必须是字符串数组")
+			}
+			if _, ok := allowed[sourceKind]; !ok {
+				return fmt.Errorf("thread/search.sourceKinds 不支持：%s", sourceKind)
+			}
+		}
+	}
+	return nil
 }
 
 func validateGatewayGoalSetParams(params map[string]any) error {
@@ -1704,6 +1987,16 @@ func gatewayHistoryRequestFromParams(method string, params map[string]any) (appS
 			limit: gatewayOptionalInt64Param(params, "limit"), sortDirection: gatewayOptionalStringParam(params, "sortDirection"),
 			itemsView: "list", useStateDBOnly: gatewayOptionalBoolFingerprintParam(params, "useStateDbOnly"),
 		}, true
+	case "thread/search":
+		// 搜索没有 cwd/threadId，请求指纹必须包含完整的安全参数；预算 subject 则使用固定
+		// search 桶，避免把用户搜索词写入诊断信息或错误响应。
+		safeParams := sanitizedGatewayThreadSearchParams(params)
+		filterFingerprint, _ := json.Marshal(safeParams)
+		return appServerGatewayPendingHistoryRequest{
+			method: method, cursor: gatewayOptionalStringParam(safeParams, "cursor"),
+			limit: gatewayOptionalInt64Param(safeParams, "limit"), sortDirection: gatewayOptionalStringParam(safeParams, "sortDirection"),
+			itemsView: "search", filterFingerprint: string(filterFingerprint),
+		}, true
 	case "thread/turns/list":
 		threadID, ok := gatewayStringParam(params, "threadId")
 		if !ok {
@@ -1761,10 +2054,11 @@ func gatewayHistoryRequestFingerprint(runtimeID string, request appServerGateway
 		SortDirection  string `json:"sortDirection,omitempty"`
 		ItemsView      string `json:"itemsView,omitempty"`
 		UseStateDBOnly string `json:"useStateDbOnly,omitempty"`
+		Filter         string `json:"filter,omitempty"`
 	}{
 		Runtime: normalizeAppServerRuntimeID(runtimeID), Method: request.method, ThreadID: request.threadID,
 		CWD: request.cwd, Cursor: request.cursor, Limit: request.limit, SortDirection: request.sortDirection,
-		ItemsView: request.itemsView, UseStateDBOnly: request.useStateDBOnly,
+		ItemsView: request.itemsView, UseStateDBOnly: request.useStateDBOnly, Filter: request.filterFingerprint,
 	})
 	return string(encoded)
 }
@@ -1838,6 +2132,9 @@ func gatewayHistoryBudgetKey(threadID string, method string, itemsView string) s
 func gatewayHistoryBudgetSubject(request appServerGatewayPendingHistoryRequest) string {
 	if threadID := strings.TrimSpace(request.threadID); threadID != "" {
 		return threadID
+	}
+	if request.method == "thread/search" {
+		return "thread-search"
 	}
 	return strings.TrimSpace(request.cwd)
 }
@@ -2046,23 +2343,58 @@ func copyGatewayBoolParams(params map[string]any, keys ...string) map[string]any
 }
 
 func (p *appServerGatewayPolicy) rememberPendingThreadResponse(id *json.RawMessage, method string, cwd string, scopeID string) error {
+	return p.rememberPendingThreadResponseWithManagedUse(id, method, cwd, scopeID, "")
+}
+
+func (p *appServerGatewayPolicy) rememberPendingThreadResponseWithManagedUse(id *json.RawMessage, method string, cwd string, scopeID string, managedWorktreePath string) error {
+	return p.rememberPendingThreadRequest(id, appServerGatewayPendingThreadRequest{
+		method: method, cwd: cwd, scopeID: scopeID, managedWorktreePath: managedWorktreePath,
+	})
+}
+
+func (p *appServerGatewayPolicy) rememberPendingThreadSearchResponse(id *json.RawMessage, limit int64, limitSet bool) error {
+	return p.rememberPendingThreadRequest(id, appServerGatewayPendingThreadRequest{
+		method: "thread/search", responseLimit: limit, responseLimitSet: limitSet,
+	})
+}
+
+func (p *appServerGatewayPolicy) rememberPendingThreadRequest(id *json.RawMessage, pending appServerGatewayPendingThreadRequest) error {
 	key := gatewayRequestIDKey(id)
 	if key == "" {
+		if pending.managedWorktreePath != "" {
+			return fmt.Errorf("gateway pending thread 请求缺少 id")
+		}
 		return nil
+	}
+	if p.beforePendingRemember != nil {
+		p.beforePendingRemember()
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return fmt.Errorf("app-server gateway 连接已关闭")
+	}
 	now := time.Now()
 	p.prunePendingThreadsLocked(now)
 	if _, exists := p.pendingThreads[key]; !exists && len(p.pendingThreads) >= appServerGatewayPendingThreadMax {
 		return fmt.Errorf("gateway pending thread 请求过多")
 	}
-	p.pendingThreads[key] = appServerGatewayPendingThreadRequest{method: method, cwd: cwd, scopeID: scopeID, createdAt: now}
+	if _, exists := p.pendingThreads[key]; exists {
+		return fmt.Errorf("gateway pending thread 请求 id 重复")
+	}
+	pending.createdAt = now
+	p.pendingThreads[key] = pending
 	return nil
 }
 
 func (p *appServerGatewayPolicy) prunePendingThreadsLocked(now time.Time) {
 	for id, pending := range p.pendingThreads {
+		if pending.managedWorktreePath != "" {
+			// managed checkout 的 lease 不能因本地 TTL 自动释放：上游可能仍在
+			// 创建/恢复 thread。只有明确响应、明确失败或 policy.close()
+			// 才能证明该 cwd 不再处于未完成使用窗口。
+			continue
+		}
 		if pending.createdAt.IsZero() || now.Sub(pending.createdAt) > appServerGatewayPendingThreadTTL {
 			delete(p.pendingThreads, id)
 		}
@@ -2119,6 +2451,16 @@ func (p *appServerGatewayPolicy) observeUpstreamFrame(messageType int, payload [
 		return payload, true, nil
 	}
 	if strings.TrimSpace(frame.Method) != "" && frame.ID != nil {
+		if !appServerServerRequestAllowed(p.runtimeID, frame.Method) {
+			return payload, false, &appServerGatewayPolicyError{
+				id:      frame.ID,
+				message: "app-server server request 尚未被移动端支持：" + strings.TrimSpace(frame.Method),
+				data: map[string]any{
+					"reason": "unsupported_server_request",
+					"method": strings.TrimSpace(frame.Method),
+				},
+			}
+		}
 		if err := p.rememberPendingServerRequest(frame.ID, frame.Method); err != nil {
 			return payload, false, &appServerGatewayPolicyError{id: frame.ID, message: err.Error()}
 		}
@@ -2176,17 +2518,133 @@ func (p *appServerGatewayPolicy) observeUpstreamFrame(messageType int, payload [
 	}
 	p.mu.Lock()
 	pending, ok := p.pendingThreads[key]
-	if ok {
-		delete(p.pendingThreads, key)
-	}
 	p.mu.Unlock()
 	if !ok {
 		return payload, true, nil
 	}
-	for _, thread := range p.threadsFromResult(frame.Result, pending) {
-		p.allowThread(thread)
+	if pending.method == "thread/search" {
+		rewritten, threads, err := p.sanitizeThreadSearchResponse(payload, pending)
+		if err != nil {
+			p.forgetPending(frame.ID)
+			return payload, false, &appServerGatewayPolicyError{
+				id: frame.ID, message: err.Error(), target: "client",
+			}
+		}
+		p.completePendingThreadResponse(key, pending, threads)
+		return rewritten, true, nil
 	}
+	p.completePendingThreadResponse(key, pending, p.threadsFromResult(frame.Result, pending))
+	// 成功响应先把 thread 写入连接级与全局 gateway 授权表，再释放
+	// pending-use。转换期间至少有一种保护存在，cleanup 看不到可删除窗口。
 	return payload, true, nil
+}
+
+func (p *appServerGatewayPolicy) sanitizeThreadSearchResponse(payload []byte, pending appServerGatewayPendingThreadRequest) ([]byte, []appServerGatewayAllowedThread, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return nil, nil, fmt.Errorf("thread/search response 无效")
+	}
+	var resultFields map[string]json.RawMessage
+	if raw := response["result"]; len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &resultFields) != nil {
+		return nil, nil, fmt.Errorf("thread/search response.result 必须是对象")
+	}
+	dataRaw, ok := resultFields["data"]
+	if !ok || bytes.Equal(bytes.TrimSpace(dataRaw), []byte("null")) {
+		return nil, nil, fmt.Errorf("thread/search response.data 必须是数组")
+	}
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(dataRaw, &rawItems); err != nil {
+		return nil, nil, fmt.Errorf("thread/search response.data 必须是数组")
+	}
+
+	limit := int64(appServerGatewayThreadSearchMaxLimit)
+	if pending.responseLimitSet {
+		limit = pending.responseLimit
+	}
+	if limit < 0 || limit > appServerGatewayThreadSearchMaxLimit {
+		limit = appServerGatewayThreadSearchMaxLimit
+	}
+	safeItems := make([]map[string]any, 0, min(len(rawItems), int(limit)))
+	allowedThreads := make([]appServerGatewayAllowedThread, 0, cap(safeItems))
+	for _, rawItem := range rawItems {
+		if int64(len(safeItems)) >= limit {
+			break
+		}
+		var item map[string]json.RawMessage
+		if json.Unmarshal(rawItem, &item) != nil {
+			continue
+		}
+		var snippet string
+		if raw := item["snippet"]; len(raw) == 0 || json.Unmarshal(raw, &snippet) != nil {
+			continue
+		}
+		threadRaw := item["thread"]
+		var thread appServerGatewayThreadWire
+		if len(threadRaw) == 0 || bytes.Equal(bytes.TrimSpace(threadRaw), []byte("null")) || json.Unmarshal(threadRaw, &thread) != nil {
+			continue
+		}
+		threadID := strings.TrimSpace(thread.ID)
+		cwd := strings.TrimSpace(thread.CWD)
+		// 0.144.2 schema 要求 Thread.id 与绝对 cwd。不能让 filepath.Abs 把相对路径
+		// 悄悄解释成 agentd 当前目录，也不能把 trim 后与客户端看到值不同的 thread 登记进授权表。
+		if threadID == "" || threadID != thread.ID || cwd == "" || cwd != thread.CWD || !filepath.IsAbs(cwd) {
+			continue
+		}
+		scope, ok := p.router.gatewayScopeForPath(cwd)
+		if !ok {
+			continue
+		}
+		info, err := os.Stat(scope.realPath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		safeItems = append(safeItems, map[string]any{
+			"thread":  threadRaw,
+			"snippet": snippet,
+		})
+		allowedThreads = append(allowedThreads, appServerGatewayAllowedThread{
+			id: threadID, runtimeID: normalizeAppServerRuntimeID(p.runtimeID), cwd: scope.realPath, scopeID: scope.id,
+		})
+	}
+
+	// 只重建协议声明字段：被过滤条目的 snippet 与 result 级未知字段都不会残留在下行 JSON。
+	safeResult := map[string]any{"data": safeItems}
+	copyGatewaySearchCursor(safeResult, resultFields, "nextCursor")
+	copyGatewaySearchCursor(safeResult, resultFields, "backwardsCursor")
+	safeResponse := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      response["id"],
+		"result":  safeResult,
+	}
+	rewritten, err := json.Marshal(safeResponse)
+	if err != nil {
+		return nil, nil, fmt.Errorf("重写 thread/search response 失败：%w", err)
+	}
+	return rewritten, allowedThreads, nil
+}
+
+func copyGatewaySearchCursor(dst map[string]any, src map[string]json.RawMessage, key string) {
+	raw, ok := src[key]
+	if !ok {
+		return
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		dst[key] = nil
+		return
+	}
+	var cursor string
+	if json.Unmarshal(raw, &cursor) == nil {
+		dst[key] = cursor
+	}
+}
+
+func appServerServerRequestAllowed(runtimeID string, method string) bool {
+	// Claude bridge 目前沿用既有反向请求协议；Codex 的协议面更宽且会持续新增，因此必须显式收口。
+	if normalizeAppServerRuntimeID(runtimeID) != "codex" {
+		return true
+	}
+	_, ok := appServerAllowedServerRequestMethods[strings.TrimSpace(method)]
+	return ok
 }
 
 func appServerMediaRedactNotificationsEnabled() bool {
@@ -2302,8 +2760,41 @@ func (p *appServerGatewayPolicy) forgetPending(id *json.RawMessage) {
 		return
 	}
 	p.mu.Lock()
-	delete(p.pendingThreads, key)
+	pending, ok := p.pendingThreads[key]
+	if ok {
+		delete(p.pendingThreads, key)
+	}
 	p.mu.Unlock()
+	if ok {
+		p.router.releaseManagedWorktreePendingUse(pending.managedWorktreePath)
+	}
+}
+
+func (p *appServerGatewayPolicy) isClosed() bool {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	return closed
+}
+
+func (p *appServerGatewayPolicy) close() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	paths := make([]string, 0, len(p.pendingThreads))
+	for key, pending := range p.pendingThreads {
+		if pending.managedWorktreePath != "" {
+			paths = append(paths, pending.managedWorktreePath)
+		}
+		delete(p.pendingThreads, key)
+	}
+	p.mu.Unlock()
+	for _, path := range paths {
+		p.router.releaseManagedWorktreePendingUse(path)
+	}
 }
 
 func (p *appServerGatewayPolicy) threadsFromResult(raw json.RawMessage, pending appServerGatewayPendingThreadRequest) []appServerGatewayAllowedThread {
@@ -2359,17 +2850,74 @@ func (p *appServerGatewayPolicy) threadsFromResult(raw json.RawMessage, pending 
 }
 
 func (p *appServerGatewayPolicy) allowThread(thread appServerGatewayAllowedThread) {
-	if strings.TrimSpace(thread.id) == "" || strings.TrimSpace(thread.scopeID) == "" {
+	thread, ok := p.normalizeAllowedThread(thread)
+	if !ok {
 		return
+	}
+	p.mu.Lock()
+	p.allowedThreads[thread.id] = thread
+	p.mu.Unlock()
+	p.router.allowGatewayThread(thread)
+}
+
+func (p *appServerGatewayPolicy) normalizeAllowedThread(thread appServerGatewayAllowedThread) (appServerGatewayAllowedThread, bool) {
+	if strings.TrimSpace(thread.id) == "" || strings.TrimSpace(thread.scopeID) == "" {
+		return appServerGatewayAllowedThread{}, false
 	}
 	if strings.TrimSpace(thread.runtimeID) == "" {
 		thread.runtimeID = normalizeAppServerRuntimeID(p.runtimeID)
 	}
 	thread.lastSeen = time.Now()
+	return thread, true
+}
+
+func (p *appServerGatewayPolicy) completePendingThreadResponse(key string, pending appServerGatewayPendingThreadRequest, threads []appServerGatewayAllowedThread) {
+	normalized := make([]appServerGatewayAllowedThread, 0, len(threads))
+	for _, thread := range threads {
+		if item, ok := p.normalizeAllowedThread(thread); ok {
+			normalized = append(normalized, item)
+		}
+	}
+
+	if pending.managedWorktreePath == "" {
+		p.mu.Lock()
+		current, ok := p.pendingThreads[key]
+		if p.closed || !ok || current.createdAt != pending.createdAt {
+			p.mu.Unlock()
+			return
+		}
+		delete(p.pendingThreads, key)
+		for _, thread := range normalized {
+			p.allowedThreads[thread.id] = thread
+			p.router.allowGatewayThread(thread)
+		}
+		p.mu.Unlock()
+		return
+	}
+
+	// 固定锁顺序 cleanupMu -> policy.mu -> gatewayThreadsMu。policy.mu 与
+	// pending entry 一起充当 close barrier：close 若先发生，晚到响应
+	// 不得重新登记 thread；响应若先发生，则在同一 cleanup
+	// 临界区内完成全局授权与 lease 释放。
+	p.router.managedWorktreeCleanupMu.Lock()
 	p.mu.Lock()
-	p.allowedThreads[thread.id] = thread
+	current, ok := p.pendingThreads[key]
+	if p.closed || !ok || current.managedWorktreePath != pending.managedWorktreePath || current.createdAt != pending.createdAt {
+		p.mu.Unlock()
+		p.router.managedWorktreeCleanupMu.Unlock()
+		return
+	}
+	if p.beforeManagedComplete != nil {
+		p.beforeManagedComplete()
+	}
+	delete(p.pendingThreads, key)
+	for _, thread := range normalized {
+		p.allowedThreads[thread.id] = thread
+		p.router.allowGatewayThread(thread)
+	}
+	p.router.releaseManagedWorktreePendingUseLocked(pending.managedWorktreePath)
 	p.mu.Unlock()
-	p.router.allowGatewayThread(thread)
+	p.router.managedWorktreeCleanupMu.Unlock()
 }
 
 func (r *Router) allowGatewayThread(thread appServerGatewayAllowedThread) {
@@ -2448,6 +2996,12 @@ func decodeGatewayParams(raw json.RawMessage) (map[string]any, error) {
 
 func (r *Router) validateGatewayPolicyParams(runtimeID string, method string, params map[string]any) (appServerGatewayValidatedParams, error) {
 	validated := appServerGatewayValidatedParams{}
+	committedPendingUse := false
+	defer func() {
+		if !committedPendingUse {
+			r.releaseManagedWorktreePendingUse(validated.pendingManagedWorktreePath)
+		}
+	}()
 	if hasApprovalPolicyNever(params) {
 		return validated, fmt.Errorf("approvalPolicy=never 不允许远程使用")
 	}
@@ -2467,7 +3021,7 @@ func (r *Router) validateGatewayPolicyParams(runtimeID string, method string, pa
 		}
 	}
 	if cwd, ok := gatewayStringParam(params, "cwd"); ok {
-		scope, scopeOK := r.gatewayScopeForPath(cwd)
+		scope, pendingManagedPath, scopeOK := r.gatewayScopeForPathWithPendingUse(cwd, gatewayMethodNeedsManagedPendingUse(method))
 		if !scopeOK {
 			return validated, fmt.Errorf("%s.cwd 必须来自 projects allowlist 或 browse_roots", method)
 		}
@@ -2475,6 +3029,7 @@ func (r *Router) validateGatewayPolicyParams(runtimeID string, method string, pa
 		validated.hasCWD = true
 		validated.cwdScope = scope
 		validated.cwdScopeOK = true
+		validated.pendingManagedWorktreePath = pendingManagedPath
 	}
 	if requiresGatewayCWD(method) {
 		if !validated.hasCWD {
@@ -2517,7 +3072,17 @@ func (r *Router) validateGatewayPolicyParams(runtimeID string, method string, pa
 			return validated, fmt.Errorf("%s.input path 必须来自 projects allowlist", method)
 		}
 	}
+	committedPendingUse = true
 	return validated, nil
+}
+
+func gatewayMethodNeedsManagedPendingUse(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "thread/start", "thread/resume", "thread/fork":
+		return true
+	default:
+		return false
+	}
 }
 
 func requiresGatewayCWD(method string) bool {
@@ -2663,33 +3228,50 @@ func (r *Router) projectForGatewayPathWithRealPath(raw string) (projects.Project
 // gatewayScopeForPath 把路径解析成授权作用域：优先命中 projects allowlist（项目作用域），
 // 否则若在 browse_roots 内则得到精确目录作用域；两者都不命中即未授权。
 func (r *Router) gatewayScopeForPath(raw string) (gatewayScope, bool) {
+	scope, _, ok := r.gatewayScopeForPathWithPendingUse(raw, false)
+	return scope, ok
+}
+
+func (r *Router) gatewayScopeForPathWithPendingUse(raw string, acquirePendingUse bool) (gatewayScope, string, bool) {
 	path := strings.TrimSpace(raw)
 	if path == "" {
-		return gatewayScope{}, false
+		return gatewayScope{}, "", false
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return gatewayScope{}, false
+		return gatewayScope{}, "", false
 	}
 	realPath, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return gatewayScope{}, false
+		return gatewayScope{}, "", false
 	}
 	if project, ok := r.projects.FindByPath(realPath); ok {
-		return gatewayScope{id: project.ID, realPath: realPath, project: project}, true
+		return gatewayScope{id: project.ID, realPath: realPath, project: project}, "", true
 	}
-	if worktree, ok := r.managedWorktreeForPath(realPath); ok {
+
+	// managed checkout 的路径授权、LastUsedAt 推进和 pending-use 计数
+	// 必须在同一 cleanup 临界区完成；否则普通 delete 可在“授权已通过、
+	// pending thread 尚未登记”的窗口删掉 cwd。
+	r.managedWorktreeCleanupMu.Lock()
+	if worktree, ok := r.managedWorktreeForPathLocked(realPath); ok {
+		pendingPath := ""
+		if acquirePendingUse {
+			pendingPath = worktree.Path
+			r.acquireManagedWorktreePendingUseLocked(pendingPath)
+		}
+		r.managedWorktreeCleanupMu.Unlock()
 		return gatewayScope{
 			id:       workspaceIDForRealPath(worktree.Path),
 			realPath: realPath,
 			project:  worktree.RootProject,
 			managed:  true,
-		}, true
+		}, pendingPath, true
 	}
+	r.managedWorktreeCleanupMu.Unlock()
 	if r.realPathInBrowseRoots(realPath) {
-		return gatewayScope{id: workspaceIDForRealPath(realPath), realPath: realPath, browse: true}, true
+		return gatewayScope{id: workspaceIDForRealPath(realPath), realPath: realPath, browse: true}, "", true
 	}
-	return gatewayScope{}, false
+	return gatewayScope{}, "", false
 }
 
 // realPathInBrowseRoots 期望传入已 EvalSymlinks 的路径；browse root 自身每次惰性

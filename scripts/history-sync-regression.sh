@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_PATH="${AGENTD_CONFIG:-$HOME/Library/Application Support/codex-ipad-agent/config.json}"
+CONFIG_PATH="${AGENTD_CONFIG:-}"
 ROUNDS=10
 LIST_LIMIT=20
 TIMEOUT="15s"
@@ -74,6 +74,38 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+default_config_path() {
+  case "$(uname -s)" in
+    Darwin)
+      printf '%s\n' "$HOME/Library/Application Support/mimi-remote/config.json"
+      ;;
+    *)
+      printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/mimi-remote/config.json"
+      ;;
+  esac
+}
+
+legacy_config_path() {
+  case "$(uname -s)" in
+    Darwin)
+      printf '%s\n' "$HOME/Library/Application Support/codex-ipad-agent/config.json"
+      ;;
+    *)
+      printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/codex-ipad-agent/config.json"
+      ;;
+  esac
+}
+
+if [[ -z "$CONFIG_PATH" ]]; then
+  CONFIG_PATH="$(default_config_path)"
+  legacy_path="$(legacy_config_path)"
+  # 只为尚未迁移的本机保留读取兼容；新安装始终使用 mimi-remote 目录。
+  if [[ ! -f "$CONFIG_PATH" && -f "$legacy_path" ]]; then
+    CONFIG_PATH="$legacy_path"
+    echo "提示：未找到 mimi-remote 新目录配置，正在兼容读取旧配置：$legacy_path" >&2
+  fi
+fi
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then

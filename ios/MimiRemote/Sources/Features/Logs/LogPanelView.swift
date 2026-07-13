@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct LogPanelView: View {
     var body: some View {
@@ -7,10 +8,16 @@ struct LogPanelView: View {
 }
 
 struct LogTailView: View {
+    @EnvironmentObject private var appStore: AppStore
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var logStore: LogStore
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @State private var exportDocument: SessionLogExportDocument?
+    @State private var exportFilename = "MimiRemote-日志.log"
+    @State private var isPresentingExporter = false
+    @State private var exportStatusMessage: String?
+    @State private var exportErrorMessage: String?
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -36,6 +43,15 @@ struct LogTailView: View {
 
                 Spacer()
 
+                Button(action: prepareLogExport) {
+                    Label("导出日志", systemImage: "square.and.arrow.up")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canExportLog)
+                .accessibilityLabel("导出当前会话日志")
+                .accessibilityHint(exportAccessibilityHint)
+
                 Toggle("自动滚动", isOn: $logStore.autoScroll)
                     .toggleStyle(.switch)
                     .labelsHidden()
@@ -43,6 +59,16 @@ struct LogTailView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+
+            if let exportStatusMessage {
+                Text(exportStatusMessage)
+                    .font(themeStore.uiFont(.caption2))
+                    .foregroundStyle(tokens.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                    .accessibilityLabel(exportStatusMessage)
+            }
 
             Rectangle()
                 .fill(tokens.border)
@@ -52,10 +78,220 @@ struct LogTailView: View {
         }
         .background(tokens.surface)
         .foregroundStyle(tokens.primaryText)
+        .fileExporter(
+            isPresented: $isPresentingExporter,
+            document: exportDocument,
+            contentType: SessionLogExportDocument.contentType,
+            defaultFilename: exportFilename
+        ) { result in
+            switch result {
+            case .success:
+                exportStatusMessage = "日志已导出（仅包含当前缓存窗口）"
+            case .failure(let error):
+                exportErrorMessage = "日志导出失败：\(error.localizedDescription)"
+            }
+        }
+        .alert("无法导出日志", isPresented: exportErrorBinding) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(exportErrorMessage ?? "请稍后重试。")
+        }
     }
 
     private var sessionSubtitle: String {
         return sessionStore.selectedSessionID ?? "未选择会话"
+    }
+
+    private var canExportLog: Bool {
+        guard sessionStore.selectedSession != nil else { return false }
+        return !logStore.cachedLogForExport(for: sessionStore.selectedSessionID)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+    }
+
+    private var exportAccessibilityHint: String {
+        if sessionStore.selectedSession == nil {
+            return "请先选择会话"
+        }
+        if !canExportLog {
+            return "当前会话没有可导出的缓存日志"
+        }
+        return "导出当前内存缓存窗口中的 UTF-8 日志"
+    }
+
+    private var exportErrorBinding: Binding<Bool> {
+        Binding(
+            get: { exportErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    exportErrorMessage = nil
+                }
+            }
+        )
+    }
+
+    private func prepareLogExport() {
+        guard let session = sessionStore.selectedSession,
+              let payload = SessionLogExportBuilder.makePayload(
+                  session: session,
+                  cachedLog: logStore.cachedLogForExport(for: session.id),
+                  generatedAt: Date(),
+                  appVersion: SessionLogExportBuilder.currentAppVersion(),
+                  macDisplayName: appStore.activeConnectionProfile?.displayName ?? "当前 Mac"
+              ) else {
+            return
+        }
+        exportDocument = SessionLogExportDocument(content: payload.content)
+        exportFilename = payload.filename
+        exportStatusMessage = nil
+        isPresentingExporter = true
+    }
+}
+
+struct SessionLogExportPayload: Equatable {
+    let content: String
+    let filename: String
+}
+
+enum SessionLogExportBuilder {
+    static let maximumFilenameLength = 64
+    static let maximumFilenameUTF8Bytes = 180
+
+    static func makePayload(
+        session: AgentSession?,
+        cachedLog: String,
+        generatedAt: Date,
+        appVersion: String,
+        macDisplayName: String
+    ) -> SessionLogExportPayload? {
+        guard let session,
+              !cachedLog.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        // 文件头严格使用白名单字段：不接收 AppStore、endpoint 或 Token，避免误把凭据写入诊断文件。
+        let header = [
+            "生成时间：\(ISO8601DateFormatter().string(from: generatedAt))",
+            "App 版本：\(singleLine(appVersion, fallback: "未知"))",
+            "会话 ID：\(singleLine(session.id, fallback: "未知"))",
+            "会话标题：\(singleLine(session.title, fallback: "未命名会话"))",
+            "当前 Mac：\(singleLine(macDisplayName, fallback: "当前 Mac"))"
+        ].joined(separator: "\n")
+        return SessionLogExportPayload(
+            content: header + "\n\n" + cachedLog,
+            filename: safeFilename(session: session, generatedAt: generatedAt)
+        )
+    }
+
+    static func currentAppVersion(bundle: Bundle = .main) -> String {
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        switch (version?.trimmingCharacters(in: .whitespacesAndNewlines), build?.trimmingCharacters(in: .whitespacesAndNewlines)) {
+        case let (version?, build?) where !version.isEmpty && !build.isEmpty:
+            return "\(version) (\(build))"
+        case let (version?, _) where !version.isEmpty:
+            return version
+        case let (_, build?) where !build.isEmpty:
+            return build
+        default:
+            return "未知"
+        }
+    }
+
+    static func safeFilename(session: AgentSession, generatedAt: Date) -> String {
+        let rawTitle = session.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? session.id
+            : session.title
+        let safeTitle = safeFilenameComponent(rawTitle)
+        let timestamp = filenameTimestamp(generatedAt)
+        let prefix = "MimiRemote-"
+        let suffix = "-\(timestamp).log"
+        let availableTitleLength = max(1, maximumFilenameLength - prefix.count - suffix.count)
+        let availableTitleBytes = max(1, maximumFilenameUTF8Bytes - prefix.utf8.count - suffix.utf8.count)
+        let boundedTitle = boundedFilenameComponent(
+            safeTitle,
+            maximumCharacters: availableTitleLength,
+            maximumUTF8Bytes: availableTitleBytes
+        )
+        return prefix + boundedTitle + suffix
+    }
+
+    private static func boundedFilenameComponent(
+        _ value: String,
+        maximumCharacters: Int,
+        maximumUTF8Bytes: Int
+    ) -> String {
+        var result = ""
+        for character in value {
+            let candidate = result + String(character)
+            guard candidate.count <= maximumCharacters,
+                  candidate.utf8.count <= maximumUTF8Bytes else {
+                break
+            }
+            result = candidate
+        }
+        // 极端组合字符可能单个字形就超过字节预算，使用稳定的 ASCII 回退值。
+        return result.isEmpty ? "session" : result
+    }
+
+    private static func safeFilenameComponent(_ raw: String) -> String {
+        let forbidden = CharacterSet(charactersIn: "/\\:?%*|\"<>.")
+            .union(.controlCharacters)
+            .union(.newlines)
+        var result = ""
+        var previousWasSeparator = false
+        for scalar in raw.unicodeScalars {
+            let shouldReplace = forbidden.contains(scalar) || CharacterSet.whitespaces.contains(scalar)
+            if shouldReplace {
+                if !previousWasSeparator, !result.isEmpty {
+                    result.append("-")
+                }
+                previousWasSeparator = true
+            } else {
+                result.unicodeScalars.append(scalar)
+                previousWasSeparator = false
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return trimmed.isEmpty ? "session" : trimmed
+    }
+
+    private static func singleLine(_ raw: String, fallback: String) -> String {
+        var sanitized = ""
+        for scalar in raw.components(separatedBy: .newlines).joined(separator: " ").unicodeScalars
+        where !CharacterSet.controlCharacters.contains(scalar) {
+            sanitized.unicodeScalars.append(scalar)
+        }
+        let normalized = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? fallback : String(normalized.prefix(240))
+    }
+
+    private static func filenameTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: date)
+    }
+}
+
+struct SessionLogExportDocument: FileDocument {
+    static let contentType = UTType(filenameExtension: "log", conformingTo: .plainText) ?? .plainText
+    static var readableContentTypes: [UTType] { [contentType] }
+
+    private let data: Data
+
+    init(content: String) {
+        data = Data(content.utf8)
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
 

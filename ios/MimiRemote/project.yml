@@ -25,6 +25,10 @@ targets:
       - path: Sources
       - path: Resources/Assets.xcassets
         buildPhase: resources
+      - path: Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: ../../THIRD_PARTY_NOTICES.md
+        buildPhase: resources
     dependencies:
       - package: swift-markdown
         product: Markdown

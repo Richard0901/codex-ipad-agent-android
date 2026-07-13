@@ -299,6 +299,7 @@ extension AgentEventMetadata {
 
 struct CodexAppServerEventProjector {
     private var nextSeqBySessionID: [SessionID: EventSequence] = [:]
+    private var streamedTextByKey: [String: String] = [:]
 
     mutating func project(_ notification: CodexAppServerNotification) -> AgentEvent? {
         let params = notification.params?.objectValue ?? [:]
@@ -319,6 +320,60 @@ struct CodexAppServerEventProjector {
                 return nil
             }
             return .assistantDelta(AgentDelta(text: text, role: .assistant, kind: .message), metadata)
+        case "turn/plan/updated":
+            return completedPlanEvent(params: params, metadata: metadata)
+        case "item/plan/delta":
+            return streamedSystemMessageEvent(
+                params: params,
+                metadata: metadata,
+                deltaKeys: ["delta", "text"],
+                bufferSuffix: "plan",
+                kind: .plan
+            )
+        case "item/reasoning/summaryTextDelta":
+            let summaryIndex = firstInt(in: params, keys: ["summaryIndex"]) ?? 0
+            return streamedSystemMessageEvent(
+                params: params,
+                metadata: metadata,
+                deltaKeys: ["delta", "text"],
+                bufferSuffix: "reasoning-summary-\(summaryIndex)",
+                kind: .reasoningSummary
+            )
+        case "item/reasoning/summaryPartAdded":
+            // 这是新分段边界，本身没有可展示文本；后续 summaryTextDelta 会带 index。
+            return nil
+        case "thread/tokenUsage/updated":
+            return tokenUsageContextEvent(params: params, metadata: metadata)
+        case "thread/compacted":
+            return systemNoticeEvent(
+                text: "上下文已压缩",
+                itemID: "context-compaction",
+                kind: .reasoningSummary,
+                metadata: metadata
+            )
+        case "thread/name/updated":
+            let name = firstString(in: params, keys: ["threadName", "name"])
+            return systemNoticeEvent(
+                text: name.map { "会话已命名为：\($0)" } ?? "会话名称已清除",
+                itemID: "thread-name",
+                kind: .message,
+                metadata: metadata
+            )
+        case "item/mcpToolCall/progress":
+            return mcpProgressContextEvent(params: params, metadata: metadata)
+        case "mcpServer/startupStatus/updated":
+            return mcpServerStatusContextEvent(params: params, metadata: metadata)
+        case "deprecationNotice":
+            let summary = firstString(in: params, keys: ["summary"]) ?? "app-server 协议能力已废弃"
+            let details = firstString(in: params, keys: ["details"])
+            return .warning(
+                AgentErrorPayload(
+                    message: [summary, details].compactMap { $0 }.joined(separator: "\n"),
+                    code: "deprecationNotice",
+                    retryable: false
+                ),
+                metadata
+            )
         case "item/started":
             return itemContextEvent(params: params, metadata: metadata)
         case "item/completed":
@@ -352,18 +407,29 @@ struct CodexAppServerEventProjector {
     }
 
     mutating func project(_ request: CodexAppServerServerRequest) -> AgentEvent? {
+        let params = request.params?.objectValue ?? [:]
         if request.method == "item/tool/requestUserInput" {
-            let params = request.params?.objectValue ?? [:]
             let metadata = makeMetadata(from: params)
             guard let request = userInputRequest(from: params, requestID: request.id.description, metadata: metadata) else {
                 return nil
             }
             return .userInputRequest(request, metadata)
         }
-        guard isApprovalLike(method: request.method) else {
+        if request.method == "mcpServer/elicitation/request",
+           params["mode"]?.stringValue != "url" {
+            let metadata = makeMetadata(from: params)
+            guard let userInput = mcpElicitationUserInputRequest(
+                from: params,
+                requestID: request.id.description,
+                metadata: metadata
+            ) else {
+                return nil
+            }
+            return .userInputRequest(userInput, metadata)
+        }
+        guard isApprovalLike(method: request.method, params: params) else {
             return nil
         }
-        let params = request.params?.objectValue ?? [:]
         let metadata = makeMetadata(from: params)
         let kind = approvalKind(method: request.method)
         let itemID = metadata.itemID ?? request.id.description
@@ -437,6 +503,176 @@ struct CodexAppServerEventProjector {
             sendStatus: .confirmed
         )
         return .messageCompleted(message, metadata)
+    }
+
+    private mutating func completedPlanEvent(
+        params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata
+    ) -> AgentEvent? {
+        let steps = (params["plan"]?.arrayValue ?? []).compactMap { value -> String? in
+            guard let object = value.objectValue,
+                  let step = firstString(in: object, keys: ["step"]),
+                  !step.isEmpty else {
+                return nil
+            }
+            let marker: String
+            switch firstString(in: object, keys: ["status"]) {
+            case "completed": marker = "✓"
+            case "inProgress": marker = "→"
+            default: marker = "·"
+            }
+            return "\(marker) \(step)"
+        }
+        let explanation = firstString(in: params, keys: ["explanation"])
+        let text = ([explanation].compactMap { $0 } + steps).joined(separator: "\n")
+        guard !text.isEmpty else {
+            return nil
+        }
+        return systemNoticeEvent(text: text, itemID: "turn-plan", kind: .plan, metadata: metadata)
+    }
+
+    private mutating func streamedSystemMessageEvent(
+        params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata,
+        deltaKeys: [String],
+        bufferSuffix: String,
+        kind: MessageKind
+    ) -> AgentEvent? {
+        guard let delta = firstString(in: params, keys: deltaKeys), !delta.isEmpty else {
+            return nil
+        }
+        let key = [metadata.sessionID, metadata.turnID, metadata.itemID, bufferSuffix]
+            .compactMap { $0 }
+            .joined(separator: "#")
+        let next = (streamedTextByKey[key] ?? "") + delta
+        streamedTextByKey[key] = next
+        return systemNoticeEvent(text: next, itemID: metadata.itemID ?? bufferSuffix, kind: kind, metadata: metadata)
+    }
+
+    private func systemNoticeEvent(
+        text: String,
+        itemID: String,
+        kind: MessageKind,
+        metadata: AgentEventMetadata
+    ) -> AgentEvent {
+        let projectedMetadata = metadataWithItemID(itemID, metadata: metadata)
+        let messageID = projectedMetadata.messageID ?? itemID
+        let message = AgentMessage(
+            id: messageID,
+            sessionID: projectedMetadata.sessionID ?? "",
+            turnID: projectedMetadata.turnID,
+            itemID: itemID,
+            role: .system,
+            kind: kind,
+            content: text,
+            createdAt: Date(),
+            seq: projectedMetadata.seq,
+            revision: projectedMetadata.revision ?? 0,
+            sendStatus: .confirmed
+        )
+        return .messageCompleted(message, projectedMetadata)
+    }
+
+    private func metadataWithItemID(
+        _ itemID: String,
+        metadata: AgentEventMetadata
+    ) -> AgentEventMetadata {
+        AgentEventMetadata(
+            seq: metadata.seq,
+            sessionID: metadata.sessionID,
+            turnID: metadata.turnID,
+            itemID: itemID,
+            messageID: appServerMessageID(turnID: metadata.turnID, itemID: itemID),
+            clientMessageID: metadata.clientMessageID,
+            revision: metadata.revision,
+            createdAt: metadata.createdAt
+        )
+    }
+
+    private func tokenUsageContextEvent(
+        params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata
+    ) -> AgentEvent? {
+        guard let usage = params["tokenUsage"]?.objectValue else {
+            return nil
+        }
+        let total = usage["total"]?.objectValue ?? [:]
+        let totalTokens = firstInt(in: total, keys: ["totalTokens"])
+        let inputTokens = firstInt(in: total, keys: ["inputTokens"])
+        let outputTokens = firstInt(in: total, keys: ["outputTokens"])
+        let window = firstInt(in: usage, keys: ["modelContextWindow"])
+        var parts: [String] = []
+        if let totalTokens { parts.append("总计 \(totalTokens) tok") }
+        if let inputTokens { parts.append("输入 \(inputTokens)") }
+        if let outputTokens { parts.append("输出 \(outputTokens)") }
+        if let window { parts.append("上下文 \(window)") }
+        guard !parts.isEmpty else {
+            return nil
+        }
+        return .sessionContext(
+            SessionContextSnapshot(
+                sessionID: metadata.sessionID,
+                threadID: metadata.sessionID,
+                tasks: [SessionContextTask(
+                    id: "token-usage",
+                    kind: "token_usage",
+                    title: "Token 使用量",
+                    subtitle: parts.joined(separator: " · "),
+                    status: "updated"
+                )],
+                updatedAt: Date()
+            ),
+            metadata
+        )
+    }
+
+    private func mcpProgressContextEvent(
+        params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata
+    ) -> AgentEvent? {
+        guard let message = firstString(in: params, keys: ["message"]), !message.isEmpty else {
+            return nil
+        }
+        return .sessionContext(
+            SessionContextSnapshot(
+                sessionID: metadata.sessionID,
+                threadID: metadata.sessionID,
+                tasks: [SessionContextTask(
+                    id: metadata.itemID ?? "mcp-progress",
+                    kind: "mcp_tool",
+                    title: "MCP 工具调用",
+                    subtitle: message,
+                    status: "inProgress"
+                )],
+                updatedAt: Date()
+            ),
+            metadata
+        )
+    }
+
+    private func mcpServerStatusContextEvent(
+        params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata
+    ) -> AgentEvent? {
+        guard let name = firstString(in: params, keys: ["name"]),
+              let status = firstString(in: params, keys: ["status"]) else {
+            return nil
+        }
+        return .sessionContext(
+            SessionContextSnapshot(
+                sessionID: metadata.sessionID,
+                threadID: metadata.sessionID,
+                tasks: [SessionContextTask(
+                    id: "mcp-server-\(name)",
+                    kind: "mcp_server",
+                    title: name,
+                    subtitle: firstString(in: params, keys: ["error", "failureReason"]),
+                    status: status
+                )],
+                updatedAt: Date()
+            ),
+            metadata
+        )
     }
 
     private func completedProcessItemEvent(
@@ -704,9 +940,92 @@ struct CodexAppServerEventProjector {
         return AgentUserInputOption(label: label, description: object["description"]?.stringValue)
     }
 
-    private func isApprovalLike(method: String) -> Bool {
+    private func mcpElicitationUserInputRequest(
+        from params: [String: CodexAppServerJSONValue],
+        requestID: String,
+        metadata: AgentEventMetadata
+    ) -> AgentUserInputRequest? {
+        guard let threadID = metadata.sessionID else {
+            return nil
+        }
+        let properties = params["requestedSchema"]?.objectValue?["properties"]?.objectValue ?? [:]
+        var questions = properties.keys.sorted().compactMap { key -> AgentUserInputQuestion? in
+            guard let schema = properties[key]?.objectValue else {
+                return nil
+            }
+            let options = mcpElicitationOptions(from: schema)
+            let title = firstString(in: schema, keys: ["title"]) ?? key
+            let description = firstString(in: schema, keys: ["description"])
+                ?? "请填写 \(title)"
+            return AgentUserInputQuestion(
+                id: key,
+                header: title,
+                question: description,
+                isOther: options.isEmpty || schema["type"]?.stringValue == "array",
+                isSecret: false,
+                options: options
+            )
+        }
+        if questions.isEmpty {
+            // openai/form 允许任意 schema。当前 UI 无法安全渲染时，保留一个显式文本回答入口；
+            // 若用户不提交任何内容，runtime 会回 decline 而不是误 accept。
+            questions = [AgentUserInputQuestion(
+                id: "response",
+                header: firstString(in: params, keys: ["serverName"]) ?? "MCP",
+                question: firstString(in: params, keys: ["message"]) ?? "MCP 服务请求补充信息",
+                isOther: true,
+                isSecret: false,
+                options: []
+            )]
+        }
+        return AgentUserInputRequest(
+            id: requestID,
+            threadID: threadID,
+            turnID: metadata.turnID,
+            itemID: requestID,
+            questions: questions
+        )
+    }
+
+    private func mcpElicitationOptions(
+        from schema: [String: CodexAppServerJSONValue]
+    ) -> [AgentUserInputOption] {
+        if schema["type"]?.stringValue == "boolean" {
+            return [
+                AgentUserInputOption(label: "true", description: "是"),
+                AgentUserInputOption(label: "false", description: "否")
+            ]
+        }
+        if let values = schema["enum"]?.arrayValue?.compactMap(\.stringValue), !values.isEmpty {
+            let names = schema["enumNames"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            return values.enumerated().map { index, value in
+                AgentUserInputOption(label: value, description: names.indices.contains(index) ? names[index] : nil)
+            }
+        }
+        let variants = schema["oneOf"]?.arrayValue
+            ?? schema["items"]?.objectValue?["anyOf"]?.arrayValue
+            ?? []
+        let titled = variants.compactMap { value -> AgentUserInputOption? in
+            guard let object = value.objectValue,
+                  let raw = object["const"]?.stringValue else {
+                return nil
+            }
+            return AgentUserInputOption(label: raw, description: object["title"]?.stringValue)
+        }
+        if !titled.isEmpty {
+            return titled
+        }
+        let arrayEnum = schema["items"]?.objectValue?["enum"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        return arrayEnum.map { AgentUserInputOption(label: $0, description: nil) }
+    }
+
+    private func isApprovalLike(
+        method: String,
+        params: [String: CodexAppServerJSONValue] = [:]
+    ) -> Bool {
         let lower = method.lowercased()
         return lower.contains("approval")
+            || (method == "mcpServer/elicitation/request" && params["mode"]?.stringValue == "url")
     }
 
     private func approvalKind(method: String) -> String {
@@ -716,6 +1035,9 @@ struct CodexAppServerEventProjector {
         }
         if lower.contains("permission") {
             return "permission"
+        }
+        if lower.contains("mcpserver/elicitation") {
+            return "mcp_elicitation"
         }
         return "command"
     }
@@ -728,6 +1050,9 @@ struct CodexAppServerEventProjector {
             return "Agent 请求提升权限"
         case "user_input":
             return "Agent 请求补充输入"
+        case "mcp_elicitation":
+            let server = firstString(in: params, keys: ["serverName"]) ?? "MCP 服务"
+            return "\(server) 请求用户确认"
         default:
             if let command = commandSummary(params: params) {
                 return "Agent 请求执行命令：\(command)"
@@ -741,6 +1066,12 @@ struct CodexAppServerEventProjector {
             let command = commandSummary(params: params)
             let reason = firstString(in: params, keys: ["reason", "message"])
             return [command, reason].compactMap { $0 }.joined(separator: "\n\n")
+        }
+        if kind == "mcp_elicitation" {
+            return [
+                firstString(in: params, keys: ["message"]),
+                firstString(in: params, keys: ["url"])
+            ].compactMap { $0 }.joined(separator: "\n\n")
         }
         return firstString(in: params, keys: ["reason", "message", "diff", "path", "prompt"])
     }

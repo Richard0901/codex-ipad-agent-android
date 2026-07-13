@@ -3,6 +3,7 @@ import Foundation
 enum CodexAppServerSessionRuntimeError: LocalizedError {
     case invalidGatewayURL
     case gatewayUnavailable
+    case threadSearchUnavailable
     case projectNotFound(String)
     case projectRequired
     case sessionNotFound(SessionID)
@@ -16,6 +17,8 @@ enum CodexAppServerSessionRuntimeError: LocalizedError {
             return "app-server gateway URL 无效"
         case .gatewayUnavailable:
             return "agentd 未启用 app-server gateway，请先配置 loopback app-server WebSocket upstream"
+        case .threadSearchUnavailable:
+            return "当前 agentd 或 Codex app-server 不支持 thread/search"
         case .projectNotFound(let projectID):
             return "项目不存在或未加入 allowlist：\(projectID)"
         case .projectRequired:
@@ -240,6 +243,35 @@ actor CodexAppServerSessionRuntime {
         return page
     }
 
+    func searchSessions(query: String, cursor: String?, limit: Int?) async throws -> ThreadSearchPage {
+        let searchTerm = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !searchTerm.isEmpty else {
+            return ThreadSearchPage(results: [])
+        }
+        let config = try await ensureConfig()
+        guard config.policy.allowedMethods.contains("thread/search") else {
+            throw CodexAppServerSessionRuntimeError.threadSearchUnavailable
+        }
+        let projects = config.projects
+        let result = try await sendRecoveringFromStaleInitialization(
+            try CodexAppServerRequestBuilder(allowlistedProjects: projects).threadSearch(
+                query: searchTerm,
+                limit: limit,
+                cursor: cursor
+            ),
+            timeout: threadListRequestTimeout
+        )
+        let page = try threadSearchPage(from: result, projects: projects)
+        for session in page.sessions {
+            contextsBySessionID[session.id] = CodexAppServerSessionContext(
+                session: session,
+                cwd: session.dir,
+                activeTurnID: session.activeTurnID
+            )
+        }
+        return page
+    }
+
     func resolveWorkspace(path: String) async throws -> AgentWorkspace {
         // resolve 是 agentd 控制面的 REST 接口（非 app-server JSON-RPC），用 runtime 自己的 endpoint/token 直接请求。
         try await AgentAPIClient(endpoint: endpoint, token: token).resolveWorkspace(path: path)
@@ -268,6 +300,14 @@ actor CodexAppServerSessionRuntime {
     func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
         // 只清理 agentd registry 中已经不存在的 checkout 登记，不删除真实文件。
         try await AgentAPIClient(endpoint: endpoint, token: token).pruneMissingWorktrees()
+    }
+
+    func previewWorktreeCleanup() async throws -> WorktreeCleanupResponse {
+        try await AgentAPIClient(endpoint: endpoint, token: token).previewWorktreeCleanup()
+    }
+
+    func executeWorktreeCleanup(paths: [String], planID: String) async throws -> WorktreeCleanupResponse {
+        try await AgentAPIClient(endpoint: endpoint, token: token).executeWorktreeCleanup(paths: paths, planID: planID)
     }
 
     func listDirectories(path: String) async throws -> DirectoryListResponse {
@@ -505,6 +545,52 @@ actor CodexAppServerSessionRuntime {
             threadHistoryCacheBySessionID.removeValue(forKey: id)
             threadAuthoritativeCompletedTurnItemsBySessionID.removeValue(forKey: id)
         }
+    }
+
+    func setThreadName(threadID: SessionID, name: String) async throws {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        _ = try await sendRecoveringFromStaleInitialization(
+            try builder.threadSetName(threadID: threadID, name: name)
+        )
+        // title 是 AgentSession 的不可变快照；等 thread/name/updated 通知后由投影层告知 UI，
+        // 下次 thread/list/read 会拉取权威名称，避免本地与 app-server 状态分叉。
+    }
+
+    func compactThread(threadID: SessionID) async throws {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        _ = try await sendRecoveringFromStaleInitialization(builder.threadCompactStart(threadID: threadID))
+    }
+
+    @discardableResult
+    func unsubscribeThread(threadID: SessionID) async throws -> CodexAppServerThreadUnsubscribeStatus? {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        let result = try await sendRecoveringFromStaleInitialization(builder.threadUnsubscribe(threadID: threadID))
+        threadsResumedOnConnection.remove(threadID)
+        return result?.objectValue?["status"]?.stringValue.flatMap(CodexAppServerThreadUnsubscribeStatus.init(rawValue:))
+    }
+
+    @discardableResult
+    func startReview(
+        threadID: SessionID,
+        target: CodexAppServerReviewTarget,
+        delivery: CodexAppServerReviewDelivery? = nil
+    ) async throws -> CodexAppServerReviewStartResult {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: try await projects())
+        let result = try await sendRecoveringFromStaleInitialization(
+            try builder.reviewStart(threadID: threadID, target: target, delivery: delivery)
+        )
+        guard let object = result?.objectValue,
+              let reviewThreadID = object["reviewThreadId"]?.stringValue else {
+            throw AgentAPIError.invalidResponse
+        }
+        let turnID = object["turn"]?.objectValue?["id"]?.stringValue
+        if reviewThreadID == threadID {
+            _ = withUpdatedSession(threadID) { session in
+                session.status = "running"
+                session.activeTurnID = turnID
+            }
+        }
+        return CodexAppServerReviewStartResult(reviewThreadID: reviewThreadID, turnID: turnID)
     }
 
     func forkSession(threadID: SessionID, workspace: AgentWorkspace) async throws -> AgentSession {
@@ -1339,11 +1425,13 @@ actor CodexAppServerSessionRuntime {
         guard let request = lookupKeys.compactMap({ pendingUserInputRequestsByID[$0] }).first else {
             throw CodexAppServerSessionRuntimeError.userInputRequestNotFound(requestID)
         }
-        try await ensureConnection().respond(to: request, result: userInputResponse(answers: answers))
+        try await ensureConnection().respond(to: request, result: userInputResponse(for: request, answers: answers))
     }
 
     static func gatewayURL(endpoint: String, sessionID: SessionID, runtimeProvider: String = "codex") throws -> URL {
-        guard var components = URLComponents(string: AgentAPIClient.normalizedEndpoint(endpoint)) else {
+        // WebSocket 也必须复用 HTTP Endpoint 策略；ATS 不会替应用阻止自行构造的公网 ws:// 地址。
+        let validatedEndpoint = try EndpointTransportPolicy.validatedEndpoint(endpoint)
+        guard var components = URLComponents(string: validatedEndpoint) else {
             throw AgentAPIError.invalidEndpoint
         }
         switch components.scheme {
@@ -1668,6 +1756,35 @@ actor CodexAppServerSessionRuntime {
         recordLiveSignal(from: notification)
         updateContext(from: notification)
         let resolved = clearResolvedServerRequest(from: notification)
+        if notification.method == "serverRequest/resolved",
+           !resolved.approvalSessionIDs.isEmpty || !resolved.userInputSessionIDs.isEmpty {
+            // resolved 通知本身不区分 approval 和 requestUserInput/MCP form。必须根据本地挂起表
+            // 投影对应的 resolved 事件，否则 MCP 表单已回答后补充信息卡仍会留在 UI。
+            for sessionID in resolved.approvalSessionIDs {
+                emitApprovalResolved(sessionID: sessionID)
+            }
+            for sessionID in resolved.userInputSessionIDs {
+                emitUserInputResolved(sessionID: sessionID, skipped: false)
+            }
+            return
+        }
+        if notification.method == "deprecationNotice",
+           approvalSessionID(from: notification.params?.objectValue ?? [:]) == nil {
+            // deprecationNotice 是连接级通知，官方协议不带 threadId。直接 emit 会被路由层丢弃，
+            // 因此将它投递给当前连接已知会话，让用户真正看到升级提示。
+            let params = notification.params?.objectValue ?? [:]
+            let summary = params["summary"]?.stringValue ?? "app-server 协议能力已废弃"
+            let details = params["details"]?.stringValue
+            let payload = AgentErrorPayload(
+                message: [summary, details].compactMap { $0 }.joined(separator: "\n"),
+                code: "deprecationNotice",
+                retryable: false
+            )
+            for sessionID in contextsBySessionID.keys {
+                emit(.warning(payload, metadata(threadID: sessionID, turnID: nil)))
+            }
+            return
+        }
         guard let event = projector.project(notification) else {
             for sessionID in resolved.approvalSessionIDs {
                 emitApprovalResolved(sessionID: sessionID)
@@ -1688,7 +1805,7 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func handle(_ request: CodexAppServerServerRequest) {
-        if isUserInputServerRequest(request.method) {
+        if isUserInputServerRequest(request) {
             handleUserInputRequest(request)
             return
         }
@@ -1727,7 +1844,7 @@ actor CodexAppServerSessionRuntime {
         }
         Task { [connection, sessionID] in
             do {
-                try await connection.respond(to: request, result: self.userInputResponse(answers: [:]))
+                try await connection.respond(to: request, result: self.userInputResponse(for: request, answers: [:]))
                 if let sessionID {
                     self.emitUserInputResolved(sessionID: sessionID, skipped: true)
                 }
@@ -1736,7 +1853,12 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func isStaleReplayedApproval(_ request: CodexAppServerServerRequest) -> Bool {
-        guard isApprovalLikeServerRequest(request.method),
+        if request.method == "mcpServer/elicitation/request" {
+            // MCP elicitation 可以是与 turn 无关的独立请求，turnId 在官方协议中本来就可为 null。
+            // 不能因 thread 当前 idle 就把真实 URL 确认当成过期审批自动拒绝。
+            return false
+        }
+        guard isApprovalLikeServerRequest(request),
               let sessionID = approvalSessionID(for: request),
               let context = contextsBySessionID[sessionID] else {
             // 不认识的 thread 或拿不到本地会话状态时，保守地照常弹卡，避免误杀真实审批。
@@ -2033,6 +2155,42 @@ actor CodexAppServerSessionRuntime {
             .compactMap { try? agentSession(from: $0, projects: projects, fallbackProject: fallbackProject) }
         let nextCursor = object["nextCursor"]?.stringValue
         return SessionsPage(sessions: sessions, nextCursor: nextCursor, hasMore: nextCursor != nil)
+    }
+
+    private func threadSearchPage(
+        from result: CodexAppServerJSONValue?,
+        projects: [AgentProject]
+    ) throws -> ThreadSearchPage {
+        guard let object = result?.objectValue,
+              let data = object["data"]?.arrayValue
+        else {
+            throw AgentAPIError.invalidResponse
+        }
+
+        var results: [ThreadSearchResult] = []
+        results.reserveCapacity(data.count)
+        for value in data {
+            guard let row = value.objectValue,
+                  let thread = row["thread"]?.objectValue,
+                  let snippet = row["snippet"]?.stringValue
+            else {
+                throw AgentAPIError.invalidResponse
+            }
+            let cwd = thread["cwd"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // thread/search 的最终权限边界在 agentd gateway：它会按 projects/browse_roots 裁剪响应。
+            // iOS 不发送 cwd，只拒绝不可能作为会话目录的空值/相对路径；合法 managed worktree
+            // 未必已进入 config.projects，不能在这里误删 gateway 已授权的结果。
+            guard !cwd.isEmpty, (cwd as NSString).isAbsolutePath else {
+                continue
+            }
+            let session = try agentSession(from: thread, projects: projects, fallbackProject: nil)
+            results.append(ThreadSearchResult(session: session, snippet: snippet))
+        }
+        return ThreadSearchPage(
+            results: results,
+            nextCursor: object["nextCursor"]?.stringValue,
+            backwardsCursor: object["backwardsCursor"]?.stringValue
+        )
     }
 
     private func scheduleRateLimitRefreshIfAvailable() {
@@ -3048,7 +3206,7 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func rememberPendingApprovalRequest(_ request: CodexAppServerServerRequest) {
-        guard isApprovalLikeServerRequest(request.method) else {
+        guard isApprovalLikeServerRequest(request) else {
             return
         }
         for key in pendingApprovalStorageKeys(for: request) {
@@ -3063,7 +3221,7 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func rememberPendingUserInputRequest(_ request: CodexAppServerServerRequest) {
-        guard isUserInputServerRequest(request.method) else {
+        guard isUserInputServerRequest(request) else {
             return
         }
         for key in pendingUserInputStorageKeys(for: request) {
@@ -3219,13 +3377,24 @@ actor CodexAppServerSessionRuntime {
             ?? params["session_id"]?.stringValue
     }
 
-    private func isApprovalLikeServerRequest(_ method: String) -> Bool {
-        let lower = method.lowercased()
-        return lower.contains("approval")
+    private func isApprovalLikeServerRequest(_ request: CodexAppServerServerRequest) -> Bool {
+        let lower = request.method.lowercased()
+        if lower.contains("approval") {
+            return true
+        }
+        // URL 型 MCP elicitation 没有表单内容，复用明确的批准/拒绝交互更安全。
+        return request.method == "mcpServer/elicitation/request"
+            && request.params?.objectValue?["mode"]?.stringValue == "url"
     }
 
-    private func isUserInputServerRequest(_ method: String) -> Bool {
-        method == "item/tool/requestUserInput"
+    private func isUserInputServerRequest(_ request: CodexAppServerServerRequest) -> Bool {
+        if request.method == "item/tool/requestUserInput" {
+            return true
+        }
+        // form/openai-form 都投影到现有补充信息卡；未知 mode 也走此路径，
+        // 用户没有填入时回 decline，不会误接受无法理解的 MCP 请求。
+        return request.method == "mcpServer/elicitation/request"
+            && request.params?.objectValue?["mode"]?.stringValue != "url"
     }
 
     private func uniqueStrings(_ values: [String]) -> [String] {
@@ -3233,7 +3402,7 @@ actor CodexAppServerSessionRuntime {
         return values.filter { seen.insert($0).inserted }
     }
 
-    private func approvalResponse(
+    func approvalResponse(
         method: String,
         params: [String: CodexAppServerJSONValue],
         decision: String
@@ -3259,14 +3428,72 @@ actor CodexAppServerSessionRuntime {
         return .object(["decision": .string(decision)])
     }
 
-    private func userInputResponse(answers: [String: [String]]) -> CodexAppServerJSONValue {
-        .object([
+    func userInputResponse(
+        for request: CodexAppServerServerRequest,
+        answers: [String: [String]]
+    ) -> CodexAppServerJSONValue {
+        if request.method == "mcpServer/elicitation/request" {
+            return mcpElicitationResponse(request: request, answers: answers)
+        }
+        return .object([
             "answers": .object(answers.mapValues { values in
                 .object([
                     "answers": .array(values.map { .string($0) })
                 ])
             })
         ])
+    }
+
+    private func mcpElicitationResponse(
+        request: CodexAppServerServerRequest,
+        answers: [String: [String]]
+    ) -> CodexAppServerJSONValue {
+        guard !answers.isEmpty else {
+            // 没有可验证的内容时 fail closed，避免对未知/unsupported schema 误回 accept。
+            return .object([
+                "action": .string("decline"),
+                "content": .null,
+                "_meta": .null
+            ])
+        }
+
+        let schemaProperties = request.params?.objectValue?["requestedSchema"]?
+            .objectValue?["properties"]?.objectValue ?? [:]
+        let content = answers.reduce(into: [String: CodexAppServerJSONValue]()) { result, entry in
+            guard !entry.value.isEmpty else {
+                return
+            }
+            let propertySchema = schemaProperties[entry.key]?.objectValue ?? [:]
+            result[entry.key] = mcpElicitationValue(from: entry.value, schema: propertySchema)
+        }
+        guard !content.isEmpty else {
+            return .object(["action": .string("decline"), "content": .null, "_meta": .null])
+        }
+        return .object([
+            "action": .string("accept"),
+            "content": .object(content),
+            "_meta": .null
+        ])
+    }
+
+    private func mcpElicitationValue(
+        from answers: [String],
+        schema: [String: CodexAppServerJSONValue]
+    ) -> CodexAppServerJSONValue {
+        let first = answers[0]
+        switch schema["type"]?.stringValue {
+        case "array":
+            return .array(answers.map { .string($0) })
+        case "boolean":
+            let normalized = first.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return .bool(["true", "1", "yes", "是", "允许"].contains(normalized))
+        case "integer":
+            return Int64(first).map(CodexAppServerJSONValue.int) ?? .string(first)
+        case "number":
+            return Double(first).map(CodexAppServerJSONValue.double) ?? .string(first)
+        default:
+            return .string(first)
+        }
     }
 
     private func normalizeApprovalDecision(_ decision: String) -> String {
@@ -3408,6 +3635,14 @@ final class CodexAppServerSessionAPIClient: SessionStoreAPIClient {
         try await runtime.pruneMissingWorktrees()
     }
 
+    func previewWorktreeCleanup() async throws -> WorktreeCleanupResponse {
+        try await runtime.previewWorktreeCleanup()
+    }
+
+    func executeWorktreeCleanup(paths: [String], planID: String) async throws -> WorktreeCleanupResponse {
+        try await runtime.executeWorktreeCleanup(paths: paths, planID: planID)
+    }
+
     func listDirectories(path: String) async throws -> DirectoryListResponse {
         try await runtime.listDirectories(path: path)
     }
@@ -3478,6 +3713,10 @@ final class CodexAppServerSessionAPIClient: SessionStoreAPIClient {
         try await runtime.sessionsPage(workspace: workspace, cursor: cursor, limit: limit)
     }
 
+    func searchSessions(query: String, cursor: String?, limit: Int?) async throws -> ThreadSearchPage {
+        try await runtime.searchSessions(query: query, cursor: cursor, limit: limit)
+    }
+
     func session(id: String, afterSeq: EventSequence?) async throws -> SessionResponse {
         try await runtime.session(id: id, afterSeq: afterSeq)
     }
@@ -3508,6 +3747,26 @@ final class CodexAppServerSessionAPIClient: SessionStoreAPIClient {
 
     func setSessionArchived(id: String, archived: Bool) async throws {
         try await runtime.setSessionArchived(id: id, archived: archived)
+    }
+
+    func setThreadName(threadID: String, name: String) async throws {
+        try await runtime.setThreadName(threadID: threadID, name: name)
+    }
+
+    func compactThread(threadID: String) async throws {
+        try await runtime.compactThread(threadID: threadID)
+    }
+
+    func unsubscribeThread(threadID: String) async throws -> CodexAppServerThreadUnsubscribeStatus? {
+        try await runtime.unsubscribeThread(threadID: threadID)
+    }
+
+    func startReview(
+        threadID: String,
+        target: CodexAppServerReviewTarget,
+        delivery: CodexAppServerReviewDelivery? = nil
+    ) async throws -> CodexAppServerReviewStartResult {
+        try await runtime.startReview(threadID: threadID, target: target, delivery: delivery)
     }
 
     func forkSession(threadID: String, workspace: AgentWorkspace) async throws -> AgentSession {
@@ -3649,6 +3908,8 @@ final class MultiRuntimeSessionAPIClient: SessionStoreAPIClient {
     func listWorktrees() async throws -> [WorktreeListItem] { try await codexClient.listWorktrees() }
     func deleteWorktree(path: String, force: Bool) async throws -> WorktreeDeleteResponse { try await codexClient.deleteWorktree(path: path, force: force) }
     func pruneMissingWorktrees() async throws -> WorktreePruneResponse { try await codexClient.pruneMissingWorktrees() }
+    func previewWorktreeCleanup() async throws -> WorktreeCleanupResponse { try await codexClient.previewWorktreeCleanup() }
+    func executeWorktreeCleanup(paths: [String], planID: String) async throws -> WorktreeCleanupResponse { try await codexClient.executeWorktreeCleanup(paths: paths, planID: planID) }
     func listDirectories(path: String) async throws -> DirectoryListResponse { try await codexClient.listDirectories(path: path) }
     func readFile(path: String) async throws -> FileReadResponse { try await codexClient.readFile(path: path) }
     func readHistoryMedia(id: String) async throws -> FileReadResponse { try await codexClient.readHistoryMedia(id: id) }
@@ -3708,6 +3969,13 @@ final class MultiRuntimeSessionAPIClient: SessionStoreAPIClient {
         return mergedPage(codex: codexPage, claude: claudePage, limit: limit)
     }
 
+    func searchSessions(query: String, cursor: String?, limit: Int?) async throws -> ThreadSearchPage {
+        // Codex 的 thread/search 是独立能力；Claude channel 目前没有同构接口，避免为搜索额外发双路请求。
+        let page = try await codexClient.searchSessions(query: query, cursor: cursor, limit: limit)
+        bundle.routes.remember(page.sessions)
+        return page
+    }
+
     func session(id: String, afterSeq: EventSequence?) async throws -> SessionResponse {
         let response = try await bundle.runtime(forSessionID: id).session(id: id, afterSeq: afterSeq)
         bundle.routes.remember(response.session)
@@ -3752,6 +4020,30 @@ final class MultiRuntimeSessionAPIClient: SessionStoreAPIClient {
         if archived {
             bundle.routes.remove(sessionID: id)
         }
+    }
+
+    func setThreadName(threadID: String, name: String) async throws {
+        try await bundle.runtime(forSessionID: threadID).setThreadName(threadID: threadID, name: name)
+    }
+
+    func compactThread(threadID: String) async throws {
+        try await bundle.runtime(forSessionID: threadID).compactThread(threadID: threadID)
+    }
+
+    func unsubscribeThread(threadID: String) async throws -> CodexAppServerThreadUnsubscribeStatus? {
+        try await bundle.runtime(forSessionID: threadID).unsubscribeThread(threadID: threadID)
+    }
+
+    func startReview(
+        threadID: String,
+        target: CodexAppServerReviewTarget,
+        delivery: CodexAppServerReviewDelivery? = nil
+    ) async throws -> CodexAppServerReviewStartResult {
+        try await bundle.runtime(forSessionID: threadID).startReview(
+            threadID: threadID,
+            target: target,
+            delivery: delivery
+        )
     }
 
     func messages(sessionID: String, before: String?, limit: Int?) async throws -> [CodexHistoryMessage] {
@@ -3992,7 +4284,11 @@ final class CodexAppServerSessionWebSocketClient: SessionWebSocketClient {
                     return
                 }
                 await MainActor.run {
-                    statusHandler?(.failed(error.localizedDescription))
+                    if isCredentialInvalidatingError(error) {
+                        statusHandler?(.terminated(.credentialsInvalid))
+                    } else {
+                        statusHandler?(.failed(error.localizedDescription))
+                    }
                 }
             }
         }

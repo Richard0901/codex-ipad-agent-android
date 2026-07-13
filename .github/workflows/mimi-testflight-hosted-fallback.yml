@@ -46,7 +46,7 @@ jobs:
       FASTLANE_SKIP_UPDATE_CHECK: '1'
       FASTLANE_HIDE_TIMESTAMP: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.ref }}
 
@@ -59,6 +59,9 @@ jobs:
           fi
           xcodebuild -version
           fastlane --version
+
+      - name: 检查 App 隐私清单
+        run: bash ./scripts/check-ios-privacy-manifest.sh
 
       - name: 安装临时发布签名与 App Store Connect Key
         run: |

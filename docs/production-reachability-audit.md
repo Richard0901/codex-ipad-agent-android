@@ -15,7 +15,7 @@
 | HTTP 路由 | `cmd/agentd/main.go` 的 `httpapi.NewRouterWithRuntime(..., nil)` | 生产路由没有注入旧 `SessionRuntime`。 |
 | app-server gateway | `internal/httpapi/appserver_gateway.go` | iPad 的 `/api/app-server/ws` 主链路，负责方法白名单、cwd allowlist、thread 授权和策略校验。 |
 | managed app-server | `internal/appserver/managed.go` 的 `StartManagedWebSocket` | 当前只启动 WebSocket transport 的 Codex app-server。 |
-| 项目 allowlist | `internal/projects` + `/api/projects` + `/api/workspaces/resolve` | iPad 只能使用配置中的项目路径。 |
+| 工作区授权 | `internal/projects` + `/api/projects` + `/api/workspaces/resolve` | iPad 可使用配置项目、`browse_roots` 内明确打开的具体目录和 agentd 管理的 Worktree；所有请求都绑定 canonical cwd。 |
 | iOS 直连 runtime | `CodexAppServerSessionRuntime.swift` | iOS 端直接构造 app-server JSON-RPC 请求并处理 notification/server request。 |
 
 ### 调试可达路径
@@ -47,4 +47,4 @@
 - 旧 runtime 里有一份安全逻辑副本，短期不要在里面追加新安全修复，避免制造“两套行为”。
 - 删除旧代码仍有价值，但必须放在安全修复之后，并用 `go test ./...` 和 iOS 端数据流测试守住回归。
 - Debug history 已加默认关闭开关；后续如果做公开发布，还应补充更细的输出脱敏策略。
-- iOS 端仍保留 `100.64/10` Tailscale 裸 IP 的 HTTP 支持，这是当前 README 和配对链接的主路径；因为 ATS 不能按 Tailscale CIDR 做精确例外，当前 MVP 依赖 App 端 Endpoint 校验收窄可访问范围。上线前必须做真机 ATS/Tailscale 验证，并优先评估 MagicDNS `*.ts.net` + HTTPS 或更严格的 ATS 策略。
+- iOS 端仍保留 `100.64/10` Tailscale 裸 IP 的 HTTP 支持，这是当前 README 和配对链接的主路径。系统层 ATS 已从全局放行收窄为 `NSAllowsLocalNetworking` 和 `ts.net` 子域例外，应用层在设置、REST 和 WebSocket 三层统一拒绝公网 HTTP；CI 会检查该边界。上线前仍必须做真机 ATS/Tailscale 验证，并优先评估 MagicDNS `*.ts.net` + HTTPS。

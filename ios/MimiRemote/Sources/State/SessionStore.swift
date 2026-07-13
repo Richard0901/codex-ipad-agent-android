@@ -1,5 +1,98 @@
 import Foundation
+import Network
 import UserNotifications
+
+enum NetworkReachabilityStatus: Equatable, Sendable {
+    case unknown
+    case satisfied
+    case unsatisfied
+}
+
+struct NetworkPathStatusUpdate: Equatable, Sendable {
+    let sequence: UInt64
+    let status: NetworkReachabilityStatus
+}
+
+protocol NetworkPathStatusSource: AnyObject {
+    var currentStatus: NetworkReachabilityStatus { get }
+    var onStatusChange: ((NetworkPathStatusUpdate) -> Void)? { get set }
+
+    func start()
+    func stop()
+}
+
+/// 生产环境的 Network.framework 适配层。SessionStore 只依赖精简状态协议，测试可以注入确定性事件源。
+final class NWNetworkPathStatusSource: NetworkPathStatusSource {
+    private let monitor: NWPathMonitor
+    private let queue: DispatchQueue
+    private let lock = NSLock()
+    private var statusStorage: NetworkReachabilityStatus = .unknown
+    private var handlerStorage: ((NetworkPathStatusUpdate) -> Void)?
+    private var sequenceStorage: UInt64 = 0
+    private var started = false
+
+    init(monitor: NWPathMonitor = NWPathMonitor()) {
+        self.monitor = monitor
+        self.queue = DispatchQueue(label: "com.gaixianggeng.mimi.network-path")
+    }
+
+    var currentStatus: NetworkReachabilityStatus {
+        lock.withLock { statusStorage }
+    }
+
+    var onStatusChange: ((NetworkPathStatusUpdate) -> Void)? {
+        get { lock.withLock { handlerStorage } }
+        set { lock.withLock { handlerStorage = newValue } }
+    }
+
+    func start() {
+        let shouldStart = lock.withLock { () -> Bool in
+            guard !started else { return false }
+            started = true
+            return true
+        }
+        guard shouldStart else { return }
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.publish(path.status == .satisfied ? .satisfied : .unsatisfied)
+        }
+        monitor.start(queue: queue)
+    }
+
+    func stop() {
+        let shouldStop = lock.withLock { () -> Bool in
+            guard started else { return false }
+            started = false
+            handlerStorage = nil
+            return true
+        }
+        guard shouldStop else { return }
+        monitor.cancel()
+    }
+
+    private func publish(_ status: NetworkReachabilityStatus) {
+        let delivery = lock.withLock { () -> (((NetworkPathStatusUpdate) -> Void)?, NetworkPathStatusUpdate) in
+            statusStorage = status
+            // 序号必须在 NWPathMonitor 的串行回调里生成，不能等 MainActor Task 开始后再编号；
+            // 否则快速断网再联网时，晚执行的旧 Task 仍可能拿到更大的序号并覆盖新状态。
+            sequenceStorage &+= 1
+            return (handlerStorage, NetworkPathStatusUpdate(sequence: sequenceStorage, status: status))
+        }
+        delivery.0?(delivery.1)
+    }
+}
+
+/// 注入了 API mock 的测试默认使用稳定在线源，避免每个单元测试都启动系统 monitor。
+private final class StaticNetworkPathStatusSource: NetworkPathStatusSource {
+    let currentStatus: NetworkReachabilityStatus
+    var onStatusChange: ((NetworkPathStatusUpdate) -> Void)?
+
+    init(_ status: NetworkReachabilityStatus) {
+        self.currentStatus = status
+    }
+
+    func start() {}
+    func stop() { onStatusChange = nil }
+}
 
 protocol SessionStoreAPIClient {
     func projects() async throws -> [AgentProject]
@@ -11,6 +104,8 @@ protocol SessionStoreAPIClient {
     func listWorktrees() async throws -> [WorktreeListItem]
     func deleteWorktree(path: String, force: Bool) async throws -> WorktreeDeleteResponse
     func pruneMissingWorktrees() async throws -> WorktreePruneResponse
+    func previewWorktreeCleanup() async throws -> WorktreeCleanupResponse
+    func executeWorktreeCleanup(paths: [String], planID: String) async throws -> WorktreeCleanupResponse
     func listDirectories(path: String) async throws -> DirectoryListResponse
     func readFile(path: String) async throws -> FileReadResponse
     func readHistoryMedia(id: String) async throws -> FileReadResponse
@@ -27,6 +122,7 @@ protocol SessionStoreAPIClient {
     func sessions(projectID: String?, cursor: String?, limit: Int?) async throws -> [AgentSession]
     func sessionsPage(projectID: String?, cursor: String?, limit: Int?) async throws -> SessionsPage
     func sessionsPage(workspace: AgentWorkspace, cursor: String?, limit: Int?) async throws -> SessionsPage
+    func searchSessions(query: String, cursor: String?, limit: Int?) async throws -> ThreadSearchPage
     func session(id: String, afterSeq: EventSequence?) async throws -> SessionResponse
     func threadGoal(threadID: String) async throws -> ThreadGoal?
     func setThreadGoal(threadID: String, objective: String?, status: ThreadGoalStatus?, tokenBudget: Int64?) async throws -> ThreadGoal
@@ -35,6 +131,10 @@ protocol SessionStoreAPIClient {
     func forkSession(threadID: String, workspace: AgentWorkspace) async throws -> AgentSession
     func stopSession(id: String) async throws
     func setSessionArchived(id: String, archived: Bool) async throws
+    func setThreadName(threadID: String, name: String) async throws
+    func compactThread(threadID: String) async throws
+    func unsubscribeThread(threadID: String) async throws -> CodexAppServerThreadUnsubscribeStatus?
+    func startReview(threadID: String, target: CodexAppServerReviewTarget, delivery: CodexAppServerReviewDelivery?) async throws -> CodexAppServerReviewStartResult
     func messages(sessionID: String, before: String?, limit: Int?) async throws -> [CodexHistoryMessage]
     func messagesPage(sessionID: String, before: String?, limit: Int?) async throws -> HistoryMessagesPage
     func messagesPage(
@@ -63,6 +163,26 @@ extension SessionStoreAPIClient {
     }
 
     func setSessionArchived(id: String, archived: Bool) async throws {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func setThreadName(threadID: String, name: String) async throws {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func compactThread(threadID: String) async throws {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func unsubscribeThread(threadID: String) async throws -> CodexAppServerThreadUnsubscribeStatus? {
+        throw AgentAPIError.invalidResponse
+    }
+
+    func startReview(
+        threadID: String,
+        target: CodexAppServerReviewTarget,
+        delivery: CodexAppServerReviewDelivery? = nil
+    ) async throws -> CodexAppServerReviewStartResult {
         throw AgentAPIError.invalidResponse
     }
 
@@ -109,6 +229,16 @@ extension SessionStoreAPIClient {
 
     func pruneMissingWorktrees() async throws -> WorktreePruneResponse {
         // 默认实现只服务于不直连 agentd 的测试替身；真实 client 会覆写并请求 /api/worktrees/prune。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func previewWorktreeCleanup() async throws -> WorktreeCleanupResponse {
+        // 清理预览必须先由 agentd 根据固定保留策略重新计算，客户端不在本地猜候选。
+        throw AgentAPIError.invalidResponse
+    }
+
+    func executeWorktreeCleanup(paths: [String], planID: String) async throws -> WorktreeCleanupResponse {
+        // 默认替身不执行破坏性操作；真实 client 固定走带 confirm 的 cleanup API。
         throw AgentAPIError.invalidResponse
     }
 
@@ -183,6 +313,11 @@ extension SessionStoreAPIClient {
 
     func sessionsPage(workspace: AgentWorkspace, cursor: String?, limit: Int?) async throws -> SessionsPage {
         try await sessionsPage(projectID: workspace.rootProjectID ?? workspace.id, cursor: cursor, limit: limit)
+    }
+
+    func searchSessions(query: String, cursor: String?, limit: Int?) async throws -> ThreadSearchPage {
+        // 旧测试替身与尚未升级的服务默认视为不支持；SessionStore 会静默保留本地搜索结果。
+        throw AgentAPIError.invalidResponse
     }
 
     func messagesPage(sessionID: String, before: String?, limit: Int?) async throws -> HistoryMessagesPage {
@@ -597,9 +732,20 @@ struct HistorySavingsNoticeStore {
     }
 }
 
+enum SessionReminderScheduleOutcome: Equatable {
+    case scheduled
+    case permissionDenied
+}
+
 protocol SessionReminderScheduling {
-    func schedule(_ reminder: SessionReminder) async throws
-    func notify(_ notification: SessionRuntimeNotification) async throws
+    func schedule(
+        _ reminder: SessionReminder,
+        route: SessionNotificationRoute
+    ) async throws -> SessionReminderScheduleOutcome
+    func notify(
+        _ notification: SessionRuntimeNotification,
+        route: SessionNotificationRoute
+    ) async throws
     func cancel(sessionID: SessionID)
 }
 
@@ -610,16 +756,20 @@ struct UserNotificationSessionReminderScheduler: SessionReminderScheduling {
         self.center = center
     }
 
-    func schedule(_ reminder: SessionReminder) async throws {
+    func schedule(
+        _ reminder: SessionReminder,
+        route: SessionNotificationRoute
+    ) async throws -> SessionReminderScheduleOutcome {
         let granted = try await requestAuthorizationIfNeeded()
         guard granted else {
-            return
+            return .permissionDenied
         }
 
         let content = UNMutableNotificationContent()
         content.title = "会话提醒"
         content.body = reminder.title
         content.sound = .default
+        content.userInfo = route.userInfo
 
         let interval = max(reminder.fireAt.timeIntervalSinceNow, 1)
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
@@ -630,9 +780,13 @@ struct UserNotificationSessionReminderScheduler: SessionReminderScheduling {
         )
         center.removePendingNotificationRequests(withIdentifiers: [Self.notificationID(for: reminder.sessionID)])
         try await add(request)
+        return .scheduled
     }
 
-    func notify(_ notification: SessionRuntimeNotification) async throws {
+    func notify(
+        _ notification: SessionRuntimeNotification,
+        route: SessionNotificationRoute
+    ) async throws {
         let granted = try await requestAuthorizationIfNeeded()
         guard granted else {
             return
@@ -642,6 +796,7 @@ struct UserNotificationSessionReminderScheduler: SessionReminderScheduling {
         content.title = notification.title
         content.body = notification.body
         content.sound = .default
+        content.userInfo = route.userInfo
 
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
         let request = UNNotificationRequest(
@@ -713,8 +868,14 @@ struct UserNotificationSessionReminderScheduler: SessionReminderScheduling {
 }
 
 struct NoopSessionReminderScheduler: SessionReminderScheduling {
-    func schedule(_ reminder: SessionReminder) async throws {}
-    func notify(_ notification: SessionRuntimeNotification) async throws {}
+    func schedule(
+        _ reminder: SessionReminder,
+        route: SessionNotificationRoute
+    ) async throws -> SessionReminderScheduleOutcome { .scheduled }
+    func notify(
+        _ notification: SessionRuntimeNotification,
+        route: SessionNotificationRoute
+    ) async throws {}
     func cancel(sessionID: SessionID) {}
 }
 
@@ -725,6 +886,23 @@ enum FilePreviewStoreError: LocalizedError {
         switch self {
         case .invalidPayload:
             return "文件预览内容无效"
+        }
+    }
+}
+
+enum WorktreeCleanupSelectionError: LocalizedError, Equatable {
+    case emptySelection
+    case containsBlockedPath
+    case missingPlan
+
+    var errorDescription: String? {
+        switch self {
+        case .emptySelection:
+            return "请至少选择一个可清理的 Worktree。"
+        case .containsBlockedPath:
+            return "清理选择已过期或包含受保护的 Worktree，请重新生成预览。"
+        case .missingPlan:
+            return "清理预览缺少 plan_id，请重新生成预览。"
         }
     }
 }
@@ -770,6 +948,13 @@ struct SessionRestoreSnapshot: Codable, Equatable {
     let session: AgentSession
 }
 
+enum SessionNotificationOpenOutcome: Equatable {
+    case opened
+    case requiresProfileSwitch(displayName: String?)
+    case unavailable(message: String)
+    case ignored
+}
+
 @MainActor
 final class SessionStore: ObservableObject {
     @Published private(set) var projects: [AgentProject] = [] {
@@ -795,6 +980,16 @@ final class SessionStore: ObservableObject {
             rebuildSessionIndexes()
         }
     }
+    @Published private(set) var remoteSessionSearchResults: [AgentSession] = [] {
+        didSet {
+            rebuildProjectSessionListSnapshots()
+        }
+    }
+    @Published private(set) var sessionSearchNextCursor: String?
+    @Published private(set) var sessionSearchHasMore = false
+    // 首屏搜索覆盖 300ms 防抖和实际请求；与分页 loading 分离，避免“继续搜索”误占空态。
+    @Published private(set) var isSearchingRemoteSessionResults = false
+    @Published private(set) var isLoadingMoreSessionSearchResults = false
     @Published private(set) var pinnedSessionIDs: Set<SessionID> = []
     @Published private(set) var archivedSessionIDs: Set<SessionID> = []
     @Published private(set) var sessionWorkspaceIDs: Set<String>? = nil
@@ -807,12 +1002,15 @@ final class SessionStore: ObservableObject {
                 return
             }
             rebuildProjectSessionListSnapshots()
+            scheduleRemoteSessionSearch()
         }
     }
     @Published private(set) var expandedProjectIDs: Set<String> = []
     @Published private(set) var showingAllSessionProjectIDs: Set<String> = []
     @Published var isLoading = false
     @Published var webSocketStatus: WebSocketStatus = .disconnected
+    @Published private(set) var connectionTermination: ConnectionTerminationStatus?
+    @Published private(set) var networkReachabilityStatus: NetworkReachabilityStatus = .unknown
     @Published var statusMessage: String?
     @Published var errorMessage: String?
     @Published private(set) var isRefreshingSelectedSession = false
@@ -869,6 +1067,7 @@ final class SessionStore: ObservableObject {
     private let sessionControlStateStore: SessionControlStateStore
     private let sessionReminderStore: SessionReminderStore
     private let sessionReminderScheduler: any SessionReminderScheduling
+    private let sessionReminderNow: () -> Date
     private let historySavingsNoticeStore: HistorySavingsNoticeStore
     private let terminalStreamStore = TerminalStreamStore()
     // 草稿跟随 SessionStore 生命周期，避免窗口 resize 或详情页重建时随 ComposerView 的 @State 一起丢失。
@@ -878,13 +1077,25 @@ final class SessionStore: ObservableObject {
     private let webSocketFactory: () -> any SessionWebSocketClient
     private let sessionWebSocketFactory: ((AgentSession) -> any SessionWebSocketClient)?
     private let webSocketReconnectDelayNanoseconds: (Int) -> UInt64
+    private let webSocketReconnectSleep: (UInt64) async throws -> Void
+    private let networkPathStatusSource: any NetworkPathStatusSource
     private let sessionListNow: () -> Date
     private let sessionListSleep: (UInt64) async -> Void
+    private let sessionSearchDebounceNanoseconds: UInt64
+    private let sessionSearchSleep: (UInt64) async throws -> Void
     private var webSocket: (any SessionWebSocketClient)?
     private var connectedSessionID: String?
     private var webSocketConnectionGeneration = 0
     private var webSocketReconnectTask: Task<Void, Never>?
     private var webSocketReconnectAttemptBySessionID: [SessionID: Int] = [:]
+    private var lastAppliedNetworkPathSequence: UInt64 = 0
+    private var networkPathGeneration = 0
+    private var networkSuspendedSessionID: SessionID?
+    private var networkRecoveryTask: Task<Void, Never>?
+    private var appLifecycleSuspendedSessionID: SessionID?
+    private var isAppInBackground = false
+    private var connectionChangeGeneration = 0
+    private var inFlightConnectionChangeGeneration: Int?
     private var lastSeenEventSeqBySessionID: [SessionID: EventSequence] = [:]
     private var historySnapshotSeqBySessionID: [SessionID: EventSequence] = [:]
     private var runtimeEventFlushTasks: [SessionID: Task<Void, Never>] = [:]
@@ -924,6 +1135,11 @@ final class SessionStore: ObservableObject {
     private var sessionListFirstPageCacheByKey: [SessionListFirstPageRequestKey: SessionListFirstPageCacheEntry] = [:]
     private var sessionListCooldownUntilByBudgetKey: [SessionListBudgetKey: Date] = [:]
     private var sessionListReconciliationTasksByProjectID: [String: Task<Void, Never>] = [:]
+    private var sessionSearchTask: Task<Void, Never>?
+    private var sessionSearchLoadMoreTask: Task<Void, Never>?
+    private var sessionSearchGeneration = 0
+    private var sessionSearchLoadingCursor: String?
+    private var remoteSessionSearchSnippetByID: [SessionID: String] = [:]
     private var historyPreviousCursorBySessionID: [SessionID: String] = [:]
     private var historyHasMoreBeforeBySessionID: [SessionID: Bool] = [:]
     private var historyPageRequestTokenBySessionID: [SessionID: Int] = [:]
@@ -972,13 +1188,23 @@ final class SessionStore: ObservableObject {
         sessionReminderStore: SessionReminderStore? = nil,
         historySavingsNoticeStore: HistorySavingsNoticeStore? = nil,
         sessionReminderScheduler: (any SessionReminderScheduling)? = nil,
+        sessionReminderNow: @escaping () -> Date = Date.init,
         clientFactory: (() throws -> any SessionStoreAPIClient)? = nil,
         webSocketFactory: (() -> any SessionWebSocketClient)? = nil,
         sessionWebSocketFactory: ((AgentSession) -> any SessionWebSocketClient)? = nil,
         webSocketReconnectDelayNanoseconds: ((Int) -> UInt64)? = nil,
+        webSocketReconnectRandom: @escaping () -> Double = { Double.random(in: 0...1) },
+        webSocketReconnectSleep: @escaping (UInt64) async throws -> Void = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        networkPathStatusSource: (any NetworkPathStatusSource)? = nil,
         sessionListNow: @escaping () -> Date = Date.init,
         sessionListSleep: @escaping (UInt64) async -> Void = { nanoseconds in
             try? await Task.sleep(nanoseconds: nanoseconds)
+        },
+        sessionSearchDebounceNanoseconds: UInt64 = 300_000_000,
+        sessionSearchSleep: @escaping (UInt64) async throws -> Void = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
         }
     ) {
         self.appStore = appStore
@@ -1033,6 +1259,7 @@ final class SessionStore: ObservableObject {
         } else {
             self.sessionReminderScheduler = UserNotificationSessionReminderScheduler()
         }
+        self.sessionReminderNow = sessionReminderNow
         self.clientFactory = clientFactory ?? { try appStore.makeSessionStoreAPIClient() }
         self.webSocketFactory = webSocketFactory ?? { appStore.makeSessionWebSocketClient() }
         if let sessionWebSocketFactory {
@@ -1042,19 +1269,132 @@ final class SessionStore: ObservableObject {
         } else {
             self.sessionWebSocketFactory = nil
         }
-        self.webSocketReconnectDelayNanoseconds = webSocketReconnectDelayNanoseconds ?? Self.defaultWebSocketReconnectDelayNanoseconds
+        if let webSocketReconnectDelayNanoseconds {
+            self.webSocketReconnectDelayNanoseconds = webSocketReconnectDelayNanoseconds
+        } else {
+            self.webSocketReconnectDelayNanoseconds = { attempt in
+                Self.defaultWebSocketReconnectDelayNanoseconds(
+                    attempt: attempt,
+                    randomUnit: webSocketReconnectRandom()
+                )
+            }
+        }
+        self.webSocketReconnectSleep = webSocketReconnectSleep
+        if let networkPathStatusSource {
+            self.networkPathStatusSource = networkPathStatusSource
+        } else if clientFactory == nil {
+            self.networkPathStatusSource = NWNetworkPathStatusSource()
+        } else {
+            self.networkPathStatusSource = StaticNetworkPathStatusSource(.satisfied)
+        }
         self.sessionListNow = sessionListNow
         self.sessionListSleep = sessionListSleep
+        self.sessionSearchDebounceNanoseconds = sessionSearchDebounceNanoseconds
+        self.sessionSearchSleep = sessionSearchSleep
         self.dismissedHistorySavingsNoticeEndpoints = self.historySavingsNoticeStore.loadDismissedEndpoints()
         reloadSessionListPreferences()
         reloadSessionControlStates()
         reloadSessionReminders()
+        self.networkReachabilityStatus = self.networkPathStatusSource.currentStatus
+        self.networkPathStatusSource.onStatusChange = { [weak self] update in
+            Task { @MainActor in
+                self?.applyNetworkReachabilityStatus(update)
+            }
+        }
+        self.networkPathStatusSource.start()
     }
 
-    private static func defaultWebSocketReconnectDelayNanoseconds(attempt: Int) -> UInt64 {
-        let boundedAttempt = max(1, min(attempt, 4))
-        let seconds = UInt64(1 << (boundedAttempt - 1))
-        return seconds * 1_000_000_000
+    deinit {
+        networkRecoveryTask?.cancel()
+        webSocketReconnectTask?.cancel()
+        sessionSearchTask?.cancel()
+        sessionSearchLoadMoreTask?.cancel()
+        networkPathStatusSource.stop()
+    }
+
+    static func defaultWebSocketReconnectDelayNanoseconds(
+        attempt: Int,
+        randomUnit: Double,
+        maximumNanoseconds: UInt64 = 30_000_000_000
+    ) -> UInt64 {
+        let boundedExponent = max(0, min(attempt - 1, 5))
+        let baseSeconds = min(30.0, Double(1 << boundedExponent))
+        let normalizedRandom = min(1, max(0, randomUnit))
+        // ±20% jitter 避免多台移动设备在同一秒同时打向 Mac；最终值仍受硬上限约束。
+        let jitteredNanoseconds = baseSeconds * (0.8 + normalizedRandom * 0.4) * 1_000_000_000
+        return min(maximumNanoseconds, UInt64(jitteredNanoseconds.rounded()))
+    }
+
+    var isNetworkUnavailable: Bool {
+        networkReachabilityStatus == .unsatisfied
+    }
+
+    func sessionSearchSnippet(for sessionID: SessionID) -> String? {
+        guard isSessionSearchActive else {
+            return nil
+        }
+        return remoteSessionSearchSnippetByID[sessionID]
+    }
+
+    func loadMoreSessionSearchResults() async {
+        let searchTerm = sessionSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !searchTerm.isEmpty,
+              sessionSearchHasMore,
+              let requestedCursor = sessionSearchNextCursor,
+              !requestedCursor.isEmpty,
+              !isLoadingMoreSessionSearchResults,
+              sessionSearchLoadingCursor == nil,
+              !isNetworkUnavailable,
+              connectionTermination == nil
+        else {
+            return
+        }
+
+        let generation = sessionSearchGeneration
+        let connectionGeneration = appStore.connectionGeneration
+        isLoadingMoreSessionSearchResults = true
+        sessionSearchLoadingCursor = requestedCursor
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                // 旧分页任务只能收尾自己的 loading；新查询即使复用了同一 cursor，也由 generation 隔离。
+                if self.sessionSearchGeneration == generation,
+                   self.sessionSearchLoadingCursor == requestedCursor {
+                    self.sessionSearchLoadingCursor = nil
+                    self.isLoadingMoreSessionSearchResults = false
+                    self.sessionSearchLoadMoreTask = nil
+                }
+            }
+
+            guard !Task.isCancelled,
+                  self.sessionSearchGeneration == generation,
+                  self.appStore.connectionGeneration == connectionGeneration,
+                  self.sessionSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == searchTerm,
+                  self.sessionSearchNextCursor == requestedCursor
+            else {
+                return
+            }
+
+            do {
+                let client = try self.clientFactory()
+                let page = try await client.searchSessions(query: searchTerm, cursor: requestedCursor, limit: 50)
+                guard !Task.isCancelled,
+                      self.sessionSearchGeneration == generation,
+                      self.appStore.connectionGeneration == connectionGeneration,
+                      self.sessionSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == searchTerm,
+                      self.sessionSearchNextCursor == requestedCursor
+                else {
+                    return
+                }
+                self.applyRemoteSessionSearchPage(page, replacing: false, requestedCursor: requestedCursor)
+            } catch {
+                // 翻页失败只结束本次 loading，保留既有结果和 cursor，用户可显式重试。
+                // 搜索增强不应改写全局连接、鉴权或错误状态。
+            }
+        }
+        sessionSearchLoadMoreTask = task
+        await task.value
     }
 
     func saveComposerDraft(_ snapshot: ComposerDraftSnapshot, for scope: ComposerDraftScopeKey) {
@@ -1251,15 +1591,15 @@ final class SessionStore: ObservableObject {
         let base: [AgentSession]
         guard let selectedProjectID else {
             base = sortedAllSessions
-            return sessionsMatchingSearch(base)
+            return sessionsMatchingSearch(sessionsIncludingRemoteSearch(base))
         }
         base = sortedSessionsByProjectID[selectedProjectID] ?? []
-        return sessionsMatchingSearch(base)
+        return sessionsMatchingSearch(sessionsIncludingRemoteSearch(base, projectID: selectedProjectID))
     }
 
     /// 会话库不跟随 selectedProjectID 过滤；根侧栏和会话页始终看到同一份跨工作区轻量索引。
     var sessionLibrarySessions: [AgentSession] {
-        sessionsMatchingSearch(Self.sortedSessions(sessions.filter(isListableSession)))
+        sessionsMatchingSearch(sessionsIncludingRemoteSearch(Self.sortedSessions(sessions.filter(isListableSession))))
     }
 
     /// 最近列表严格按活动时间排序，置顶只影响完整会话库，不改变“最近”的时间语义。
@@ -1272,7 +1612,8 @@ final class SessionStore: ObservableObject {
             return sidebarProjects
         }
         return sidebarProjects.filter { project in
-            projectMatchesSearch(project) || !sessionsMatchingSearch(sortedSessionsByProjectID[project.id] ?? []).isEmpty
+            projectMatchesSearch(project)
+                || !sessionsMatchingSearch(sessionsIncludingRemoteSearch(sortedSessionsByProjectID[project.id] ?? [], projectID: project.id)).isEmpty
         }
     }
 
@@ -1289,7 +1630,8 @@ final class SessionStore: ObservableObject {
             return projects
         }
         return projects.filter { project in
-            projectMatchesSearch(project) || !sessionsMatchingSearch(sortedSessionsByProjectID[project.id] ?? []).isEmpty
+            projectMatchesSearch(project)
+                || !sessionsMatchingSearch(sessionsIncludingRemoteSearch(sortedSessionsByProjectID[project.id] ?? [], projectID: project.id)).isEmpty
         }
     }
 
@@ -1718,6 +2060,9 @@ final class SessionStore: ObservableObject {
         var attempt = 0
         while true {
             await refreshAll(autoAttach: autoAttach)
+            if connectionTermination != nil || appStore.requiresRePairing {
+                return
+            }
             if errorMessage == nil {
                 return
             }
@@ -1739,6 +2084,32 @@ final class SessionStore: ObservableObject {
             await sessionListSleep(backoffNanoseconds)
             if Task.isCancelled { return }
         }
+    }
+
+    /// 连接凭据已经安全提交后，统一等待首屏数据真正可用。
+    ///
+    /// 这里复用冷启动的重试逻辑，避免扫码、URL Scheme 和手动连接分别维护退避策略。
+    /// 超时只改变展示状态，不回滚已写入 Keychain 的 Token 或当前连接档案；一次性配对票据
+    /// 已经兑换成功时，用户也可以直接重试加载，无需重新扫码。
+    @discardableResult
+    func refreshAfterConnectionCommit(maxWait: TimeInterval) async -> Bool {
+        await refreshUntilLoaded(maxWait: maxWait, autoAttach: true)
+
+        guard !Task.isCancelled else {
+            return false
+        }
+        guard connectionTermination == nil,
+              !appStore.requiresRePairing,
+              errorMessage == nil else {
+            if connectionTermination == nil, !appStore.requiresRePairing {
+                let message = "连接凭据已安全保存，但暂时无法加载项目和会话。请确认 Mac 助手和 Tailscale 可用后重试，无需重新扫码。"
+                appStore.connectionStatus = .failed(message)
+                appStore.lastError = message
+                setErrorMessage(message)
+            }
+            return false
+        }
+        return true
     }
 
     func refreshAll(autoAttach: Bool = false) async {
@@ -1841,6 +2212,9 @@ final class SessionStore: ObservableObject {
             setErrorMessage(nil)
         } catch {
             if let requestProjectID, let requestToken, !isCurrentSessionPageRequest(projectID: requestProjectID, token: requestToken) {
+                return
+            }
+            if terminateConnectionIfCredentialsInvalid(error) {
                 return
             }
             if let activeWorkspace {
@@ -2126,14 +2500,107 @@ final class SessionStore: ObservableObject {
         defer { isPruningWorktrees = false }
         do {
             let response = try await clientFactory().pruneMissingWorktrees()
-            setManagedWorktreesIfChanged(response.worktrees)
-            worktreeErrorMessage = nil
+            let prunedPaths = Set(response.prunedPaths.compactMap(normalizedWorktreeCleanupPath))
+            // 先应用服务端返回的成功结果；即使部分 registry 文件删除失败，
+            // 已经 prune 的登记也不能继续残留在 Worktree 管理列表中。
+            setManagedWorktreesIfChanged(response.worktrees.filter { item in
+                guard let path = normalizedWorktreeCleanupPath(item.worktree.path) else {
+                    return true
+                }
+                return !prunedPaths.contains(path)
+            })
             let count = response.prunedPaths.count
-            setStatusMessage(count == 0 ? "没有需要清理的 Worktree 登记" : "已清理 \(count) 条丢失的 Worktree 登记")
+            if let failedPaths = response.failedPaths, !failedPaths.isEmpty {
+                let detail = failedPaths
+                    .sorted { $0.key < $1.key }
+                    .map { "\($0.key)：\($0.value)" }
+                    .joined(separator: "；")
+                worktreeErrorMessage = "已清理 \(count) 条丢失的 Worktree 登记，但另有 \(failedPaths.count) 条失败：\(detail)"
+                setStatusMessage(count == 0
+                    ? "Worktree 登记清理未完成"
+                    : "已清理 \(count) 条 Worktree 登记，另有项目失败")
+            } else {
+                worktreeErrorMessage = nil
+                setStatusMessage(count == 0 ? "没有需要清理的 Worktree 登记" : "已清理 \(count) 条丢失的 Worktree 登记")
+            }
             return count
         } catch {
             worktreeErrorMessage = error.localizedDescription
             return 0
+        }
+    }
+
+    func previewManagedWorktreeCleanup() async throws -> WorktreeCleanupResponse {
+        do {
+            let response = try await clientFactory().previewWorktreeCleanup()
+            worktreeErrorMessage = nil
+            return response
+        } catch {
+            worktreeErrorMessage = error.localizedDescription
+            throw error
+        }
+    }
+
+    @discardableResult
+    func cleanupManagedWorktrees(
+        paths: Set<String>,
+        preview: WorktreeCleanupResponse
+    ) async throws -> WorktreeCleanupResponse {
+        let requestedPaths = Set(paths.compactMap(normalizedWorktreeCleanupPath))
+        guard !requestedPaths.isEmpty else {
+            throw WorktreeCleanupSelectionError.emptySelection
+        }
+
+        let previewCandidates = Set(preview.candidatePaths.compactMap(normalizedWorktreeCleanupPath))
+        let eligiblePaths = Set(preview.worktrees.filter(\.eligible).compactMap {
+            normalizedWorktreeCleanupPath($0.worktree.path)
+        })
+        // 客户端只能确认服务端 dry-run 同时标记为 eligible 和 candidate 的路径；
+        // blocker 发生变化时最终仍由 agentd 重新评估并拒绝，客户端没有 force 逃生口。
+        let allowedPaths = previewCandidates.intersection(eligiblePaths)
+        guard requestedPaths.isSubset(of: allowedPaths) else {
+            throw WorktreeCleanupSelectionError.containsBlockedPath
+        }
+        guard let planID = preview.planID?.trimmingCharacters(in: .whitespacesAndNewlines), !planID.isEmpty else {
+            throw WorktreeCleanupSelectionError.missingPlan
+        }
+
+        do {
+            let response = try await clientFactory().executeWorktreeCleanup(paths: requestedPaths.sorted(), planID: planID)
+            let deletedPaths = Set(response.deletedPaths.compactMap(normalizedWorktreeCleanupPath))
+            let deletedItems = managedWorktrees.filter {
+                guard let path = normalizedWorktreeCleanupPath($0.worktree.path) else {
+                    return false
+                }
+                return deletedPaths.contains(path)
+            }
+            setManagedWorktreesIfChanged(managedWorktrees.filter {
+                guard let path = normalizedWorktreeCleanupPath($0.worktree.path) else {
+                    return true
+                }
+                return !deletedPaths.contains(path)
+            })
+            for item in deletedItems {
+                forgetManagedWorktreeAfterDeletion(item.workspace)
+            }
+
+            // 删除响应描述本次策略评估；再取一次管理列表，确保 Sheet 背后的列表与 agentd registry 一致。
+            await refreshManagedWorktrees()
+            if let partialFailureMessage = response.partialFailureMessage {
+                // 多 Worktree 删除无法形成文件系统事务。先承认并刷新已经成功的部分，
+                // 再暴露失败，避免 UI 把整批操作误报为“全部未执行”。
+                worktreeErrorMessage = partialFailureMessage
+                setStatusMessage(deletedPaths.isEmpty
+                    ? "Worktree 清理失败"
+                    : "已清理 \(deletedPaths.count) 个 Git Worktree，另有项目清理失败")
+            } else {
+                worktreeErrorMessage = nil
+                setStatusMessage(deletedPaths.isEmpty ? "没有 Worktree 被删除" : "已清理 \(deletedPaths.count) 个 Git Worktree")
+            }
+            return response
+        } catch {
+            worktreeErrorMessage = error.localizedDescription
+            throw error
         }
     }
 
@@ -2182,24 +2649,27 @@ final class SessionStore: ObservableObject {
         defer { isDeletingWorktree = false }
         do {
             let response = try await clientFactory().deleteWorktree(path: workspace.path, force: force)
-            setManagedWorktreesIfChanged(response.worktrees)
-            forgetWorkspaceAfterWorktreeDeletion(workspace)
-            gitStatusByPath.removeValue(forKey: workspace.path)
-            gitStatusErrorByPath.removeValue(forKey: workspace.path)
-            gitActionErrorByPath.removeValue(forKey: workspace.path)
-            commandActionsByPath.removeValue(forKey: workspace.path)
-            commandActionErrorByPath.removeValue(forKey: workspace.path)
-            commandActionResultByPath.removeValue(forKey: workspace.path)
-            commandActionHistoryByPath.removeValue(forKey: workspace.path)
-            queuedCommandActionRuns.removeAll { $0.path == workspace.path }
-            queuedCommandActionIDsByPath.removeValue(forKey: workspace.path)
-            worktreeBranchesByPath.removeValue(forKey: workspace.path)
-            worktreeBranchErrorByPath.removeValue(forKey: workspace.path)
-            pullRequestURLByPath.removeValue(forKey: workspace.path)
-            pullRequestStatusByPath.removeValue(forKey: workspace.path)
-            pullRequestStatusErrorByPath.removeValue(forKey: workspace.path)
-            worktreeErrorMessage = nil
-            setStatusMessage("已删除 Git Worktree \(workspace.name)")
+            let deletedPaths = Set([response.deletedPath, workspace.path].compactMap(normalizedWorktreeCleanupPath))
+            // Git checkout 已经删除后，registry unlink 失败可能让 response.worktrees
+            // 暂时仍含陈旧项。先按 deleted_path/当前 workspace 移除真实删除结果，
+            // 再展示 registry 警告，避免 UI 把不存在的 checkout 放回来。
+            setManagedWorktreesIfChanged(response.worktrees.filter { candidate in
+                if candidate.workspace.id == workspace.id {
+                    return false
+                }
+                guard let path = normalizedWorktreeCleanupPath(candidate.worktree.path) else {
+                    return true
+                }
+                return !deletedPaths.contains(path)
+            })
+            forgetManagedWorktreeAfterDeletion(workspace)
+            if let registryCleanupError = normalizedOptional(response.registryCleanupError) {
+                worktreeErrorMessage = "Git Worktree 已删除，但清理管理登记失败：\(registryCleanupError)。可稍后使用“清理丢失登记”重试。"
+                setStatusMessage("已删除 Git Worktree \(workspace.name)，但管理登记仍需清理")
+            } else {
+                worktreeErrorMessage = nil
+                setStatusMessage("已删除 Git Worktree \(workspace.name)")
+            }
             return true
         } catch {
             worktreeErrorMessage = error.localizedDescription
@@ -2619,11 +3089,126 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    func supportsCodexThreadManagement(_ session: AgentSession) -> Bool {
+        Self.normalizedRuntimeProvider(session.runtimeProvider ?? session.source) == "codex"
+    }
+
+    @discardableResult
+    func renameSession(_ session: AgentSession, name: String) async -> Bool {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard supportsCodexThreadManagement(session), !normalized.isEmpty else {
+            setStatusMessage("会话名称不能为空")
+            return false
+        }
+        guard normalized.utf8.count <= 256 else {
+            setStatusMessage("会话名称不能超过 256 bytes")
+            return false
+        }
+        do {
+            let client = try clientFactory()
+            try await client.setThreadName(threadID: session.id, name: normalized)
+            // 名称由 app-server 持久化；再读一次权威 thread，立即刷新侧栏，不维护第二份本地标题。
+            if let refreshed = try? await client.session(id: session.id, afterSeq: nil) {
+                upsert(refreshed.session)
+            }
+            setStatusMessage("已重命名会话为 \(normalized)")
+            return true
+        } catch {
+            setStatusMessage("重命名失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func compactSessionContext(_ session: AgentSession) async -> Bool {
+        guard supportsCodexThreadManagement(session) else {
+            setStatusMessage("当前运行通道不支持手动压缩")
+            return false
+        }
+        guard !session.isRunning else {
+            setStatusMessage("请等待当前 Turn 完成后再压缩上下文")
+            return false
+        }
+        do {
+            try await clientFactory().compactThread(threadID: session.id)
+            setStatusMessage("已开始压缩 \(session.title) 的上下文")
+            return true
+        } catch {
+            setStatusMessage("上下文压缩失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func startReview(_ session: AgentSession, target: CodexAppServerReviewTarget) async -> Bool {
+        let latestSession = sessionsByID[session.id] ?? session
+        guard supportsCodexThreadManagement(latestSession) else {
+            setStatusMessage("当前运行通道不支持 Codex Review")
+            return false
+        }
+        guard !latestSession.isRunning else {
+            setStatusMessage("请等待当前 Turn 完成后再开始 Review")
+            return false
+        }
+
+        let normalizedTarget: CodexAppServerReviewTarget
+        do {
+            normalizedTarget = try target.validatedInlineTarget()
+        } catch {
+            setStatusMessage("Review 目标无效：\(error.localizedDescription)")
+            return false
+        }
+
+        do {
+            _ = try await clientFactory().startReview(
+                threadID: latestSession.id,
+                target: normalizedTarget,
+                // 产品入口始终在原会话内执行，不能由调用方切换成 detached。
+                delivery: .inline
+            )
+            setStatusMessage("已开始审查 \(latestSession.title)：\(reviewTargetDescription(normalizedTarget))")
+            return true
+        } catch {
+            setStatusMessage("Review 启动失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// 保留旧入口，避免已有调用方在 UI 升级期间产生行为变化。
+    @discardableResult
+    func reviewUncommittedChanges(_ session: AgentSession) async -> Bool {
+        await startReview(session, target: .uncommittedChanges)
+    }
+
+    private func reviewTargetDescription(_ target: CodexAppServerReviewTarget) -> String {
+        switch target {
+        case .uncommittedChanges:
+            return "未提交改动"
+        case .baseBranch(let branch):
+            return "相对 \(branch) 的改动"
+        case .commit(let sha, _):
+            return "提交 \(sha)"
+        case .custom:
+            // validatedInlineTarget 已拒绝 custom；保留分支是为了让枚举扩展时编译器继续提示。
+            return "自定义目标"
+        }
+    }
+
     func sessionReminder(for sessionID: SessionID) -> SessionReminder? {
         sessionRemindersByID[sessionID]
     }
 
     func scheduleSessionReminder(_ session: AgentSession, after interval: TimeInterval, now: Date = Date()) async {
+        guard interval > 0 else {
+            // 非法或已过的目标时间不能被 max(60, interval) 悄悄改成新的提醒；同时清掉同会话旧状态。
+            let removed = sessionRemindersByID.removeValue(forKey: session.id) != nil
+            if removed {
+                saveSessionReminders()
+            }
+            sessionReminderScheduler.cancel(sessionID: session.id)
+            setStatusMessage("提醒时间已过，未保存提醒 \(session.title)")
+            return
+        }
         let boundedInterval = max(60, interval)
         let reminder = SessionReminder(
             sessionID: session.id,
@@ -2631,13 +3216,29 @@ final class SessionStore: ObservableObject {
             fireAt: now.addingTimeInterval(boundedInterval),
             createdAt: now
         )
+        guard !reminder.isDue(now: now) else {
+            sessionRemindersByID.removeValue(forKey: session.id)
+            saveSessionReminders()
+            sessionReminderScheduler.cancel(sessionID: session.id)
+            setStatusMessage("提醒时间已过，未保存提醒 \(session.title)")
+            return
+        }
         sessionRemindersByID[session.id] = reminder
         saveSessionReminders()
 
         do {
             // 先持久化，再尽力交给系统通知；即使用户未授权通知，侧栏仍能显示提醒状态。
-            try await sessionReminderScheduler.schedule(reminder)
-            setStatusMessage("已设置提醒 \(session.title)")
+            let route = SessionNotificationRoute.current(
+                profileID: appStore.notificationRoutingProfileID,
+                projectID: session.projectID,
+                sessionID: session.id
+            )
+            switch try await sessionReminderScheduler.schedule(reminder, route: route) {
+            case .scheduled:
+                setStatusMessage("已设置提醒 \(session.title)")
+            case .permissionDenied:
+                setStatusMessage("已保存 App 内提醒；系统通知未开启，请在 iOS“设置 > 通知 > Mimi Remote”中开启")
+            }
         } catch {
             setStatusMessage("已保存提醒，但通知调度失败：\(error.localizedDescription)")
         }
@@ -2776,11 +3377,118 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    private func applyNetworkReachabilityStatus(_ update: NetworkPathStatusUpdate) {
+        // MainActor 上只接收最新观察序号。即使旧 Task 晚到，也不能把较新的在线状态覆盖成离线。
+        guard update.sequence > lastAppliedNetworkPathSequence else {
+            return
+        }
+        lastAppliedNetworkPathSequence = update.sequence
+        let status = update.status
+        guard status != networkReachabilityStatus else {
+            return
+        }
+        let previousStatus = networkReachabilityStatus
+        networkReachabilityStatus = status
+        networkPathGeneration += 1
+        let generation = networkPathGeneration
+        networkRecoveryTask?.cancel()
+        networkRecoveryTask = nil
+
+        if status == .unsatisfied {
+            // 网络已明确不可用时立即结束搜索 loading，并用 generation 阻止 transport 的迟到响应落地。
+            cancelRemoteSessionSearchRequestsPreservingResults()
+            cancelWebSocketReconnect(resetAttempts: false)
+            // 访问码失效是更高优先级的确定性终态，离线提示不能覆盖重新配对指引。
+            guard connectionTermination == nil, !appStore.requiresRePairing else {
+                return
+            }
+            suspendWebSocketForNetworkLoss()
+            setStatusMessage("网络不可用，恢复后自动重连")
+            return
+        }
+
+        let shouldRecover = previousStatus == .unsatisfied
+            || (previousStatus == .unknown
+                && (networkSuspendedSessionID != nil || errorMessage != nil))
+        guard status == .satisfied,
+              shouldRecover,
+              !isAppInBackground,
+              connectionTermination == nil,
+              !appStore.requiresRePairing else {
+            return
+        }
+        // unknown 是 NWPathMonitor 首次回调前的正常状态；只有已经存在传输错误或挂起会话时
+        // 才复用现有单次恢复任务，避免健康冷启动额外刷新，也不引入常驻 timer。
+        setStatusMessage("网络已恢复，正在重新连接")
+        let connectionGeneration = appStore.connectionGeneration
+        networkRecoveryTask = Task { [weak self] in
+            await self?.recoverAfterNetworkBecameAvailable(
+                pathGeneration: generation,
+                connectionGeneration: connectionGeneration
+            )
+        }
+    }
+
+    private func suspendWebSocketForNetworkLoss(sessionID: SessionID? = nil) {
+        let reconnectSessionID = sessionID
+            ?? connectedSessionID
+            ?? (webSocketReconnectTask == nil ? nil : selectedSessionID)
+            ?? appLifecycleSuspendedSessionID
+        if let reconnectSessionID, sessionsByID[reconnectSessionID] != nil {
+            networkSuspendedSessionID = reconnectSessionID
+            appLifecycleSuspendedSessionID = nil
+        }
+        cancelWebSocketReconnect(resetAttempts: false)
+        webSocketConnectionGeneration += 1
+        let socket = webSocket
+        webSocket = nil
+        connectedSessionID = nil
+        socket?.disconnect()
+        // 离线只是暂停传输：不清本地消息、running turn 排队、审批或补充信息状态。
+        setWebSocketStatus(.disconnected)
+    }
+
+    private func recoverAfterNetworkBecameAvailable(
+        pathGeneration: Int,
+        connectionGeneration: Int
+    ) async {
+        guard pathGeneration == networkPathGeneration,
+              connectionGeneration == appStore.connectionGeneration,
+              networkReachabilityStatus == .satisfied,
+              !isAppInBackground,
+              connectionTermination == nil,
+              !appStore.requiresRePairing else {
+            return
+        }
+
+        let reconnectSessionID = networkSuspendedSessionID
+        networkSuspendedSessionID = nil
+        if let reconnectSessionID,
+           selectedSessionID == reconnectSessionID,
+           let session = sessionsByID[reconnectSessionID] {
+            // 恢复事件按 path generation 去重；这里只发起一次即时连接，失败后再进入 jitter 退避。
+            connectWebSocket(session, isReconnectAttempt: true, allowNonRunning: true)
+        }
+
+        guard pathGeneration == networkPathGeneration,
+              connectionGeneration == appStore.connectionGeneration,
+              networkReachabilityStatus == .satisfied,
+              connectionTermination == nil,
+              !appStore.requiresRePairing,
+              selectedProjectID != nil else {
+            return
+        }
+        // 可见轮询在离线期间不会发 REST；恢复后补一次轻量刷新，不等待原轮询 sleep 到期。
+        await refreshSelectedProjectSessions(showLoading: false)
+    }
+
     func pollSelectedProjectSessionsWhileVisible() async {
         while !Task.isCancelled {
-            do {
-                try await Task.sleep(nanoseconds: sessionListPollingDelayNanoseconds())
-            } catch {
+            if connectionTermination != nil || appStore.requiresRePairing {
+                return
+            }
+            await sessionListSleep(sessionListPollingDelayNanoseconds())
+            if Task.isCancelled {
                 return
             }
 #if DEBUG
@@ -2788,7 +3496,9 @@ final class SessionStore: ObservableObject {
                 continue
             }
 #endif
-            guard appStore.isConfigured, selectedProjectID != nil else {
+            guard !isNetworkUnavailable,
+                  appStore.isConfigured,
+                  selectedProjectID != nil else {
                 continue
             }
             await refreshSelectedProjectSessions(showLoading: false)
@@ -2964,6 +3674,15 @@ final class SessionStore: ObservableObject {
         CodexAppServerSessionRuntime.normalizedRuntimeProvider(rawValue)
     }
 
+    private func unsubscribeThreadInBackground(_ threadID: SessionID) {
+        Task { [weak self] in
+            guard let self else { return }
+            // unsubscribe 只释放当前 app-server 连接的订阅，不中断后台运行中的 Turn。
+            // 生命周期清理失败不应阻塞会话切换；断线后连接关闭仍会回收上游状态。
+            _ = try? await self.clientFactory().unsubscribeThread(threadID: threadID)
+        }
+    }
+
     private static func payloadRuntimeProvider(_ normalizedRuntimeProvider: String) -> String? {
         normalizedRuntimeProvider == "codex" ? nil : normalizedRuntimeProvider
     }
@@ -3035,12 +3754,20 @@ final class SessionStore: ObservableObject {
         guard !wasAlreadyOnList else {
             return
         }
+        let previousSession = selectedSession
         setSelectedSessionID(nil)
         setErrorMessage(nil)
         disconnectWebSocket()
+        if let previousSession, supportsCodexThreadManagement(previousSession) {
+            unsubscribeThreadInBackground(previousSession.id)
+        }
     }
 
     func resetConnectionForSettingsChange(clearData: Bool = false) {
+        invalidatePreparedConnectionChange()
+        connectionTermination = nil
+        appLifecycleSuspendedSessionID = nil
+        networkSuspendedSessionID = nil
         disconnectWebSocket()
         if clearData {
             clearConnectionData()
@@ -3054,24 +3781,126 @@ final class SessionStore: ObservableObject {
         endpoint: String,
         token: String
     ) async throws -> Bool {
-        let prepared = try await appStore.prepareConnectionSettings(
-            endpoint: endpoint,
-            token: token
-        )
-        return try commitPreparedConnection(prepared)
+        try await performPreparedConnectionChange {
+            try await appStore.prepareConnectionSettings(
+                endpoint: endpoint,
+                token: token
+            )
+        }
+    }
+
+    @discardableResult
+    func addConnectionProfile(
+        endpoint: String,
+        token: String,
+        displayName: String
+    ) async throws -> Bool {
+        try await performPreparedConnectionChange {
+            try await appStore.prepareNewConnectionProfile(
+                endpoint: endpoint,
+                token: token,
+                displayName: displayName
+            )
+        }
+    }
+
+    @discardableResult
+    func switchConnectionProfile(id: String) async throws -> Bool {
+        // 切换前完整验证目标 Mac；只有验证和 Keychain/元数据提交都成功，
+        // commitPreparedConnection 才会退役旧 WebSocket 并清理旧 Mac 的会话数据。
+        try await performPreparedConnectionChange {
+            try await appStore.prepareConnectionProfileSwitch(id: id)
+        }
     }
 
     @discardableResult
     func applyPairingURL(_ url: URL) async throws -> Bool {
-        let prepared = try await appStore.preparePairingURL(url)
-        return try commitPreparedConnection(prepared)
+        try await performPreparedConnectionChange {
+            try await appStore.preparePairingURL(url)
+        }
     }
 
-    private func commitPreparedConnection(_ prepared: PreparedConnectionSettings) throws -> Bool {
-        // 连接切换必须先结束旧 WebSocket，再原子提交新的 endpoint；后续 REST 与
-        // WebSocket 都从同一个 runtime bundle 创建，避免一次会话被拆到两条链路上。
-        disconnectWebSocket()
+    @discardableResult
+    func addConnectionProfile(pairingURL url: URL, displayName: String) async throws -> Bool {
+        try await performPreparedConnectionChange {
+            try await appStore.prepareNewPairingURL(url, displayName: displayName)
+        }
+    }
+
+    /// 串行化所有“验证新凭据后提交”的入口。该方法保持 internal 是为了让 XCTest 能用
+    /// 可控 prepare 闭包确定性复现取消/并发，不把测试钩子带进线上分支。
+    @discardableResult
+    func performPreparedConnectionChange(
+        _ prepare: () async throws -> PreparedConnectionSettings
+    ) async throws -> Bool {
+        let operationGeneration = try beginPreparedConnectionChange()
+        let previousStatus = appStore.connectionStatus
+        let previousError = appStore.lastError
+        let previousDuration = appStore.lastConnectionTestDurationMillis
+        let previousReport = appStore.lastConnectionTestReport
+        let previousRecentReports = appStore.recentConnectionTestReports
+        let previousSessionTermination = connectionTermination
+        let previousAppTermination = appStore.connectionTermination
+        defer { finishPreparedConnectionChange(operationGeneration) }
+
+        do {
+            let prepared = try await prepare()
+            try Task.checkCancellation()
+            guard operationGeneration == connectionChangeGeneration,
+                  inFlightConnectionChangeGeneration == operationGeneration,
+                  !isAppInBackground else {
+                throw CancellationError()
+            }
+            return try commitPreparedConnection(prepared)
+        } catch {
+            // 失败时恢复验证前的展示状态，但若等待期间旧 WS 已进入鉴权终态，必须保留
+            // 新终态；否则一次失败的切换会把“访问码已失效”错误覆盖回已连接。
+            if connectionTermination == previousSessionTermination,
+               appStore.connectionTermination == previousAppTermination {
+                appStore.connectionStatus = previousStatus
+                appStore.lastError = previousError
+                appStore.lastConnectionTestDurationMillis = previousDuration
+                appStore.lastConnectionTestReport = previousReport
+                appStore.recentConnectionTestReports = previousRecentReports
+            }
+            if Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
+    private func beginPreparedConnectionChange() throws -> Int {
+        guard !isAppInBackground else {
+            throw CancellationError()
+        }
+        guard inFlightConnectionChangeGeneration == nil else {
+            throw ConnectionProfileError.operationInProgress
+        }
+        connectionChangeGeneration += 1
+        inFlightConnectionChangeGeneration = connectionChangeGeneration
+        return connectionChangeGeneration
+    }
+
+    private func finishPreparedConnectionChange(_ generation: Int) {
+        guard inFlightConnectionChangeGeneration == generation else { return }
+        inFlightConnectionChangeGeneration = nil
+    }
+
+    private func invalidatePreparedConnectionChange() {
+        // 不提前释放占用：旧 prepare 可能仍在网络回调中。等它返回并在提交门前发现代次失效，
+        // 才允许下一项操作开始，避免两个 validateConnection 同时改写 AppStore 状态。
+        connectionChangeGeneration += 1
+    }
+
+    func commitPreparedConnection(_ prepared: PreparedConnectionSettings) throws -> Bool {
+        // 必须先原子提交 Keychain/endpoint，再退役旧连接。若 Keychain 写入失败，
+        // 旧 WebSocket、runtime bundle、connectionGeneration 和当前会话数据都保持不变。
         let didChange = try appStore.commitConnectionSettings(prepared)
+        connectionTermination = nil
+        appLifecycleSuspendedSessionID = nil
+        networkSuspendedSessionID = nil
+        disconnectWebSocket()
         if didChange {
             clearConnectionData()
         }
@@ -3080,13 +3909,129 @@ final class SessionStore: ObservableObject {
         return didChange
     }
 
+    /// 打开本地通知对应会话。安全边界：只允许当前 profile，最多做一次有界首屏刷新，绝不自动切 Mac。
+    func openSessionFromNotification(_ route: SessionNotificationRoute) async -> SessionNotificationOpenOutcome {
+        let activeProfileID = appStore.notificationRoutingProfileID
+        guard route.profileID == activeProfileID else {
+            let profileName = appStore.connectionProfiles
+                .first(where: { $0.id == route.profileID })?
+                .displayName
+            let message: String
+            if let profileName {
+                message = "通知来自“\(profileName)”，请先在设置中切换连接档案"
+            } else {
+                message = "通知来自其他 Mac，请先在设置中切换对应连接档案"
+            }
+            setStatusMessage(message)
+            return .requiresProfileSwitch(displayName: profileName)
+        }
+
+        let connectionGeneration = appStore.connectionGeneration
+        var targetSession = sessionsByID[route.sessionID]
+        if let targetSession, targetSession.projectID != route.projectID {
+            // 同一 sessionID 却指向不同项目属于畸形或过期路由，不猜测、不发请求。
+            return .ignored
+        }
+
+        if targetSession == nil {
+            do {
+                targetSession = try await refreshSessionForNotification(
+                    route,
+                    connectionGeneration: connectionGeneration
+                )
+                if targetSession == nil {
+                    guard connectionGeneration == appStore.connectionGeneration,
+                          route.profileID == appStore.notificationRoutingProfileID else {
+                        return .ignored
+                    }
+                    let message = "通知对应的会话暂不可用，请从当前 Mac 的会话列表中查找。"
+                    setStatusMessage(message)
+                    return .unavailable(message: message)
+                }
+            } catch {
+                if terminateConnectionIfCredentialsInvalid(error) {
+                    return .unavailable(message: "当前连接凭据已失效，请重新配对后再打开通知。")
+                }
+                let message = "无法打开通知对应的会话，请确认当前 Mac 在线后重试。"
+                setStatusMessage(message)
+                return .unavailable(message: message)
+            }
+        }
+
+        guard connectionGeneration == appStore.connectionGeneration,
+              route.profileID == appStore.notificationRoutingProfileID,
+              let targetSession,
+              targetSession.id == route.sessionID,
+              targetSession.projectID == route.projectID
+        else {
+            return .ignored
+        }
+
+        await selectSession(targetSession)
+        guard connectionGeneration == appStore.connectionGeneration,
+              route.profileID == appStore.notificationRoutingProfileID,
+              selectedSessionID == route.sessionID
+        else {
+            return .ignored
+        }
+        return .opened
+    }
+
+    private func refreshSessionForNotification(
+        _ route: SessionNotificationRoute,
+        connectionGeneration: Int
+    ) async throws -> AgentSession? {
+        let client = try clientFactory()
+        var workspace = ensureWorkspaceForKnownProjectID(route.projectID)
+
+        if workspace == nil {
+            // 冷启动时项目索引可能尚未建立；只补一次项目元数据，不进入 bootstrap 的循环重试。
+            let fetchedProjects = try await client.projects()
+            guard connectionGeneration == appStore.connectionGeneration,
+                  route.profileID == appStore.notificationRoutingProfileID else {
+                return nil
+            }
+            setProjectsIfChanged(fetchedProjects)
+            reloadRecentWorkspaces()
+            workspace = ensureWorkspaceForKnownProjectID(route.projectID)
+        }
+
+        guard let workspace else {
+            return nil
+        }
+        // 用 workspace 首屏建立 Codex/Claude 的真实 runtime 路由；不盲猜 provider，也不自动翻页循环。
+        let page = try await client.sessionsPage(
+            workspace: workspace,
+            cursor: nil,
+            limit: Self.initialSessionPageLimit
+        )
+        guard connectionGeneration == appStore.connectionGeneration,
+              route.profileID == appStore.notificationRoutingProfileID else {
+            return nil
+        }
+        let refreshedSessions = sessions(page.sessions, in: workspace)
+        mergeSessionPage(refreshedSessions)
+        updateSessionPageState(projectID: workspace.id, page: page)
+        clearWorkspaceUnavailable(workspace.id)
+
+        guard let target = sessionsByID[route.sessionID],
+              target.projectID == route.projectID else { return nil }
+        return target
+    }
+
     func selectSession(_ session: AgentSession) async {
         if isNoOpHistorySelection(session) {
             return
         }
+        let previousSession = selectedSession
         let session = sessionForExplicitSelection(session)
         setSelectedProjectID(session.projectID)
         setSelectedSessionID(session.id)
+        if let previousSession,
+           previousSession.id != session.id,
+           supportsCodexThreadManagement(previousSession) {
+            unsubscribeThreadInBackground(previousSession.id)
+        }
         revealProjectInSidebar(session.projectID)
         setErrorMessage(nil)
         conversationStore.retainSessionCache(sessionID: session.id)
@@ -3522,18 +4467,91 @@ final class SessionStore: ObservableObject {
         return await sendTurn(message.turnPayload ?? CodexAppServerTurnPayload(prompt: prompt))
     }
 
+    func suspendForBackground() {
+#if DEBUG
+        guard !isDebugWorkbenchUISeedActive else {
+            return
+        }
+#endif
+        invalidatePreparedConnectionChange()
+        isAppInBackground = true
+        networkRecoveryTask?.cancel()
+        networkRecoveryTask = nil
+        guard connectionTermination == nil, !appStore.requiresRePairing else {
+            return
+        }
+
+        let reconnectSessionID = connectedSessionID
+            ?? (webSocketReconnectTask == nil ? nil : selectedSessionID)
+            ?? networkSuspendedSessionID
+        if let reconnectSessionID, sessionsByID[reconnectSessionID] != nil {
+            if isNetworkUnavailable {
+                networkSuspendedSessionID = reconnectSessionID
+            } else {
+                appLifecycleSuspendedSessionID = reconnectSessionID
+                networkSuspendedSessionID = nil
+            }
+        }
+
+        cancelWebSocketReconnect(resetAttempts: false)
+        webSocketConnectionGeneration += 1
+        let socket = webSocket
+        webSocket = nil
+        connectedSessionID = nil
+        socket?.disconnect()
+        // iOS 可能在后台直接挂起 URLSession，未必及时回调断线。主动退役连接可避免回前台
+        // 仍被旧 `.connected` 状态挡住；这里不清消息、排队 turn、审批或补充信息状态。
+        setWebSocketStatus(.disconnected)
+    }
+
     func resumeFromForeground() async {
 #if DEBUG
         guard !isDebugWorkbenchUISeedActive else {
             return
         }
 #endif
+        isAppInBackground = false
+        // 不用常驻 timer：App 每次回前台同步清理已触发提醒，离线或未配置时也能保持本地状态准确。
+        reloadSessionReminders()
         guard appStore.isConfigured else {
+            return
+        }
+        guard connectionTermination == nil, !appStore.requiresRePairing else {
+            return
+        }
+
+        let reconnectSessionID = appLifecycleSuspendedSessionID ?? networkSuspendedSessionID
+        appLifecycleSuspendedSessionID = nil
+        networkSuspendedSessionID = nil
+        guard !isNetworkUnavailable else {
+            // 前台恢复时已知离线就不发 10 秒 REST 重试；把会话交还给 NWPath 恢复事件。
+            if let reconnectSessionID, sessionsByID[reconnectSessionID] != nil {
+                networkSuspendedSessionID = reconnectSessionID
+            }
+            setStatusMessage("网络不可用，恢复后自动重连")
             return
         }
         // 回前台同样可能赶上 gateway 还没恢复；做几秒的高频重试，避免单次失败后又卡到下次切换。
         // 正常情况下首次 refreshAll 就成功（errorMessage 为 nil），立即返回，不会有额外开销。
         await refreshUntilLoaded(maxWait: 10, autoAttach: true)
+
+        guard connectionTermination == nil,
+              !appStore.requiresRePairing,
+              !isNetworkUnavailable,
+              let reconnectSessionID,
+              selectedSessionID == reconnectSessionID,
+              let session = sessionsByID[reconnectSessionID],
+              connectedSessionID != reconnectSessionID || webSocket == nil else {
+            return
+        }
+        // REST 即使在短时 gateway 故障下没恢复，也用本地会话兜底重建监听；状态级回放会校准
+        // 离开期间的完成/审批事件，且不会把旧内容 backlog 再直播一遍。
+        connectWebSocket(
+            session,
+            isReconnectAttempt: true,
+            replayBufferedEvents: false,
+            allowNonRunning: true
+        )
     }
 
     func stopSelectedSession() async {
@@ -5152,7 +6170,7 @@ final class SessionStore: ObservableObject {
     private func makeProjectSessionListSnapshot(forProjectID projectID: String) -> ProjectSessionListSnapshot {
         let baseSessions = sortedSessionsByProjectID[projectID] ?? []
         if isSessionSearchActive {
-            let matchingSessions = sessionsMatchingSearch(baseSessions)
+            let matchingSessions = sessionsMatchingSearch(sessionsIncludingRemoteSearch(baseSessions, projectID: projectID))
             return ProjectSessionListSnapshot(
                 projectID: projectID,
                 isExpanded: true,
@@ -5213,13 +6231,161 @@ final class SessionStore: ObservableObject {
         Self.normalizedSearchText(sessionSearchQuery)
     }
 
+    private func scheduleRemoteSessionSearch() {
+        sessionSearchTask?.cancel()
+        sessionSearchTask = nil
+        sessionSearchGeneration &+= 1
+        let generation = sessionSearchGeneration
+        let connectionGeneration = appStore.connectionGeneration
+        let searchTerm = sessionSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 每个关键词只保留自身的远端投影，避免连续搜索让基础会话库永久膨胀；用户点开后
+        // selectSession 会通过既有 upsert 路径正式加入 sessions，因此不会破坏选择状态。
+        resetRemoteSessionSearchState()
+
+        // 空查询只恢复本地已加载列表，不发请求，也不删除之前搜索补入的会话缓存。
+        guard !searchTerm.isEmpty,
+              !isNetworkUnavailable,
+              connectionTermination == nil
+        else {
+            return
+        }
+
+        isSearchingRemoteSessionResults = true
+        sessionSearchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                // 旧查询的 defer 不能清掉新查询从防抖阶段开始展示的 loading。
+                if self.sessionSearchGeneration == generation {
+                    self.sessionSearchTask = nil
+                    self.isSearchingRemoteSessionResults = false
+                }
+            }
+            do {
+                if self.sessionSearchDebounceNanoseconds > 0 {
+                    try await self.sessionSearchSleep(self.sessionSearchDebounceNanoseconds)
+                }
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  self.sessionSearchGeneration == generation,
+                  self.appStore.connectionGeneration == connectionGeneration,
+                  !self.isNetworkUnavailable,
+                  self.connectionTermination == nil
+            else {
+                return
+            }
+
+            do {
+                let client = try self.clientFactory()
+                let page = try await client.searchSessions(query: searchTerm, cursor: nil, limit: 50)
+                // 部分 transport 在取消后仍可能交付已完成响应；generation 是最终防线，禁止旧查询污染新结果。
+                guard !Task.isCancelled,
+                      self.sessionSearchGeneration == generation,
+                      self.appStore.connectionGeneration == connectionGeneration,
+                      self.sessionSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines) == searchTerm,
+                      !self.isNetworkUnavailable,
+                      self.connectionTermination == nil
+                else {
+                    return
+                }
+                self.applyRemoteSessionSearchPage(page, replacing: true, requestedCursor: nil)
+            } catch {
+                // 搜索属于列表增强：旧服务 method unavailable、弱网或临时鉴权失败都只回退本地过滤，
+                // 不能把普通搜索失败升级成全局连接/鉴权终态。
+            }
+        }
+    }
+
+    private func resetRemoteSessionSearchState() {
+        sessionSearchLoadMoreTask?.cancel()
+        sessionSearchLoadMoreTask = nil
+        sessionSearchLoadingCursor = nil
+        remoteSessionSearchSnippetByID = [:]
+        remoteSessionSearchResults = []
+        sessionSearchNextCursor = nil
+        sessionSearchHasMore = false
+        isSearchingRemoteSessionResults = false
+        isLoadingMoreSessionSearchResults = false
+    }
+
+    private func cancelRemoteSessionSearchRequestsPreservingResults() {
+        sessionSearchTask?.cancel()
+        sessionSearchTask = nil
+        sessionSearchLoadMoreTask?.cancel()
+        sessionSearchLoadMoreTask = nil
+        sessionSearchGeneration &+= 1
+        sessionSearchLoadingCursor = nil
+        isSearchingRemoteSessionResults = false
+        isLoadingMoreSessionSearchResults = false
+    }
+
+    private func applyRemoteSessionSearchPage(
+        _ page: ThreadSearchPage,
+        replacing: Bool,
+        requestedCursor: String?
+    ) {
+        var sessionsByID: [SessionID: AgentSession] = [:]
+        var snippetsByID: [SessionID: String] = replacing ? [:] : remoteSessionSearchSnippetByID
+        if !replacing {
+            for session in remoteSessionSearchResults {
+                sessionsByID[session.id] = session
+            }
+        }
+
+        for result in page.results {
+            let alignedSession = alignSessionToKnownWorkspace(result.session)
+            sessionsByID[alignedSession.id] = alignedSession
+            let snippet = result.snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            if snippet.isEmpty {
+                snippetsByID.removeValue(forKey: alignedSession.id)
+            } else {
+                // 后续页若重复返回同一 thread，以新 snippet 为准；canonical sessions 始终不参与写入。
+                snippetsByID[alignedSession.id] = snippet
+            }
+        }
+
+        remoteSessionSearchSnippetByID = snippetsByID
+        remoteSessionSearchResults = Self.sortedSessions(Array(sessionsByID.values))
+
+        let nextCursor = page.nextCursor.flatMap { cursor in
+            cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : cursor
+        }
+        let canContinue = nextCursor != nil && nextCursor != requestedCursor
+        sessionSearchNextCursor = canContinue ? nextCursor : nil
+        sessionSearchHasMore = canContinue
+    }
+
+    private func sessionsIncludingRemoteSearch(
+        _ base: [AgentSession],
+        projectID: String? = nil
+    ) -> [AgentSession] {
+        guard isSessionSearchActive, !remoteSessionSearchResults.isEmpty else {
+            return base
+        }
+        let remote = remoteSessionSearchResults.filter { session in
+            projectID == nil || session.projectID == projectID
+        }
+        guard !remote.isEmpty else {
+            return base
+        }
+        // 同一 ID 保留基础会话的权威状态/preview；snippet 单独展示，不能因一次搜索覆盖 canonical session。
+        var combined = base
+        let baseIDs = Set(base.map(\.id))
+        combined.append(contentsOf: remote.filter { !baseIDs.contains($0.id) })
+        return Self.sortedSessions(combined)
+    }
+
     private func sessionsMatchingSearch(_ items: [AgentSession]) -> [AgentSession] {
         let query = normalizedSessionSearchQuery
         guard !query.isEmpty else {
             return items
         }
         // 搜索只作用于已加载会话投影，不改原始 sessions；这样清空搜索后能恢复分页、冻结顺序和选择状态。
-        return items.filter { sessionMatchesSearch($0, query: query) }
+        let remoteResultIDs = Set(remoteSessionSearchResults.map(\.id))
+        // Codex 可能按 token/FTS 命中，snippet 不保证包含完整连续查询；远端结果应视为已经命中，
+        // 这里只对普通本地会话继续做 literal contains 过滤。
+        return items.filter { remoteResultIDs.contains($0.id) || sessionMatchesSearch($0, query: query) }
     }
 
     private func sessionMatchesSearch(_ session: AgentSession, query: String) -> Bool {
@@ -5371,6 +6537,23 @@ final class SessionStore: ObservableObject {
         replayBufferedEvents: Bool = true,
         allowNonRunning: Bool = false
     ) {
+        guard connectionTermination == nil, !appStore.requiresRePairing else {
+            setWebSocketStatus(.terminated(.credentialsInvalid))
+            return
+        }
+        guard !isAppInBackground else {
+            // 后台前已启动的 refresh/bootstrap 可能稍后才走到 attach；不能让它在退役连接后
+            // 又创建新 socket，否则系统挂起时仍会留下第二条幽灵连接。
+            appLifecycleSuspendedSessionID = session.id
+            setWebSocketStatus(.disconnected)
+            return
+        }
+        guard !isNetworkUnavailable else {
+            networkSuspendedSessionID = session.id
+            setWebSocketStatus(.disconnected)
+            setStatusMessage("网络不可用，恢复后自动重连")
+            return
+        }
         // allowNonRunning：非运行会话的订阅同样有价值——thread/resume 会带回权威状态
         // 纠正被误降级的会话，后续 turn 事件也能实时推进来。
         guard session.isRunning || allowNonRunning else {
@@ -5393,7 +6576,7 @@ final class SessionStore: ObservableObject {
                     return
                 }
                 switch status {
-                case .failed, .disconnected:
+                case .failed, .disconnected, .terminated:
                     await self?.flushRuntimeEvents(sessionID: session.id)
                 default:
                     break
@@ -5505,11 +6688,24 @@ final class SessionStore: ObservableObject {
         for session: AgentSession,
         allowNonRunning: Bool = false
     ) -> (any SessionWebSocketClient)? {
+        // 凭据失效是确定性终态，即使设备同时离线，也必须优先引导用户重新配对。
+        if let termination = connectionTermination {
+            setErrorMessage(termination.message)
+            return nil
+        }
+        if appStore.requiresRePairing {
+            setErrorMessage(ConnectionTerminationStatus.credentialsInvalid.message)
+            return nil
+        }
+        guard !isNetworkUnavailable else {
+            setErrorMessage("网络不可用，恢复后将自动重连")
+            return nil
+        }
         let shouldReconnect: Bool
         switch webSocketStatus {
         case .failed, .disconnected:
             shouldReconnect = true
-        case .connecting, .connected:
+        case .connecting, .connected, .terminated:
             shouldReconnect = false
         }
         if connectedSessionID != session.id || webSocket == nil || shouldReconnect {
@@ -5520,7 +6716,11 @@ final class SessionStore: ObservableObject {
             return nil
         }
         guard webSocketStatus == .connected else {
-            setErrorMessage("WebSocket 正在连接，请稍后再发送")
+            if case .terminated(let reason) = webSocketStatus {
+                setErrorMessage(reason.message)
+            } else {
+                setErrorMessage("WebSocket 正在连接，请稍后再发送")
+            }
             return nil
         }
         return webSocket
@@ -5529,11 +6729,20 @@ final class SessionStore: ObservableObject {
     private func applyWebSocketStatus(_ status: WebSocketStatus, sessionID: String) {
         switch status {
         case .connected:
+            guard !isNetworkUnavailable else {
+                suspendWebSocketForNetworkLoss(sessionID: sessionID)
+                return
+            }
             cancelWebSocketReconnect(resetAttempts: false)
             webSocketReconnectAttemptBySessionID.removeValue(forKey: sessionID)
             setWebSocketStatus(.connected)
             setErrorMessage(nil)
         case .failed(let message):
+            if isNetworkUnavailable {
+                suspendWebSocketForNetworkLoss(sessionID: sessionID)
+                setStatusMessage("网络不可用，恢复后自动重连")
+                return
+            }
             let policyRejected = Self.isDeterministicGatewayPolicyFailure(message)
             let canReconnect = shouldAutoReconnectWebSocket(sessionID: sessionID) && !policyRejected
             if connectedSessionID == sessionID {
@@ -5550,7 +6759,14 @@ final class SessionStore: ObservableObject {
                 setWebSocketStatus(.failed(message))
                 setErrorMessage(policyRejected ? "连接被服务器策略拒绝，已停止自动重连：\(message)" : message)
             }
+        case .terminated(let reason):
+            terminateConnection(reason)
         case .disconnected:
+            if isNetworkUnavailable {
+                suspendWebSocketForNetworkLoss(sessionID: sessionID)
+                setStatusMessage("网络不可用，恢复后自动重连")
+                return
+            }
             let canReconnect = shouldAutoReconnectWebSocket(sessionID: sessionID)
             if connectedSessionID == sessionID {
                 connectedSessionID = nil
@@ -5567,6 +6783,36 @@ final class SessionStore: ObservableObject {
         case .connecting:
             setWebSocketStatus(.connecting)
         }
+    }
+
+    @discardableResult
+    private func terminateConnectionIfCredentialsInvalid(_ error: Error) -> Bool {
+        guard isCredentialInvalidatingError(error) else {
+            return false
+        }
+        terminateConnection(.credentialsInvalid)
+        return true
+    }
+
+    private func terminateConnection(_ reason: ConnectionTerminationStatus) {
+        // 认证失败是确定性终止态：保留 projects、sessions、选择和本地消息，只退役无法再使用的
+        // 网络连接并取消重试。新凭据提交成功后 commitPreparedConnection 会显式解除该状态。
+        connectionTermination = reason
+        cancelRemoteSessionSearchRequestsPreservingResults()
+        appStore.markCredentialsInvalid()
+        appLifecycleSuspendedSessionID = nil
+        networkSuspendedSessionID = nil
+        networkRecoveryTask?.cancel()
+        networkRecoveryTask = nil
+        cancelWebSocketReconnect(resetAttempts: true)
+        webSocketConnectionGeneration += 1
+        let socket = webSocket
+        webSocket = nil
+        connectedSessionID = nil
+        socket?.disconnect()
+        setWebSocketStatus(.terminated(reason))
+        setErrorMessage(reason.message)
+        setStatusMessage(reason.message)
     }
 
     private func disconnectWebSocket(cancelReconnect: Bool = true) {
@@ -5605,7 +6851,10 @@ final class SessionStore: ObservableObject {
     private func shouldAutoReconnectWebSocket(sessionID: SessionID) -> Bool {
         // 不再要求 isRunning：状态可能刚被瞬时 idle 误读降级，订阅对历史会话同样有效；
         // 只要还是当前选中的会话就继续自动重连。
-        guard connectedSessionID == sessionID,
+        guard connectionTermination == nil,
+              !appStore.requiresRePairing,
+              !isNetworkUnavailable,
+              connectedSessionID == sessionID,
               selectedSessionID == sessionID,
               sessionsByID[sessionID] != nil,
               appStore.isConfigured else {
@@ -5615,10 +6864,27 @@ final class SessionStore: ObservableObject {
     }
 
     private func scheduleWebSocketReconnect(sessionID: SessionID, reason: String) {
+        // 终态不能被迟到的断线回调覆盖成普通失败，否则 UI 会丢失重新配对入口。
+        if let termination = connectionTermination {
+            setWebSocketStatus(.terminated(termination))
+            setErrorMessage(termination.message)
+            return
+        }
+        if appStore.requiresRePairing {
+            let termination = ConnectionTerminationStatus.credentialsInvalid
+            setWebSocketStatus(.terminated(termination))
+            setErrorMessage(termination.message)
+            return
+        }
         guard selectedSessionID == sessionID,
               sessionsByID[sessionID] != nil else {
             setWebSocketStatus(.failed(reason))
             setErrorMessage(reason)
+            return
+        }
+        guard !isNetworkUnavailable else {
+            suspendWebSocketForNetworkLoss(sessionID: sessionID)
+            setStatusMessage("网络不可用，恢复后自动重连")
             return
         }
 
@@ -5629,12 +6895,13 @@ final class SessionStore: ObservableObject {
         setWebSocketStatus(.connecting)
         setErrorMessage("WebSocket 断开，正在自动重连：\(reason)")
         setStatusMessage("WebSocket 第 \(attempt) 次重连")
+        let reconnectSleep = webSocketReconnectSleep
 
         // 重连任务只服务当前选中的会话；切项目/停止/返回列表都会取消它。
         webSocketReconnectTask = Task { [weak self] in
             if delay > 0 {
                 do {
-                    try await Task.sleep(nanoseconds: delay)
+                    try await reconnectSleep(delay)
                 } catch {
                     return
                 }
@@ -5659,7 +6926,10 @@ final class SessionStore: ObservableObject {
     }
 
     private func runScheduledWebSocketReconnect(sessionID: SessionID, attempt: Int) async {
-        guard selectedSessionID == sessionID,
+        guard connectionTermination == nil,
+              !appStore.requiresRePairing,
+              !isNetworkUnavailable,
+              selectedSessionID == sessionID,
               webSocketReconnectAttemptBySessionID[sessionID] == attempt,
               let latestSession = sessionsByID[sessionID] else {
             return
@@ -5668,7 +6938,10 @@ final class SessionStore: ObservableObject {
             return
         }
         let refreshedSession = await refreshSessionSnapshotBeforeReconnect(sessionID: sessionID) ?? latestSession
-        guard selectedSessionID == sessionID else {
+        guard connectionTermination == nil,
+              !appStore.requiresRePairing,
+              !isNetworkUnavailable,
+              selectedSessionID == sessionID else {
             return
         }
         // 快照可能在上游刚恢复时把运行中的 turn 误读成 idle；不能据此一次性放弃重连。
@@ -5694,6 +6967,9 @@ final class SessionStore: ObservableObject {
             await loadHistory(for: refreshed)
             return refreshed
         } catch {
+            if terminateConnectionIfCredentialsInvalid(error) {
+                return nil
+            }
             setStatusMessage("重连前快照刷新失败：\(error.localizedDescription)")
             return current
         }
@@ -5795,7 +7071,16 @@ final class SessionStore: ObservableObject {
         deliveredRuntimeNotificationIDs.insert(notification.id)
         do {
             // 运行态通知不持久化：它只是实时提示，不应该在会话列表状态里留下“待处理任务”的假象。
-            try await sessionReminderScheduler.notify(notification)
+            guard let session = sessionsByID[notification.sessionID] else {
+                setStatusMessage("通知调度失败：找不到对应会话")
+                return
+            }
+            let route = SessionNotificationRoute.current(
+                profileID: appStore.notificationRoutingProfileID,
+                projectID: session.projectID,
+                sessionID: session.id
+            )
+            try await sessionReminderScheduler.notify(notification, route: route)
         } catch {
             setStatusMessage("通知调度失败：\(error.localizedDescription)")
         }
@@ -6263,7 +7548,25 @@ final class SessionStore: ObservableObject {
     }
 
     private func reloadSessionReminders() {
-        let reminders = sessionReminderStore.load(endpoint: appStore.endpoint)
+        let loaded = sessionReminderStore.load(endpoint: appStore.endpoint)
+        let now = sessionReminderNow()
+        var reminders: [SessionID: SessionReminder] = [:]
+        reminders.reserveCapacity(loaded.count)
+        var expiredSessionIDs: [SessionID] = []
+        for (sessionID, reminder) in loaded {
+            if reminder.isDue(now: now) {
+                expiredSessionIDs.append(sessionID)
+            } else {
+                reminders[sessionID] = reminder
+            }
+        }
+        if reminders != loaded {
+            // 提醒触发后只需在加载/回前台时收敛持久化状态；不为精确秒级 UI 增加后台 timer。
+            sessionReminderStore.save(reminders, endpoint: appStore.endpoint)
+            for sessionID in expiredSessionIDs {
+                sessionReminderScheduler.cancel(sessionID: sessionID)
+            }
+        }
         guard sessionRemindersByID != reminders else {
             return
         }
@@ -6297,6 +7600,29 @@ final class SessionStore: ObservableObject {
         var next = managedWorktrees.filter { $0.id != item.id }
         next.insert(item, at: 0)
         setManagedWorktreesIfChanged(next)
+    }
+
+    private func normalizedWorktreeCleanupPath(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private func forgetManagedWorktreeAfterDeletion(_ workspace: AgentWorkspace) {
+        forgetWorkspaceAfterWorktreeDeletion(workspace)
+        gitStatusByPath.removeValue(forKey: workspace.path)
+        gitStatusErrorByPath.removeValue(forKey: workspace.path)
+        gitActionErrorByPath.removeValue(forKey: workspace.path)
+        commandActionsByPath.removeValue(forKey: workspace.path)
+        commandActionErrorByPath.removeValue(forKey: workspace.path)
+        commandActionResultByPath.removeValue(forKey: workspace.path)
+        commandActionHistoryByPath.removeValue(forKey: workspace.path)
+        queuedCommandActionRuns.removeAll { $0.path == workspace.path }
+        queuedCommandActionIDsByPath.removeValue(forKey: workspace.path)
+        worktreeBranchesByPath.removeValue(forKey: workspace.path)
+        worktreeBranchErrorByPath.removeValue(forKey: workspace.path)
+        pullRequestURLByPath.removeValue(forKey: workspace.path)
+        pullRequestStatusByPath.removeValue(forKey: workspace.path)
+        pullRequestStatusErrorByPath.removeValue(forKey: workspace.path)
     }
 
     private func forgetWorkspaceAfterWorktreeDeletion(_ workspace: AgentWorkspace) {
@@ -6364,6 +7690,9 @@ final class SessionStore: ObservableObject {
     }
 
     private func handleWorkspaceLoadFailure(workspace: AgentWorkspace, error: Error) async {
+        if terminateConnectionIfCredentialsInvalid(error) {
+            return
+        }
         if let policyFailure = sessionListPolicyFailure(from: error) {
             registerSessionListCooldown(policyFailure, for: workspace)
             if sessions(forProjectID: workspace.id).isEmpty {
@@ -6538,6 +7867,15 @@ final class SessionStore: ObservableObject {
     }
 
     private func clearConnectionData() {
+        sessionSearchTask?.cancel()
+        sessionSearchTask = nil
+        sessionSearchGeneration &+= 1
+        resetRemoteSessionSearchState()
+        // 搜索词属于当前 Mac 的浏览上下文；切换 endpoint 后直接清空，避免新 Mac 展示旧查询却未发首屏请求。
+        // didSet 会再次同步失效代次，但空查询只 reset，不会启动异步搜索。
+        if !sessionSearchQuery.isEmpty {
+            sessionSearchQuery = ""
+        }
         // endpoint 切换后 session/project ID 可能重复；旧 Mac 的草稿不能恢复到新连接。
         composerDraftCache.removeAll()
         queuedRunningTurnsBySessionID.removeAll()
@@ -6940,7 +8278,7 @@ final class SessionStore: ObservableObject {
             // 长任务运行中，thread/list 偶尔会返回滞后的 idle/notLoaded 快照。
             // 当前 iPad 仍有活动实时连接时，以本地运行态为准，避免下一次发送误走历史 resume。
             return true
-        case .disconnected, .failed:
+        case .disconnected, .failed, .terminated:
             return false
         }
     }

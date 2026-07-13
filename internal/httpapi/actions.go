@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -67,10 +66,7 @@ func (r *Router) commandActionListHandler(w http.ResponseWriter, req *http.Reque
 	}
 
 	var payload commandActionListRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 
@@ -107,10 +103,7 @@ func (r *Router) commandActionRunHandler(w http.ResponseWriter, req *http.Reques
 	}
 
 	var payload commandActionRunRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 

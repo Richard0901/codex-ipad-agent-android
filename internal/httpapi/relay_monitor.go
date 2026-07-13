@@ -1,12 +1,20 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const relayMonitorRecentLimit = 80
@@ -57,6 +65,8 @@ type relayGatewayStats struct {
 	TotalConnections            int64                              `json:"total_connections"`
 	ActiveConnections           int64                              `json:"active_connections"`
 	FailedUpstreamDials         int64                              `json:"failed_upstream_dials"`
+	UpstreamDialFailureKinds    map[string]int64                   `json:"upstream_dial_failure_kinds"`
+	RecentUpstreamDialFailures  []relayGatewayDialFailureSample    `json:"recent_upstream_dial_failures"`
 	UpstreamDialMillisMax       int64                              `json:"upstream_dial_ms_max"`
 	UpstreamDialMillisSum       int64                              `json:"upstream_dial_ms_total"`
 	ClientToUpstream            relayGatewayDirectionStats         `json:"client_to_upstream"`
@@ -67,9 +77,31 @@ type relayGatewayStats struct {
 	HistoryResponseBytesBlocked int64                              `json:"history_response_bytes_blocked"`
 	HistoryBudgetRejections     int64                              `json:"history_budget_rejections"`
 	Methods                     map[string]relayGatewayMethodStats `json:"methods"`
+	TerminationCounts           map[string]int64                   `json:"termination_counts"`
+	RecentTerminations          []relayGatewayTerminationSample    `json:"recent_terminations"`
 	RecentConnections           []relayGatewayConnectionStats      `json:"recent_connections"`
 	ActiveConnectionDetail      []relayGatewayConnectionStats      `json:"active_connections_detail"`
 	RecentRPC                   []relayGatewayRPCSample            `json:"recent_rpc"`
+}
+
+// relayGatewayDialFailureSample 只保存故障类别和耗时，不保存底层 error 文本。
+// dial error 可能包含主机、URL 甚至第三方库拼接的凭据，诊断接口不能把它原样带给移动端。
+type relayGatewayDialFailureSample struct {
+	FailedAt       time.Time `json:"failed_at"`
+	Kind           string    `json:"kind"`
+	DurationMillis int64     `json:"duration_ms"`
+}
+
+// relayGatewayTerminationSample 用限界字段描述一次连接结束，足够区分客户端断网、
+// 上游退出和写超时，同时避免记录 WebSocket close text、prompt 或文件内容。
+type relayGatewayTerminationSample struct {
+	EndedAt             time.Time `json:"ended_at"`
+	ConnectionID        string    `json:"connection_id"`
+	Stage               string    `json:"stage"`
+	Kind                string    `json:"kind"`
+	WebSocketCode       int       `json:"websocket_code,omitempty"`
+	DurationMillis      int64     `json:"duration_ms"`
+	OutstandingRequests int64     `json:"outstanding_requests"`
 }
 
 type relayGatewayMethodStats struct {
@@ -123,6 +155,9 @@ type relayGatewayConnectionStats struct {
 	Upstream                    string                     `json:"upstream"`
 	UpstreamDialMillis          int64                      `json:"upstream_dial_ms"`
 	CloseReason                 string                     `json:"close_reason,omitempty"`
+	CloseStage                  string                     `json:"close_stage,omitempty"`
+	CloseKind                   string                     `json:"close_kind,omitempty"`
+	CloseWebSocketCode          int                        `json:"close_websocket_code,omitempty"`
 	ClientToUpstream            relayGatewayDirectionStats `json:"client_to_upstream"`
 	UpstreamToClient            relayGatewayDirectionStats `json:"upstream_to_client"`
 	RPC                         relayGatewayRPCStats       `json:"rpc"`
@@ -180,10 +215,20 @@ type relayFrameMeta struct {
 	IsResponse bool
 }
 
+type relayGatewayTermination struct {
+	Stage         string
+	Kind          string
+	WebSocketCode int
+}
+
 func newRelayMonitor() *relayMonitor {
 	return &relayMonitor{
-		startedAt:       time.Now().UTC(),
-		gateway:         relayGatewayStats{Methods: map[string]relayGatewayMethodStats{}},
+		startedAt: time.Now().UTC(),
+		gateway: relayGatewayStats{
+			Methods:                  map[string]relayGatewayMethodStats{},
+			UpstreamDialFailureKinds: map[string]int64{},
+			TerminationCounts:        map[string]int64{},
+		},
 		active:          map[string]*relayGatewayConnectionStats{},
 		historyInflight: map[string]relayHistoryInflightRequest{},
 	}
@@ -298,14 +343,23 @@ func (m *relayMonitor) recordHTTP(sample relayHTTPSample) {
 	m.http.Recent = appendRecentHTTP(m.http.Recent, sample)
 }
 
-func (m *relayMonitor) recordGatewayDialFailure(duration time.Duration) {
+func (m *relayMonitor) recordGatewayDialFailure(duration time.Duration, err error) {
 	if m == nil {
 		return
 	}
 	ms := duration.Milliseconds()
+	kind, _ := relayGatewayErrorKind(err)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gateway.FailedUpstreamDials++
+	if m.gateway.UpstreamDialFailureKinds == nil {
+		m.gateway.UpstreamDialFailureKinds = map[string]int64{}
+	}
+	m.gateway.UpstreamDialFailureKinds[kind]++
+	m.gateway.RecentUpstreamDialFailures = appendRecentGatewayDialFailure(
+		m.gateway.RecentUpstreamDialFailures,
+		relayGatewayDialFailureSample{FailedAt: time.Now().UTC(), Kind: kind, DurationMillis: ms},
+	)
 	m.gateway.UpstreamDialMillisSum += ms
 	if ms > m.gateway.UpstreamDialMillisMax {
 		m.gateway.UpstreamDialMillisMax = ms
@@ -355,11 +409,31 @@ func (m *relayMonitor) finishGatewayConnection(id string, reason string) {
 		return
 	}
 	now := time.Now().UTC()
+	termination := relayGatewayTerminationFromReason(reason)
 	stats.EndedAt = &now
 	stats.DurationMillis = now.Sub(stats.StartedAt).Milliseconds()
-	stats.CloseReason = trimRelayString(reason, 160)
+	stats.CloseStage = termination.Stage
+	stats.CloseKind = termination.Kind
+	stats.CloseWebSocketCode = termination.WebSocketCode
+	stats.CloseReason = termination.safeReason()
 	stats.RPC.OutstandingRequests = int64(len(stats.pendingRPC))
 	stats.RPC.OutstandingMillisMax = maxOutstandingMillis(stats.pendingRPC, now)
+	if m.gateway.TerminationCounts == nil {
+		m.gateway.TerminationCounts = map[string]int64{}
+	}
+	m.gateway.TerminationCounts[termination.Stage+"."+termination.Kind]++
+	m.gateway.RecentTerminations = appendRecentGatewayTermination(
+		m.gateway.RecentTerminations,
+		relayGatewayTerminationSample{
+			EndedAt:             now,
+			ConnectionID:        stats.ID,
+			Stage:               termination.Stage,
+			Kind:                termination.Kind,
+			WebSocketCode:       termination.WebSocketCode,
+			DurationMillis:      stats.DurationMillis,
+			OutstandingRequests: stats.RPC.OutstandingRequests,
+		},
+	)
 	stats.pendingRPC = nil
 	m.gateway.RecentConnections = appendRecentGatewayConnection(m.gateway.RecentConnections, *stats)
 	delete(m.active, id)
@@ -537,6 +611,10 @@ func (m *relayMonitor) snapshot() relayDiagnosticsResponse {
 	for method, stats := range m.gateway.Methods {
 		gatewayStats.Methods[method] = stats
 	}
+	gatewayStats.UpstreamDialFailureKinds = copyRelayInt64Map(m.gateway.UpstreamDialFailureKinds)
+	gatewayStats.TerminationCounts = copyRelayInt64Map(m.gateway.TerminationCounts)
+	gatewayStats.RecentUpstreamDialFailures = append([]relayGatewayDialFailureSample(nil), m.gateway.RecentUpstreamDialFailures...)
+	gatewayStats.RecentTerminations = append([]relayGatewayTerminationSample(nil), m.gateway.RecentTerminations...)
 	gatewayStats.RecentConnections = append([]relayGatewayConnectionStats(nil), m.gateway.RecentConnections...)
 	gatewayStats.RecentRPC = append([]relayGatewayRPCSample(nil), m.gateway.RecentRPC...)
 	gatewayStats.ActiveConnections = int64(len(m.active))
@@ -588,6 +666,13 @@ func relayDiagnosticsHints(snapshot relayDiagnosticsResponse) []string {
 	}
 	if gatewayStats.UpstreamToClient.WriteMillisMax >= 500 {
 		hints = append(hints, fmt.Sprintf("app-server gateway 写回客户端最大耗时 %dms，优先怀疑 iPad/VPS/SSH 隧道/公网带宽。", gatewayStats.UpstreamToClient.WriteMillisMax))
+	}
+	if gatewayStats.FailedUpstreamDials > 0 && len(gatewayStats.RecentUpstreamDialFailures) > 0 {
+		last := gatewayStats.RecentUpstreamDialFailures[len(gatewayStats.RecentUpstreamDialFailures)-1]
+		hints = append(hints, fmt.Sprintf("app-server 上游握手累计失败 %d 次，最近类别为 %s；若持续出现，先检查本机 app-server 是否就绪。", gatewayStats.FailedUpstreamDials, last.Kind))
+	}
+	if count := relayWeakNetworkTerminationCount(gatewayStats.TerminationCounts); count > 0 {
+		hints = append(hints, fmt.Sprintf("最近连接累计出现 %d 次超时、断流或连接重置；真机验收时请对照 recent_terminations 的 stage 判断是客户端链路还是本机上游。", count))
 	}
 	if gatewayStats.RPC.LatencyMillisMax >= 2000 && gatewayStats.UpstreamToClient.WriteMillisMax < 500 {
 		hints = append(hints, fmt.Sprintf("app-server JSON-RPC 最大响应耗时 %dms，但写回客户端不慢，优先看本机 app-server/Codex/模型响应。", gatewayStats.RPC.LatencyMillisMax))
@@ -711,6 +796,22 @@ func appendRecentGatewayConnection(items []relayGatewayConnectionStats, sample r
 	return items
 }
 
+func appendRecentGatewayDialFailure(items []relayGatewayDialFailureSample, sample relayGatewayDialFailureSample) []relayGatewayDialFailureSample {
+	items = append(items, sample)
+	if len(items) > relayMonitorRecentLimit {
+		items = append([]relayGatewayDialFailureSample(nil), items[len(items)-relayMonitorRecentLimit:]...)
+	}
+	return items
+}
+
+func appendRecentGatewayTermination(items []relayGatewayTerminationSample, sample relayGatewayTerminationSample) []relayGatewayTerminationSample {
+	items = append(items, sample)
+	if len(items) > relayMonitorRecentLimit {
+		items = append([]relayGatewayTerminationSample(nil), items[len(items)-relayMonitorRecentLimit:]...)
+	}
+	return items
+}
+
 func appendRecentRPC(items []relayGatewayRPCSample, sample relayGatewayRPCSample) []relayGatewayRPCSample {
 	items = append(items, sample)
 	if len(items) > relayMonitorRecentLimit {
@@ -755,4 +856,137 @@ func trimRelayString(value string, max int) string {
 		return value
 	}
 	return value[:max] + "..."
+}
+
+func copyRelayInt64Map(source map[string]int64) map[string]int64 {
+	result := make(map[string]int64, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+// gatewayCloseReason 把 error 先归类再编码。这里故意不保留 err.Error()：WebSocket
+// close text 由对端控制，可能意外携带 Token、prompt 或文件内容。
+func gatewayCloseReason(stage string, err error) string {
+	kind, code := relayGatewayErrorKind(err)
+	stage = normalizeRelayDiagnosticLabel(stage, "unknown")
+	return stage + "|" + kind + "|" + strconv.Itoa(code)
+}
+
+func relayGatewayTerminationFromReason(reason string) relayGatewayTermination {
+	parts := strings.Split(reason, "|")
+	if len(parts) == 3 {
+		code, _ := strconv.Atoi(parts[2])
+		return relayGatewayTermination{
+			Stage:         normalizeRelayDiagnosticLabel(parts[0], "unknown"),
+			Kind:          normalizeRelayDiagnosticLabel(parts[1], "network_error"),
+			WebSocketCode: code,
+		}
+	}
+
+	// 固定内部原因也要转成限界字段。冒号后的原始进程错误只用于归类，不会进入响应。
+	stage := reason
+	if index := strings.IndexByte(stage, ':'); index >= 0 {
+		stage = stage[:index]
+	}
+	stage = normalizeRelayDiagnosticLabel(stage, "unknown")
+	kind := "internal"
+	switch {
+	case stage == "context_done":
+		kind = "canceled"
+	case stage == "bridge_exit" || stage == "bridge_stdout_closed":
+		kind = "process_exit"
+	case strings.Contains(stage, "policy_error_write"):
+		kind = "write_failed"
+	case strings.Contains(stage, "ping"):
+		kind = "network_error"
+	}
+	return relayGatewayTermination{Stage: stage, Kind: kind}
+}
+
+func (t relayGatewayTermination) safeReason() string {
+	if t.WebSocketCode != 0 {
+		return fmt.Sprintf("%s:%s:%d", t.Stage, t.Kind, t.WebSocketCode)
+	}
+	return t.Stage + ":" + t.Kind
+}
+
+func relayGatewayErrorKind(err error) (string, int) {
+	if err == nil {
+		return "none", 0
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch closeErr.Code {
+		case websocket.CloseNormalClosure, websocket.CloseGoingAway:
+			return "normal_close", closeErr.Code
+		case websocket.CloseAbnormalClosure, websocket.CloseNoStatusReceived:
+			return "connection_lost", closeErr.Code
+		default:
+			return "peer_closed", closeErr.Code
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+		return "canceled", 0
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "eof", 0
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return "connection_reset", 0
+	}
+	if errors.Is(err, syscall.EPIPE) {
+		return "broken_pipe", 0
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection_refused", 0
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout", 0
+	}
+
+	// 某些包装库没有保留可 errors.Is 的底层错误，只做关键词归类，原文仍不会保存。
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "timeout"):
+		return "timeout", 0
+	case strings.Contains(message, "connection reset"):
+		return "connection_reset", 0
+	case strings.Contains(message, "broken pipe"):
+		return "broken_pipe", 0
+	case strings.Contains(message, "connection refused"):
+		return "connection_refused", 0
+	case strings.Contains(message, "unexpected eof"):
+		return "eof", 0
+	default:
+		return "network_error", 0
+	}
+}
+
+func normalizeRelayDiagnosticLabel(value string, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || len(value) > 64 {
+		return fallback
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return fallback
+		}
+	}
+	return value
+}
+
+func relayWeakNetworkTerminationCount(counts map[string]int64) int64 {
+	var total int64
+	for key, count := range counts {
+		for _, suffix := range []string{".timeout", ".connection_lost", ".connection_reset", ".broken_pipe", ".eof"} {
+			if strings.HasSuffix(key, suffix) {
+				total += count
+				break
+			}
+		}
+	}
+	return total
 }

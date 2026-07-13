@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,9 +17,10 @@ import (
 )
 
 type Checker struct {
-	version  string
-	cfg      config.Config
-	registry *projects.Registry
+	version    string
+	cfg        config.Config
+	registry   *projects.Registry
+	configPath string
 }
 
 type Results struct {
@@ -30,12 +33,18 @@ type Results struct {
 type Check struct {
 	Name    string `json:"name"`
 	OK      bool   `json:"ok"`
+	Level   string `json:"level"`
 	Message string `json:"message"`
 	Fix     string `json:"fix,omitempty"`
 }
 
-func NewChecker(version string, cfg config.Config, registry *projects.Registry) *Checker {
-	return &Checker{version: version, cfg: cfg, registry: registry}
+func NewChecker(version string, cfg config.Config, registry *projects.Registry, configPath ...string) *Checker {
+	checker := &Checker{version: version, cfg: cfg, registry: registry}
+	// variadic 参数保持现有嵌入方兼容；CLI 传入真实路径后才启用配置文件权限检查。
+	if len(configPath) > 0 {
+		checker.configPath = expandConfigPath(configPath[0])
+	}
+	return checker
 }
 
 func (c *Checker) Run(ctx context.Context, checkPort bool) Results {
@@ -56,6 +65,12 @@ func (c *Checker) Run(ctx context.Context, checkPort bool) Results {
 		c.runtimeCheck(),
 		{Name: "tailscale", OK: commandExists("tailscale"), Message: "检测到 Tailscale 命令", Fix: "安装并登录 Tailscale：https://tailscale.com/download"},
 	}
+	if check := c.configFileCheck(); check.Name != "" {
+		checks = append(checks, check)
+	}
+	if check := c.appServerTokenFileCheck(); check.Name != "" {
+		checks = append(checks, check)
+	}
 	if c.needsCodexAppServerCheck() {
 		checks = append(checks, c.codexAppServerCheck(ctx))
 	}
@@ -69,15 +84,92 @@ func (c *Checker) Run(ctx context.Context, checkPort bool) Results {
 
 	ok := true
 	for i := range checks {
-		if checks[i].Name == "tailscale" && !checks[i].OK {
-			checks[i].Message = "未检测到 Tailscale 命令，本机访问仍可使用"
+		if checks[i].OK {
+			checks[i].Level = "ok"
 			continue
 		}
-		if !checks[i].OK {
-			ok = false
+		if checks[i].Name == "tailscale" && !checks[i].OK {
+			checks[i].Message = "未检测到 Tailscale 命令，本机访问仍可使用"
+			checks[i].Level = "warning"
+			continue
 		}
+		checks[i].Level = "error"
+		ok = false
 	}
 	return Results{OK: ok, Version: c.version, Listen: c.cfg.Listen, Checks: checks}
+}
+
+func (c *Checker) configFileCheck() Check {
+	path := strings.TrimSpace(c.configPath)
+	if path == "" {
+		return Check{}
+	}
+	return sensitiveFileCheck("config-file", "配置文件", path)
+}
+
+func (c *Checker) appServerTokenFileCheck() Check {
+	path := strings.TrimSpace(c.cfg.AppServer.WSTokenFile)
+	if path == "" {
+		if c.cfg.AppServer.Managed && strings.EqualFold(firstNonEmpty(c.cfg.AppServer.Transport, "ws"), "ws") {
+			return Check{
+				Name:    "app-server-token-file",
+				OK:      false,
+				Message: "托管 app-server 未配置独立 token file",
+				Fix:     "运行 agentd doctor --fix 生成独立 token file；不要手工复用 agentd 访问 token",
+			}
+		}
+		return Check{}
+	}
+	return sensitiveFileCheck("app-server-token-file", "app-server token file", path)
+}
+
+func sensitiveFileCheck(name string, label string, path string) Check {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Check{Name: name, OK: false, Message: label + "不存在", Fix: "运行 agentd doctor --fix 自动修复，或确认文件路径正确"}
+		}
+		return Check{Name: name, OK: false, Message: label + "状态不可读取", Fix: "检查文件所有者和权限"}
+	}
+	if !info.Mode().IsRegular() {
+		// Lstat 会把符号链接识别为非 regular，避免敏感路径被替换后指向意外文件。
+		return Check{Name: name, OK: false, Message: label + "必须是 regular file，不能是目录或符号链接", Fix: "改用当前用户拥有的普通文件"}
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return Check{
+			Name:    name,
+			OK:      false,
+			Message: fmt.Sprintf("%s权限过宽（当前 %04o）", label, info.Mode().Perm()),
+			Fix:     "运行 agentd doctor --fix 将权限收紧为 0600",
+		}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return Check{Name: name, OK: false, Message: label + "不可读取", Fix: "检查文件所有者和当前用户读取权限"}
+	}
+	_ = file.Close()
+	return Check{Name: name, OK: true, Message: label + "存在且权限仅当前用户可访问"}
+}
+
+func expandConfigPath(path string) string {
+	value := strings.TrimSpace(path)
+	if !strings.HasPrefix(value, "~/") {
+		return value
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return value
+	}
+	return filepath.Join(home, strings.TrimPrefix(value, "~/"))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (c *Checker) runtimeCheck() Check {
@@ -237,7 +329,10 @@ func Print(w io.Writer, results Results) {
 	fmt.Fprintln(w, "检查结果：")
 	for _, check := range results.Checks {
 		marker := "OK"
-		if !check.OK {
+		switch effectiveCheckLevel(check) {
+		case "warning":
+			marker = "WARN"
+		case "error":
 			marker = "!"
 		}
 		fmt.Fprintf(w, "  %s %s：%s\n", marker, check.Name, check.Message)
@@ -246,7 +341,7 @@ func Print(w io.Writer, results Results) {
 	if !results.OK {
 		fmt.Fprintln(w, "\n需要处理：")
 		for _, check := range results.Checks {
-			if check.OK {
+			if effectiveCheckLevel(check) != "error" {
 				continue
 			}
 			fmt.Fprintf(w, "  ! %s：%s\n", check.Name, check.Message)
@@ -254,5 +349,18 @@ func Print(w io.Writer, results Results) {
 				fmt.Fprintf(w, "    处理：%s\n", check.Fix)
 			}
 		}
+	}
+}
+
+func effectiveCheckLevel(check Check) string {
+	switch strings.ToLower(strings.TrimSpace(check.Level)) {
+	case "ok", "warning", "error":
+		return strings.ToLower(strings.TrimSpace(check.Level))
+	default:
+		// 兼容旧代码构造的 Check：未提供 level 时仍按 ok 布尔值推导。
+		if check.OK {
+			return "ok"
+		}
+		return "error"
 	}
 }

@@ -13,6 +13,7 @@ config.json
 
 # Go build output
 bin/
+/dist/
 
 # Xcode and Swift build output
 DerivedData/

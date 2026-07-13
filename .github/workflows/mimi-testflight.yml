@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'ios/MimiRemote/**'
+      - 'scripts/check-ios-privacy-manifest.sh'
       - '.github/workflows/mimi-testflight.yml'
   workflow_dispatch:
     inputs:
@@ -43,14 +44,15 @@ jobs:
       TESTFLIGHT_WHATS_NEW: ${{ inputs.what_to_test || format('自动内测：{0}', github.event.head_commit.message) }}
       APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-      APP_STORE_CONNECT_API_KEY_PATH: ${{ vars.MIMI_ASC_API_KEY_PATH || '/Users/gaixiaotongxue/secure/AuthKey_6WL48ZRJB6.p8' }}
+      # 自托管 Runner 的凭据路径必须在仓库 Actions Variable 中显式配置，不能提交个人机器路径。
+      APP_STORE_CONNECT_API_KEY_PATH: ${{ vars.MIMI_ASC_API_KEY_PATH }}
       IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
       IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
       IOS_APPSTORE_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROVISIONING_PROFILE_BASE64 }}
       IOS_KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
       XCODE_APP_PATH: ${{ inputs.xcode_path || '/Applications/Xcode-beta.app' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.ref || github.sha }}
 
@@ -71,6 +73,9 @@ jobs:
           test -n "$APP_STORE_CONNECT_API_KEY_ID"
           test -n "$APP_STORE_CONNECT_API_ISSUER_ID"
           test -f "$APP_STORE_CONNECT_API_KEY_PATH"
+
+      - name: 检查 App 隐私清单
+        run: bash ./scripts/check-ios-privacy-manifest.sh
 
       - name: 准备临时发布钥匙串
         run: |

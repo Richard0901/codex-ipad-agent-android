@@ -40,7 +40,8 @@
 	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
+		<!-- agentd 只通过本机、局域网或 Tailscale 提供 HTTP；公网仍保持 ATS 默认 HTTPS 要求。 -->
+		<key>NSAllowsLocalNetworking</key>
 		<true/>
 		<key>NSExceptionDomains</key>
 		<dict>

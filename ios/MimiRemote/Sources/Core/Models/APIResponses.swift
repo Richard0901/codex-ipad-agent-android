@@ -512,22 +512,191 @@ struct WorktreeDeleteResponse: Codable {
     let worktrees: [WorktreeListItem]
     let workspace: AgentWorkspace?
     let worktree: WorktreeDescriptor?
+    let registryCleanupError: String?
+
+    init(
+        deletedPath: String,
+        worktrees: [WorktreeListItem],
+        workspace: AgentWorkspace?,
+        worktree: WorktreeDescriptor?,
+        registryCleanupError: String? = nil
+    ) {
+        self.deletedPath = deletedPath
+        self.worktrees = worktrees
+        self.workspace = workspace
+        self.worktree = worktree
+        self.registryCleanupError = registryCleanupError
+    }
 
     enum CodingKeys: String, CodingKey {
         case deletedPath = "deleted_path"
         case worktrees
         case workspace
         case worktree
+        case registryCleanupError = "registry_cleanup_error"
     }
 }
 
 struct WorktreePruneResponse: Codable {
     let prunedPaths: [String]
     let worktrees: [WorktreeListItem]
+    let failedPaths: [String: String]?
+
+    init(
+        prunedPaths: [String],
+        worktrees: [WorktreeListItem],
+        failedPaths: [String: String]? = nil
+    ) {
+        self.prunedPaths = prunedPaths
+        self.worktrees = worktrees
+        self.failedPaths = failedPaths
+    }
 
     enum CodingKeys: String, CodingKey {
         case prunedPaths = "pruned_paths"
         case worktrees
+        case failedPaths = "failed_paths"
+    }
+}
+
+struct WorktreeCleanupRequest: Encodable, Equatable {
+    let dryRun: Bool?
+    let confirm: Bool?
+    let paths: [String]?
+    let planID: String?
+
+    // dry_run 缺省即为 true，预览请求保持空对象，避免客户端复制服务端策略默认值。
+    static let preview = WorktreeCleanupRequest(dryRun: nil, confirm: nil, paths: nil, planID: nil)
+
+    static func confirmed(paths: [String], planID: String) -> WorktreeCleanupRequest {
+        WorktreeCleanupRequest(dryRun: false, confirm: true, paths: paths, planID: planID)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case dryRun = "dry_run"
+        case confirm
+        case paths
+        case planID = "plan_id"
+    }
+}
+
+struct WorktreeCleanupPolicy: Codable, Equatable {
+    let autoDelete: Bool
+    let candidateAfterDays: Int
+    let keepLatestPerProject: Int
+
+    enum CodingKeys: String, CodingKey {
+        case autoDelete = "auto_delete"
+        case candidateAfterDays = "candidate_after_days"
+        case keepLatestPerProject = "keep_latest_per_project"
+    }
+}
+
+struct WorktreeCleanupBlocker: Codable, Equatable, Hashable, Identifiable, RawRepresentable {
+    let rawValue: String
+
+    var id: String { rawValue }
+    var code: String { rawValue }
+
+    init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        rawValue = try container.decode(String.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    var message: String {
+        switch rawValue {
+        case "metadata_incomplete":
+            return "管理元数据不完整"
+        case "outside_managed_root":
+            return "不在 agentd 托管的 checkout 目录内"
+        case "checkout_missing":
+            return "checkout 已不存在，请改用清理丢失登记"
+        case "repository_mismatch":
+            return "checkout 与登记的 Git 仓库不匹配"
+        case "recent":
+            return "最近 30 天内仍使用过"
+        case "keep_latest":
+            return "属于该项目最近保留的 Worktree"
+        case "git_dirty":
+            return "包含未提交改动"
+        case "git_state_unknown":
+            return "无法确认 Git 状态为干净"
+        case "session_running":
+            return "仍有会话正在运行"
+        case "root_project_missing":
+            return "根项目已不在当前配置中"
+        case "last_used_unpersisted":
+            return "最近使用时间尚未可靠保存"
+        default:
+            // 新版 agentd 增加 blocker 时保持 fail-closed，并把稳定 code 留给排障。
+            return "agentd 返回了新的保护原因"
+        }
+    }
+}
+
+struct WorktreeCleanupItem: Codable, Equatable, Identifiable {
+    let workspace: AgentWorkspace
+    let worktree: WorktreeDescriptor
+    let createdAt: Date?
+    let lastUsedAt: Date?
+    let eligible: Bool
+    let blockers: [WorktreeCleanupBlocker]
+
+    var id: String { worktree.path }
+
+    enum CodingKeys: String, CodingKey {
+        case workspace
+        case worktree
+        case createdAt = "created_at"
+        case lastUsedAt = "last_used_at"
+        case eligible
+        case blockers
+    }
+}
+
+struct WorktreeCleanupResponse: Decodable, Equatable {
+    let dryRun: Bool
+    let planID: String?
+    let policy: WorktreeCleanupPolicy
+    let generatedAt: Date
+    let worktrees: [WorktreeCleanupItem]
+    let candidatePaths: [String]
+    let deletedPaths: [String]
+    let failedPath: String?
+    let error: String?
+
+    var hasPartialFailure: Bool {
+        failedPath?.isEmpty == false || error?.isEmpty == false
+    }
+
+    var partialFailureMessage: String? {
+        guard hasPartialFailure else {
+            return nil
+        }
+        let target = failedPath.flatMap { $0.isEmpty ? nil : $0 } ?? "未知路径"
+        let detail = error.flatMap { $0.isEmpty ? nil : $0 } ?? "agentd 未返回详细原因"
+        return "已删除 \(deletedPaths.count) 个 Worktree，但在 \(target) 失败：\(detail)。请重新生成清理预览。"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case dryRun = "dry_run"
+        case planID = "plan_id"
+        case policy
+        case generatedAt = "generated_at"
+        case worktrees
+        case candidatePaths = "candidate_paths"
+        case deletedPaths = "deleted_paths"
+        case failedPath = "failed_path"
+        case error
     }
 }
 
@@ -541,6 +710,7 @@ struct WorktreeDescriptor: Codable, Hashable {
     let repositoryPath: String
     let base: String
     let branch: String?
+    let gitState: String
     let dirty: Bool
     let ahead: Int
     let behind: Int
@@ -554,6 +724,7 @@ struct WorktreeDescriptor: Codable, Hashable {
         case repositoryPath = "repository_path"
         case base
         case branch
+        case gitState = "git_state"
         case dirty
         case ahead
         case behind
@@ -568,6 +739,7 @@ struct WorktreeDescriptor: Codable, Hashable {
         repositoryPath: String,
         base: String,
         branch: String?,
+        gitState: String = "unknown",
         dirty: Bool = false,
         ahead: Int = 0,
         behind: Int = 0,
@@ -580,6 +752,7 @@ struct WorktreeDescriptor: Codable, Hashable {
         self.repositoryPath = repositoryPath
         self.base = base
         self.branch = branch
+        self.gitState = gitState
         self.dirty = dirty
         self.ahead = ahead
         self.behind = behind
@@ -596,6 +769,9 @@ struct WorktreeDescriptor: Codable, Hashable {
         base = try container.decode(String.self, forKey: .base)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
         dirty = try container.decodeIfPresent(Bool.self, forKey: .dirty) ?? false
+        // 旧 agentd 没有 git_state，不能把缺失字段和 dirty=false 当成“已证明干净”。
+        gitState = try container.decodeIfPresent(String.self, forKey: .gitState)
+            ?? (dirty ? "dirty" : "unknown")
         ahead = try container.decodeIfPresent(Int.self, forKey: .ahead) ?? 0
         behind = try container.decodeIfPresent(Int.self, forKey: .behind) ?? 0
         upstream = try container.decodeIfPresent(String.self, forKey: .upstream)
@@ -1112,6 +1288,31 @@ struct SessionsPage: Equatable {
         self.sessions = sessions
         self.nextCursor = nextCursor
         self.hasMore = hasMore
+    }
+}
+
+struct ThreadSearchResult: Equatable {
+    let session: AgentSession
+    let snippet: String
+}
+
+struct ThreadSearchPage: Equatable {
+    let results: [ThreadSearchResult]
+    let nextCursor: String?
+    let backwardsCursor: String?
+
+    var sessions: [AgentSession] {
+        results.map(\.session)
+    }
+
+    init(
+        results: [ThreadSearchResult],
+        nextCursor: String? = nil,
+        backwardsCursor: String? = nil
+    ) {
+        self.results = results
+        self.nextCursor = nextCursor
+        self.backwardsCursor = backwardsCursor
     }
 }
 
@@ -2462,6 +2663,91 @@ enum CodexAppServerRequestBuilderError: LocalizedError, Equatable {
     }
 }
 
+enum CodexAppServerReviewDelivery: String, Hashable {
+    case inline
+    case detached
+}
+
+enum CodexAppServerThreadUnsubscribeStatus: String, Hashable {
+    case notLoaded
+    case notSubscribed
+    case unsubscribed
+}
+
+struct CodexAppServerReviewStartResult: Hashable {
+    let reviewThreadID: String
+    let turnID: String?
+}
+
+enum CodexAppServerReviewTarget: Hashable {
+    case uncommittedChanges
+    case baseBranch(String)
+    case commit(sha: String, title: String? = nil)
+    case custom(String)
+
+    /// 移动端远程 Review 只接受可枚举目标；这里集中做 trim 和 custom 拒绝，
+    /// 保证 UI、Store 与请求 builder 不会各自形成不同的安全边界。
+    func validatedInlineTarget() throws -> CodexAppServerReviewTarget {
+        switch self {
+        case .uncommittedChanges:
+            return .uncommittedChanges
+        case .baseBranch(let branch):
+            let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                throw CodexAppServerRequestBuilderError.unsafeParameter("review base branch 不能为空")
+            }
+            return .baseBranch(normalized)
+        case .commit(let sha, let title):
+            let normalizedSHA = sha.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedSHA.isEmpty else {
+                throw CodexAppServerRequestBuilderError.unsafeParameter("review commit sha 不能为空")
+            }
+            return .commit(
+                sha: normalizedSHA,
+                title: title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            )
+        case .custom:
+            // custom 是自由提示词，应继续走 turn/start 的统一沙盒与审批约束。
+            throw CodexAppServerRequestBuilderError.unsafeParameter("远程 Review 不允许 custom target")
+        }
+    }
+
+    fileprivate func appServerValue() throws -> CodexAppServerJSONValue {
+        switch self {
+        case .uncommittedChanges:
+            return .object(["type": .string("uncommittedChanges")])
+        case .baseBranch(let branch):
+            let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                throw CodexAppServerRequestBuilderError.unsafeParameter("review base branch 不能为空")
+            }
+            return .object([
+                "type": .string("baseBranch"),
+                "branch": .string(normalized)
+            ])
+        case .commit(let sha, let title):
+            let normalizedSHA = sha.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedSHA.isEmpty else {
+                throw CodexAppServerRequestBuilderError.unsafeParameter("review commit sha 不能为空")
+            }
+            return CodexAppServerJSONValue.objectValue([
+                "type": .string("commit"),
+                "sha": .string(normalizedSHA),
+                "title": title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty.map { .string($0) }
+            ])
+        case .custom(let instructions):
+            let normalized = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                throw CodexAppServerRequestBuilderError.unsafeParameter("review instructions 不能为空")
+            }
+            return .object([
+                "type": .string("custom"),
+                "instructions": .string(normalized)
+            ])
+        }
+    }
+}
+
 struct CodexAppServerRequestBuilder {
     private let projectsByID: [String: AgentProject]
     private let allowlistedPaths: Set<String>
@@ -2487,6 +2773,27 @@ struct CodexAppServerRequestBuilder {
             "sortDirection": .string("desc"),
             "archived": .bool(false),
             "useStateDbOnly": .bool(useStateDBOnly)
+        ]))
+    }
+
+    func threadSearch(
+        query: String,
+        limit: Int? = 50,
+        cursor: String? = nil
+    ) throws -> CodexAppServerRequestSpec {
+        let searchTerm = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !searchTerm.isEmpty else {
+            throw CodexAppServerRequestBuilderError.unsafeParameter("thread/search 搜索词不能为空")
+        }
+        // thread/search 本身不接收 cwd。iOS 只发送搜索词和分页字段，目录授权与结果裁剪仍由
+        // 既有 agentd gateway 策略负责，避免客户端借搜索接口注入任意工作目录。
+        return CodexAppServerRequestSpec(method: "thread/search", params: CodexAppServerJSONValue.objectValue([
+            "searchTerm": .string(searchTerm),
+            "limit": limit.map { .int(Int64($0)) },
+            "cursor": cursor.map { .string($0) },
+            "sortKey": .string("updated_at"),
+            "sortDirection": .string("desc"),
+            "archived": .bool(false)
         ]))
     }
 
@@ -2638,6 +2945,50 @@ struct CodexAppServerRequestBuilder {
     func threadUnarchive(threadID: String) -> CodexAppServerRequestSpec {
         CodexAppServerRequestSpec(method: "thread/unarchive", params: CodexAppServerJSONValue.objectValue([
             "threadId": .string(threadID)
+        ]))
+    }
+
+    func threadSetName(threadID: String, name: String) throws -> CodexAppServerRequestSpec {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            throw CodexAppServerRequestBuilderError.unsafeParameter("会话名称不能为空")
+        }
+        guard normalized.utf8.count <= 256 else {
+            throw CodexAppServerRequestBuilderError.unsafeParameter("会话名称不能超过 256 bytes")
+        }
+        return CodexAppServerRequestSpec(method: "thread/name/set", params: .object([
+            "threadId": .string(threadID),
+            "name": .string(normalized)
+        ]))
+    }
+
+    func threadCompactStart(threadID: String) -> CodexAppServerRequestSpec {
+        CodexAppServerRequestSpec(method: "thread/compact/start", params: .object([
+            "threadId": .string(threadID)
+        ]))
+    }
+
+    func threadUnsubscribe(threadID: String) -> CodexAppServerRequestSpec {
+        CodexAppServerRequestSpec(method: "thread/unsubscribe", params: .object([
+            "threadId": .string(threadID)
+        ]))
+    }
+
+    func reviewStart(
+        threadID: String,
+        target: CodexAppServerReviewTarget,
+        delivery: CodexAppServerReviewDelivery? = nil
+    ) throws -> CodexAppServerRequestSpec {
+        guard delivery != .detached else {
+            // Gateway 第一批只允许原 thread 内 review，避免创建尚未登记授权的新 thread。
+            throw CodexAppServerRequestBuilderError.unsafeParameter("远程 Review 只允许 inline")
+        }
+        let normalizedTarget = try target.validatedInlineTarget()
+        // review target 使用官方当前的 discriminated union，避免继续传旧版自由 prompt。
+        return CodexAppServerRequestSpec(method: "review/start", params: CodexAppServerJSONValue.objectValue([
+            "threadId": .string(threadID),
+            "target": try normalizedTarget.appServerValue(),
+            "delivery": delivery.map { .string($0.rawValue) }
         ]))
     }
 

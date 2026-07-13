@@ -36,16 +36,29 @@ type Router struct {
 	upgrader     websocket.Upgrader
 	monitor      *relayMonitor
 	historyMedia *appServerHistoryMediaStore
+	// upstreamReadiness 对高频 readyz 轮询做短 TTL + single-flight，避免每 300ms 都创建 WebSocket。
+	upstreamReadiness *appServerReadinessProbe
+	// pairingClaims 只记录短期票据的签名和过期时间，不保存长期 Token。
+	// 状态仅需覆盖当前进程内的短期重放窗口，服务重启后丢失是可接受的 MVP 取舍。
+	pairingClaimsMu sync.Mutex
+	pairingClaims   map[string]time.Time
 
-	gatewayThreadsMu           sync.Mutex
-	gatewayThreads             map[string]appServerGatewayAllowedThread
-	gatewayHistoryBudgetMu     sync.Mutex
-	gatewayHistoryGlobalBudget appServerGatewayHistoryBudget
-	claudeMu                   sync.Mutex
-	claudeProbe                appServerBridgeProbe
-	activeClaudeBridge         int
-	managedWorktreesMu         sync.Mutex
-	managedWorktrees           map[string]managedWorktree
+	gatewayThreadsMu              sync.Mutex
+	gatewayThreads                map[string]appServerGatewayAllowedThread
+	codexGatewayMu                sync.Mutex
+	activeCodexGateway            int
+	gatewayHistoryBudgetMu        sync.Mutex
+	gatewayHistoryGlobalBudget    appServerGatewayHistoryBudget
+	claudeMu                      sync.Mutex
+	claudeProbe                   appServerBridgeProbe
+	activeClaudeBridge            int
+	managedWorktreesMu            sync.Mutex
+	managedWorktrees              map[string]managedWorktree
+	managedWorktreeCleanupMu      sync.Mutex
+	managedWorktreeCleanupPlans   map[string]worktreeCleanupPlan
+	managedWorktreeCleanupDelete  managedWorktreeCleanupDeleteFunc
+	managedWorktreePendingUses    map[string]int
+	managedWorktreeRegistryRemove func(string) error
 }
 
 func NewRouter(cfg config.Config, registry *projects.Registry, manager *session.Manager, checker *doctor.Checker, version string) http.Handler {
@@ -66,12 +79,16 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 		upgrader: websocket.Upgrader{
 			CheckOrigin: sameOriginOrNoOrigin,
 		},
-		monitor:          newRelayMonitor(),
-		historyMedia:     newAppServerHistoryMediaStore(),
-		gatewayThreads:   map[string]appServerGatewayAllowedThread{},
-		managedWorktrees: map[string]managedWorktree{},
+		monitor:                     newRelayMonitor(),
+		historyMedia:                newAppServerHistoryMediaStore(),
+		gatewayThreads:              map[string]appServerGatewayAllowedThread{},
+		managedWorktrees:            map[string]managedWorktree{},
+		managedWorktreeCleanupPlans: map[string]worktreeCleanupPlan{},
+		managedWorktreePendingUses:  map[string]int{},
+		pairingClaims:               map[string]time.Time{},
 	}
 	r.refreshClaudeBridgeProbe(false)
+	r.upstreamReadiness = newAppServerReadinessProbe(r.probeAppServerUpstream)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", r.healthz)
@@ -95,6 +112,7 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 	mux.Handle("/api/worktrees/create", r.auth.Middleware(http.HandlerFunc(r.worktreeCreateHandler)))
 	mux.Handle("/api/worktrees/delete", r.auth.Middleware(http.HandlerFunc(r.worktreeDeleteHandler)))
 	mux.Handle("/api/worktrees/prune", r.auth.Middleware(http.HandlerFunc(r.worktreePruneHandler)))
+	mux.Handle("/api/worktrees/cleanup", r.auth.Middleware(http.HandlerFunc(r.worktreeCleanupHandler)))
 	mux.Handle("/api/capabilities/list", r.auth.Middleware(http.HandlerFunc(r.capabilityListHandler)))
 	mux.Handle("/api/actions/list", r.auth.Middleware(http.HandlerFunc(r.commandActionListHandler)))
 	mux.Handle("/api/actions/run", r.auth.Middleware(http.HandlerFunc(r.commandActionRunHandler)))
@@ -108,7 +126,7 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 	mux.Handle("/api/app-server/config", r.auth.Middleware(http.HandlerFunc(r.appServerConfigHandler)))
 	mux.Handle("/api/app-server/history-media/", r.auth.Middleware(http.HandlerFunc(r.appServerHistoryMediaHandler)))
 	mux.Handle("/api/app-server/ws", r.auth.Middleware(http.HandlerFunc(r.appServerGatewayWS)))
-	return logging(mux, r.monitor)
+	return logging(limitAPIRequestBodies(mux), r.monitor)
 }
 
 func sameOriginOrNoOrigin(r *http.Request) bool {
@@ -228,7 +246,14 @@ func (r *Router) healthz(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) readyz(w http.ResponseWriter, req *http.Request) {
 	results := r.doctor.Run(req.Context(), false)
-	writeJSON(w, http.StatusOK, results)
+	results = appendReadinessCheck(results, r.appServerUpstreamReadinessCheck(req.Context()))
+	status := http.StatusOK
+	if !results.OK {
+		// liveness 与 readiness 分离：进程仍可通过 /healthz 被守护进程观察，
+		// 但配置、Codex 或敏感文件检查失败时不能对客户端宣称已经可用。
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, results)
 }
 
 func (r *Router) versionHandler(w http.ResponseWriter, req *http.Request) {

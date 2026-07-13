@@ -2,11 +2,46 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
+enum QRCodeScannerRecoveryAction: Equatable {
+    case openSettings
+    case manualConnection
+}
+
+enum QRCodeScannerFailure: Equatable {
+    case permissionDenied
+    case permissionRestricted
+    case cameraUnavailable
+    case configurationFailed(String)
+
+    var message: String {
+        switch self {
+        case .permissionDenied:
+            return "Mimi 没有相机权限，无法扫描 Mac 上的配对二维码。"
+        case .permissionRestricted:
+            return "当前设备限制了相机访问，无法扫描 Mac 上的配对二维码。"
+        case .cameraUnavailable:
+            return "当前设备没有可用于扫描二维码的相机。"
+        case .configurationFailed(let reason):
+            return reason
+        }
+    }
+
+    var recoveryActions: [QRCodeScannerRecoveryAction] {
+        switch self {
+        case .permissionDenied, .permissionRestricted:
+            return [.openSettings, .manualConnection]
+        case .cameraUnavailable, .configurationFailed:
+            return [.manualConnection]
+        }
+    }
+}
+
 struct QRCodeScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var scannerError: String?
+    @State private var scannerFailure: QRCodeScannerFailure?
     @State private var isCameraReady = false
 
+    let onChooseManualConnection: () -> Void
     let onCode: (String) -> Void
 
     var body: some View {
@@ -15,8 +50,8 @@ struct QRCodeScannerSheet: View {
                 QRCodeScannerView { value in
                     onCode(value)
                     dismiss()
-                } onError: { message in
-                    scannerError = message
+                } onError: { failure in
+                    scannerFailure = failure
                 } onReady: {
                     isCameraReady = true
                 }
@@ -50,32 +85,62 @@ struct QRCodeScannerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("关闭") {
+                        // 用户主动关闭不代表扫码失败，保持父页面原来的展开状态。
                         dismiss()
                     }
                 }
             }
-            .alert("无法扫码", isPresented: Binding(
-                get: { scannerError != nil },
-                set: { newValue in
-                    if !newValue {
-                        scannerError = nil
+            .alert(
+                "无法扫码",
+                isPresented: scannerFailureBinding,
+                presenting: scannerFailure
+            ) { failure in
+                if failure.recoveryActions.contains(.openSettings) {
+                    Button("前往系统设置") {
+                        openAppSettings()
                     }
                 }
-            )) {
-                Button("好", role: .cancel) {
-                    scannerError = nil
-                    dismiss()
+                Button("改用手动连接") {
+                    chooseManualConnection()
                 }
-            } message: {
-                Text(scannerError ?? "")
+            } message: { failure in
+                Text(failure.message)
             }
         }
+    }
+
+    private var scannerFailureBinding: Binding<Bool> {
+        Binding(
+            get: { scannerFailure != nil },
+            set: { isPresented in
+                if !isPresented {
+                    scannerFailure = nil
+                }
+            }
+        )
+    }
+
+    private func chooseManualConnection() {
+        scannerFailure = nil
+        // 父页面只负责展开已经存在的手动连接区域，扫码 Sheet 不复制连接表单和状态。
+        onChooseManualConnection()
+        dismiss()
+    }
+
+    private func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else {
+            chooseManualConnection()
+            return
+        }
+        scannerFailure = nil
+        dismiss()
+        UIApplication.shared.open(url)
     }
 }
 
 private struct QRCodeScannerView: UIViewControllerRepresentable {
     let onCode: (String) -> Void
-    let onError: (String) -> Void
+    let onError: (QRCodeScannerFailure) -> Void
     let onReady: () -> Void
 
     func makeUIViewController(context: Context) -> QRCodeScannerViewController {
@@ -92,10 +157,14 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
     private var didReadCode = false
 
     private let onCode: (String) -> Void
-    private let onError: (String) -> Void
+    private let onError: (QRCodeScannerFailure) -> Void
     private let onReady: () -> Void
 
-    init(onCode: @escaping (String) -> Void, onError: @escaping (String) -> Void, onReady: @escaping () -> Void) {
+    init(
+        onCode: @escaping (String) -> Void,
+        onError: @escaping (QRCodeScannerFailure) -> Void,
+        onReady: @escaping () -> Void
+    ) {
         self.onCode = onCode
         self.onError = onError
         self.onReady = onReady
@@ -137,14 +206,16 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
                     if granted {
                         self?.configureSession()
                     } else {
-                        self?.onError("没有相机权限，无法扫描二维码。")
+                        self?.reportFailure(.permissionDenied)
                     }
                 }
             }
-        case .denied, .restricted:
-            onError("没有相机权限，无法扫描二维码。")
+        case .denied:
+            reportFailure(.permissionDenied)
+        case .restricted:
+            reportFailure(.permissionRestricted)
         @unknown default:
-            onError("当前设备不支持扫码连接。")
+            reportFailure(.cameraUnavailable)
         }
     }
 
@@ -154,25 +225,25 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
             return
         }
         guard let device = AVCaptureDevice.default(for: .video) else {
-            onError("当前设备没有可用相机。")
+            reportFailure(.cameraUnavailable)
             return
         }
 
         do {
             let input = try AVCaptureDeviceInput(device: device)
             guard captureSession.canAddInput(input) else {
-                onError("无法接入相机输入。")
+                reportFailure(.configurationFailed("无法接入相机输入，请改用手动连接。"))
                 return
             }
             captureSession.addInput(input)
         } catch {
-            onError("打开相机失败：\(error.localizedDescription)")
+            reportFailure(.configurationFailed("打开相机失败：\(error.localizedDescription)"))
             return
         }
 
         let output = AVCaptureMetadataOutput()
         guard captureSession.canAddOutput(output) else {
-            onError("当前相机不支持二维码扫描。")
+            reportFailure(.configurationFailed("当前相机不支持二维码扫描，请改用手动连接。"))
             return
         }
         captureSession.addOutput(output)
@@ -184,9 +255,23 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
         layer.frame = view.bounds
         view.layer.insertSublayer(layer, at: 0)
         previewLayer = layer
-        onReady()
+        reportReady()
 
         startScanning()
+    }
+
+    private func reportFailure(_ failure: QRCodeScannerFailure) {
+        // Representable 创建和系统权限回调期间不能同步改写 SwiftUI State，统一延后到下一次主队列。
+        DispatchQueue.main.async { [weak self] in
+            self?.onError(failure)
+        }
+    }
+
+    private func reportReady() {
+        // 相机配置也可能发生在 makeUIViewController 链路内，同样异步交回 SwiftUI。
+        DispatchQueue.main.async { [weak self] in
+            self?.onReady()
+        }
     }
 
     private func startScanning() {

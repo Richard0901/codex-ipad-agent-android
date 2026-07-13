@@ -4,9 +4,37 @@ package main
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestResolveDefaultAgentDConfigPath(t *testing.T) {
+	configDir := filepath.Join(string(filepath.Separator), "tmp", "Library", "Application Support")
+	current := filepath.Join(configDir, "mimi-remote", "config.json")
+	legacy := filepath.Join(configDir, "codex-ipad-agent", "config.json")
+
+	t.Run("new install uses current path", func(t *testing.T) {
+		got := resolveDefaultAgentDConfigPath(configDir, func(string) bool { return false })
+		if got != current {
+			t.Fatalf("默认配置路径 = %q, want %q", got, current)
+		}
+	})
+
+	t.Run("legacy install remains readable", func(t *testing.T) {
+		got := resolveDefaultAgentDConfigPath(configDir, func(path string) bool { return path == legacy })
+		if got != legacy {
+			t.Fatalf("旧配置回退路径 = %q, want %q", got, legacy)
+		}
+	})
+
+	t.Run("current path wins when both exist", func(t *testing.T) {
+		got := resolveDefaultAgentDConfigPath(configDir, func(string) bool { return true })
+		if got != current {
+			t.Fatalf("新配置路径 = %q, want %q", got, current)
+		}
+	})
+}
 
 func TestParseListedModelsAcceptsAppServerShapes(t *testing.T) {
 	tests := []struct {

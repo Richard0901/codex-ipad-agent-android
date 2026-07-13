@@ -28,6 +28,16 @@ final class LogStore: ObservableObject {
         return visibleLogs[sessionID] ?? buffers[sessionID] ?? ""
     }
 
+    /// 导出读取已完成 ANSI 清洗的当前内存缓存窗口（最多 12 万字符），而不是 UI 的 8 万字符可见窗口。
+    /// 这是设备侧诊断窗口，不代表服务端完整历史。
+    /// 尚在 120ms 合并队列中的原始分片不会同步阻塞主线程；下一次 flush 后即可进入导出窗口。
+    func cachedLogForExport(for sessionID: String?) -> String {
+        guard let sessionID else {
+            return ""
+        }
+        return buffers[sessionID] ?? visibleLogs[sessionID] ?? ""
+    }
+
     func lines(for sessionID: String?) -> [LogDisplayLine] {
         guard let sessionID else {
             return []

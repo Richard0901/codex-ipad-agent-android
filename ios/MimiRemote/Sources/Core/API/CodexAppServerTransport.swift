@@ -68,14 +68,23 @@ final class URLSessionCodexAppServerTransport: CodexAppServerTransport {
         guard let task else {
             throw CodexAppServerConnectionError.disconnected
         }
-        try await task.send(.string(text))
+        do {
+            try await task.send(.string(text))
+        } catch {
+            throw Self.mappedTaskError(error, response: task.response)
+        }
     }
 
     func receive() async throws -> String? {
         guard let task else {
             throw CodexAppServerConnectionError.disconnected
         }
-        let message = try await task.receive()
+        let message: URLSessionWebSocketTask.Message
+        do {
+            message = try await task.receive()
+        } catch {
+            throw Self.mappedTaskError(error, response: task.response)
+        }
         switch message {
         case .string(let text):
             return text
@@ -90,9 +99,19 @@ final class URLSessionCodexAppServerTransport: CodexAppServerTransport {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
     }
+
+    static func mappedTaskError(_ error: Error, response: URLResponse?) -> Error {
+        // URLSessionWebSocketTask.resume() 不等待 HTTP Upgrade 完成；401/403 通常在首个
+        // send/receive 才抛出。此时必须读取握手响应并保留类型，不能只上传输层字符串。
+        if let status = (response as? HTTPURLResponse)?.statusCode,
+           status == 401 || status == 403 {
+            return AgentAPIError.credentialsInvalid(status: status)
+        }
+        return error
+    }
 }
 
-enum CodexAppServerConnectionError: LocalizedError {
+enum CodexAppServerConnectionError: LocalizedError, CredentialInvalidatingError {
     case disconnected
     case notInitialized
     case duplicateRequestID(CodexAppServerRequestID)
@@ -100,6 +119,13 @@ enum CodexAppServerConnectionError: LocalizedError {
     case appServer(CodexAppServerError)
     case decoding(Error)
     case transport(Error)
+
+    var invalidatesCredentials: Bool {
+        if case .transport(let error) = self {
+            return isCredentialInvalidatingError(error)
+        }
+        return false
+    }
 
     var errorDescription: String? {
         switch self {

@@ -191,6 +191,7 @@ func (r *Router) appServerClaudeGatewayWS(w http.ResponseWriter, req *http.Reque
 		pendingServerRequests: map[string]appServerGatewayPendingServerRequest{},
 		allowedThreads:        map[string]appServerGatewayAllowedThread{},
 	}
+	defer policy.close()
 
 	go func() {
 		captureClaudeBridgeStderr(stderr)

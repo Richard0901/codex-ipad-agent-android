@@ -1,8 +1,489 @@
 import XCTest
+import Security
 @testable import MimiRemote
 
 @MainActor
 final class PairingLinkTests: XCTestCase {
+    func testQRCodeScannerPermissionFailuresOfferSettingsAndManualRecovery() {
+        for failure in [QRCodeScannerFailure.permissionDenied, .permissionRestricted] {
+            XCTAssertEqual(failure.recoveryActions, [.openSettings, .manualConnection])
+        }
+    }
+
+    func testQRCodeScannerCameraFailuresAlwaysOfferManualRecovery() {
+        let failures: [QRCodeScannerFailure] = [
+            .cameraUnavailable,
+            .configurationFailed("测试配置失败")
+        ]
+
+        for failure in failures {
+            XCTAssertTrue(failure.recoveryActions.contains(.manualConnection))
+            XCTAssertFalse(failure.recoveryActions.contains(.openSettings))
+        }
+    }
+
+    func testTokenStoreUpdatesExistingItemWithoutDeletingIt() throws {
+        let keychain = TestKeychainOperations(itemData: Data("old-token".utf8))
+        let store = TokenStore(keychain: keychain)
+
+        try store.save("new-token")
+
+        XCTAssertEqual(keychain.itemData, Data("new-token".utf8))
+        XCTAssertEqual(keychain.updateCallCount, 1)
+        XCTAssertEqual(keychain.addCallCount, 0)
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    func testTokenStoreUpdateFailurePreservesExistingItem() throws {
+        let keychain = TestKeychainOperations(
+            itemData: Data("old-token".utf8),
+            forcedUpdateStatus: errSecInteractionNotAllowed
+        )
+        let store = TokenStore(keychain: keychain)
+
+        XCTAssertThrowsError(try store.save("new-token")) { error in
+            guard case TokenStoreError.saveFailed(let status) = error else {
+                return XCTFail("应返回 Keychain 保存失败，实际为：\(error)")
+            }
+            XCTAssertEqual(status, errSecInteractionNotAllowed)
+        }
+
+        XCTAssertEqual(keychain.itemData, Data("old-token".utf8))
+        XCTAssertEqual(keychain.updateCallCount, 1)
+        XCTAssertEqual(keychain.addCallCount, 0)
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    func testTokenStoreAddsOnlyWhenItemIsMissing() throws {
+        let keychain = TestKeychainOperations()
+        let store = TokenStore(keychain: keychain)
+
+        try store.save("new-token")
+
+        XCTAssertEqual(keychain.itemData, Data("new-token".utf8))
+        XCTAssertEqual(keychain.updateCallCount, 1)
+        XCTAssertEqual(keychain.addCallCount, 1)
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    func testTokenStoreAddFailureDoesNotCreatePartialItem() throws {
+        let keychain = TestKeychainOperations(forcedAddStatus: errSecNotAvailable)
+        let store = TokenStore(keychain: keychain)
+
+        XCTAssertThrowsError(try store.save("new-token")) { error in
+            guard case TokenStoreError.saveFailed(let status) = error else {
+                return XCTFail("应返回 Keychain 保存失败，实际为：\(error)")
+            }
+            XCTAssertEqual(status, errSecNotAvailable)
+        }
+
+        XCTAssertNil(keychain.itemData)
+        XCTAssertEqual(keychain.updateCallCount, 1)
+        XCTAssertEqual(keychain.addCallCount, 1)
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    func testTokenStoreKeepsProfileTokensInIndependentAccounts() throws {
+        let keychain = TestKeychainOperations()
+        let store = TokenStore(keychain: keychain)
+
+        try store.save("token-a", profileID: "mac-a")
+        try store.save("token-b", profileID: "mac-b")
+
+        XCTAssertEqual(try store.load(profileID: "mac-a"), "token-a")
+        XCTAssertEqual(try store.load(profileID: "mac-b"), "token-b")
+        XCTAssertEqual(store.load(), "")
+        XCTAssertEqual(keychain.accounts, ["agentd-profile.mac-a", "agentd-profile.mac-b"])
+    }
+
+    func testLegacySingleConnectionMigratesWithoutWritingTokenToDefaults() throws {
+        let suiteName = "PairingLinkTests.ProfileMigration.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://100.64.0.10:8787/", forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(itemData: Data("legacy-secret".utf8))
+
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+
+        let profile = try XCTUnwrap(store.activeConnectionProfile)
+        XCTAssertEqual(profile.endpoint, "http://100.64.0.10:8787")
+        XCTAssertEqual(store.endpoint, profile.endpoint)
+        XCTAssertEqual(store.token, "legacy-secret")
+        XCTAssertEqual(keychain.data(account: "agentd-profile.\(profile.id)"), Data("legacy-secret".utf8))
+        XCTAssertNil(keychain.data(account: "agentd-token"))
+        let persistedData = try XCTUnwrap(defaults.data(forKey: "agentd.connectionProfiles.v1"))
+        let persistedText = String(decoding: persistedData, as: UTF8.self)
+        XCTAssertFalse(persistedText.contains("legacy-secret"), "UserDefaults 只能保存非敏感档案元数据")
+    }
+
+    func testLegacyMigrationKeychainFailurePreservesOldConnection() throws {
+        let suiteName = "PairingLinkTests.ProfileMigrationFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let endpoint = "http://100.64.0.11:8787"
+        defaults.set(endpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(
+            itemData: Data("legacy-secret".utf8),
+            forcedUpdateStatus: errSecInteractionNotAllowed
+        )
+
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+
+        XCTAssertEqual(store.endpoint, endpoint)
+        XCTAssertEqual(store.token, "legacy-secret")
+        XCTAssertTrue(store.connectionProfiles.isEmpty)
+        XCTAssertNil(store.activeConnectionProfileID)
+        XCTAssertNil(defaults.data(forKey: "agentd.connectionProfiles.v1"))
+        XCTAssertEqual(defaults.string(forKey: "agentd.endpoint"), endpoint)
+        XCTAssertEqual(keychain.data(account: "agentd-token"), Data("legacy-secret".utf8))
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    func testLegacyTokenNeverOverwritesExistingProfilesWhenActiveTokenIsMissing() throws {
+        let suiteName = "PairingLinkTests.ProfileMigrationExistingProfiles.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "当前 Mac", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+            ConnectionProfile(id: "mac-b", displayName: "备用 Mac", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+        ]
+        let encodedProfiles = try JSONEncoder().encode(profiles)
+        defaults.set(encodedProfiles, forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        defaults.set(profiles[0].endpoint, forKey: "agentd.endpoint")
+        // 模拟旧迁移已留下档案，但 legacy 删除失败、当前 profile Token 又暂时缺失的恢复现场。
+        let keychain = TestKeychainOperations(itemData: Data("legacy-leftover".utf8))
+
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+
+        XCTAssertEqual(store.connectionProfiles, profiles)
+        XCTAssertNil(store.activeConnectionProfileID)
+        XCTAssertEqual(store.endpoint, profiles[0].endpoint)
+        XCTAssertEqual(store.token, "legacy-leftover")
+        XCTAssertFalse(store.isConfigured, "残留 legacy Token 不能绕过缺失的当前档案 Token")
+        XCTAssertFalse(store.canEnterWorkbench)
+        XCTAssertEqual(defaults.data(forKey: "agentd.connectionProfiles.v1"), encodedProfiles)
+        XCTAssertEqual(keychain.accounts, ["agentd-token"])
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    func testCommittingNewProfileKeepsPreviousTokenAndPersistsMetadataOnly() throws {
+        let suiteName = "PairingLinkTests.AddProfile.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://100.64.0.10:8787", forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(itemData: Data("token-a".utf8))
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let oldProfile = try XCTUnwrap(store.activeConnectionProfile)
+
+        try store.commitConnectionSettings(PreparedConnectionSettings(
+            endpoint: "http://100.64.0.20:8787/",
+            token: "token-b",
+            profileTarget: .newProfile(id: "mac-b", displayName: "工作室 Mac")
+        ))
+
+        XCTAssertEqual(store.connectionProfiles.count, 2)
+        XCTAssertEqual(store.activeConnectionProfileID, "mac-b")
+        XCTAssertEqual(store.activeConnectionProfile?.displayName, "工作室 Mac")
+        XCTAssertEqual(store.activeConnectionProfile?.endpoint, "http://100.64.0.20:8787")
+        XCTAssertEqual(keychain.data(account: "agentd-profile.\(oldProfile.id)"), Data("token-a".utf8))
+        XCTAssertEqual(keychain.data(account: "agentd-profile.mac-b"), Data("token-b".utf8))
+        let persistedData = try XCTUnwrap(defaults.data(forKey: "agentd.connectionProfiles.v1"))
+        let persistedText = String(decoding: persistedData, as: UTF8.self)
+        XCTAssertFalse(persistedText.contains("token-a"))
+        XCTAssertFalse(persistedText.contains("token-b"))
+
+        let reloaded = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        XCTAssertEqual(reloaded.activeConnectionProfileID, "mac-b")
+        XCTAssertEqual(reloaded.token, "token-b")
+        XCTAssertEqual(reloaded.connectionProfiles.count, 2)
+    }
+
+    func testDeletingOtherProfileIsKeychainFirstAndKeepsCurrentProfile() throws {
+        let suiteName = "PairingLinkTests.DeleteOtherProfile.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "当前 Mac", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+            ConnectionProfile(id: "mac-b", displayName: "备用 Mac", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+        ]
+        defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+
+        keychain.forcedDeleteStatus = errSecInteractionNotAllowed
+        XCTAssertThrowsError(try store.deleteConnectionProfile(id: "mac-b"))
+        XCTAssertEqual(store.connectionProfiles.map(\.id), ["mac-a", "mac-b"])
+        XCTAssertEqual(keychain.data(account: "agentd-profile.mac-b"), Data("token-b".utf8))
+
+        keychain.forcedDeleteStatus = nil
+        try store.deleteConnectionProfile(id: "mac-b")
+        XCTAssertEqual(store.connectionProfiles.map(\.id), ["mac-a"])
+        XCTAssertEqual(store.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(keychain.data(account: "agentd-profile.mac-a"), Data("token-a".utf8))
+        XCTAssertNil(keychain.data(account: "agentd-profile.mac-b"))
+    }
+
+    func testCurrentProfileRequiresClearPairingAndFailureDoesNotHalfCommit() throws {
+        let suiteName = "PairingLinkTests.ClearCurrentProfile.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "当前 Mac", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil),
+            ConnectionProfile(id: "mac-b", displayName: "备用 Mac", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: nil)
+        ]
+        defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        defaults.set(profiles[0].endpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+
+        XCTAssertThrowsError(try store.deleteConnectionProfile(id: "mac-a")) { error in
+            XCTAssertEqual(error as? ConnectionProfileError, .cannotDeleteCurrent)
+        }
+        keychain.forcedDeleteStatus = errSecInteractionNotAllowed
+        XCTAssertThrowsError(try store.clearPairing())
+        XCTAssertEqual(store.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(store.token, "token-a")
+        XCTAssertEqual(store.connectionProfiles, profiles)
+
+        keychain.forcedDeleteStatus = nil
+        try store.clearPairing()
+        XCTAssertNil(store.activeConnectionProfileID)
+        XCTAssertEqual(store.token, "")
+        XCTAssertEqual(store.connectionProfiles.map(\.id), ["mac-b"])
+        XCTAssertNil(keychain.data(account: "agentd-profile.mac-a"))
+        XCTAssertEqual(keychain.data(account: "agentd-profile.mac-b"), Data("token-b".utf8))
+    }
+
+    func testConnectionProfileSettingsModelSeparatesCurrentAndActionableOthers() throws {
+        let older = Date(timeIntervalSince1970: 100)
+        let newer = Date(timeIntervalSince1970: 200)
+        let model = ConnectionProfileSettingsModel(
+            profiles: [
+                ConnectionProfile(id: "mac-b", displayName: "备用", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: newer),
+                ConnectionProfile(id: "mac-a", displayName: "当前", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: older)
+            ],
+            activeProfileID: "mac-a"
+        )
+
+        XCTAssertEqual(model.current?.id, "mac-a")
+        XCTAssertEqual(model.current?.canSwitch, false)
+        XCTAssertEqual(model.current?.canDelete, false)
+        XCTAssertEqual(model.others.map(\.id), ["mac-b"])
+        XCTAssertEqual(model.others.first?.canSwitch, true)
+        XCTAssertEqual(model.others.first?.canDelete, true)
+    }
+
+    func testConnectionCredentialRemovalConfirmationCarriesTargetAndExplicitWarning() {
+        let currentProfile = ConnectionProfile(
+            id: "mac-a",
+            displayName: "工作室 Mac",
+            endpoint: "http://100.64.0.10:8787",
+            lastSuccessfulAt: nil
+        )
+        let savedProfile = ConnectionProfile(
+            id: "mac-b",
+            displayName: "随身 Mac",
+            endpoint: "http://100.64.0.20:8787",
+            lastSuccessfulAt: nil
+        )
+
+        let forgetCurrent = ConnectionCredentialRemovalConfirmation.forgettingCurrent(currentProfile)
+        XCTAssertEqual(forgetCurrent.id, "forget-current:mac-a")
+        XCTAssertEqual(forgetCurrent.target, .current(profileID: "mac-a"))
+        XCTAssertEqual(forgetCurrent.title, "忘记当前 Mac？")
+        XCTAssertTrue(forgetCurrent.message.contains("工作室 Mac"))
+        XCTAssertTrue(forgetCurrent.message.contains("Keychain"))
+        XCTAssertTrue(forgetCurrent.message.contains("重新扫码配对"))
+
+        let deleteSaved = ConnectionCredentialRemovalConfirmation.deletingSavedProfile(savedProfile)
+        XCTAssertEqual(deleteSaved.id, "delete-profile:mac-b")
+        XCTAssertEqual(deleteSaved.target, .savedProfile(profileID: "mac-b"))
+        XCTAssertTrue(deleteSaved.title.contains("随身 Mac"))
+        XCTAssertTrue(deleteSaved.message.contains("随身 Mac"))
+        XCTAssertTrue(deleteSaved.message.contains("当前 Mac 连接不会受影响"))
+        XCTAssertTrue(deleteSaved.message.contains("重新扫码配对"))
+    }
+
+    func testRenamingCurrentAndOtherProfilesOnlyPersistsDisplayNames() throws {
+        let suiteName = "PairingLinkTests.RenameProfiles.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "当前 Mac", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: Date(timeIntervalSince1970: 100)),
+            ConnectionProfile(id: "mac-b", displayName: "备用 Mac", endpoint: "http://100.64.0.20:8787", lastSuccessfulAt: Date(timeIntervalSince1970: 200))
+        ]
+        defaults.set(try JSONEncoder().encode(profiles), forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        defaults.set(profiles[0].endpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        keychain.setData(Data("token-b".utf8), account: "agentd-profile.mac-b")
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        store.connectionStatus = .connected("当前 Mac")
+        let copyCallCount = keychain.copyCallCount
+        let updateCallCount = keychain.updateCallCount
+        let addCallCount = keychain.addCallCount
+        let deleteCallCount = keychain.deleteCallCount
+        let generation = store.connectionGeneration
+
+        XCTAssertTrue(try store.renameConnectionProfile(id: "mac-a", displayName: "  工作室 Mac  "))
+        XCTAssertTrue(try store.renameConnectionProfile(id: "mac-b", displayName: "随身 Mac"))
+
+        XCTAssertEqual(store.connectionProfiles.map(\.displayName), ["工作室 Mac", "随身 Mac"])
+        XCTAssertEqual(store.connectionProfiles.map(\.endpoint), profiles.map(\.endpoint))
+        XCTAssertEqual(store.connectionProfiles.map(\.lastSuccessfulAt), profiles.map(\.lastSuccessfulAt))
+        XCTAssertEqual(store.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(store.endpoint, profiles[0].endpoint)
+        XCTAssertEqual(store.token, "token-a")
+        XCTAssertEqual(store.connectionGeneration, generation)
+        XCTAssertEqual(store.connectionStatus, .connected("当前 Mac"))
+        XCTAssertEqual(keychain.copyCallCount, copyCallCount)
+        XCTAssertEqual(keychain.updateCallCount, updateCallCount)
+        XCTAssertEqual(keychain.addCallCount, addCallCount)
+        XCTAssertEqual(keychain.deleteCallCount, deleteCallCount)
+        XCTAssertEqual(keychain.data(account: "agentd-profile.mac-a"), Data("token-a".utf8))
+        XCTAssertEqual(keychain.data(account: "agentd-profile.mac-b"), Data("token-b".utf8))
+
+        let persistedData = try XCTUnwrap(defaults.data(forKey: "agentd.connectionProfiles.v1"))
+        let persistedProfiles = try JSONDecoder().decode([ConnectionProfile].self, from: persistedData)
+        XCTAssertEqual(persistedProfiles, store.connectionProfiles)
+        XCTAssertEqual(defaults.string(forKey: "agentd.activeConnectionProfileID.v1"), "mac-a")
+        XCTAssertEqual(defaults.string(forKey: "agentd.endpoint"), profiles[0].endpoint)
+    }
+
+    func testProfileRenameRejectsInvalidOrMissingAndSameNameIsNoOp() throws {
+        let suiteName = "PairingLinkTests.RenameValidation.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = [
+            ConnectionProfile(id: "mac-a", displayName: "当前 Mac", endpoint: "http://100.64.0.10:8787", lastSuccessfulAt: nil)
+        ]
+        let originalData = try JSONEncoder().encode(profiles)
+        defaults.set(originalData, forKey: "agentd.connectionProfiles.v1")
+        defaults.set("mac-a", forKey: "agentd.activeConnectionProfileID.v1")
+        defaults.set(profiles[0].endpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations()
+        keychain.setData(Data("token-a".utf8), account: "agentd-profile.mac-a")
+        let store = AppStore(defaults: defaults, tokenStore: TokenStore(keychain: keychain))
+        let copyCallCount = keychain.copyCallCount
+        let generation = store.connectionGeneration
+
+        XCTAssertThrowsError(try store.renameConnectionProfile(id: "mac-a", displayName: " \n\t ")) { error in
+            XCTAssertEqual(error as? ConnectionProfileError, .invalidDisplayName)
+        }
+        let oversizedName = String(repeating: "名", count: AppStore.connectionProfileDisplayNameLimit + 1)
+        XCTAssertThrowsError(try store.renameConnectionProfile(id: "mac-a", displayName: oversizedName)) { error in
+            XCTAssertEqual(
+                error as? ConnectionProfileError,
+                .displayNameTooLong(maximum: AppStore.connectionProfileDisplayNameLimit)
+            )
+        }
+        XCTAssertThrowsError(try store.renameConnectionProfile(id: "missing", displayName: "其它 Mac")) { error in
+            XCTAssertEqual(error as? ConnectionProfileError, .notFound)
+        }
+        XCTAssertFalse(try store.renameConnectionProfile(id: "mac-a", displayName: "  当前 Mac  "))
+
+        XCTAssertEqual(store.connectionProfiles, profiles)
+        XCTAssertEqual(defaults.data(forKey: "agentd.connectionProfiles.v1"), originalData)
+        XCTAssertEqual(store.activeConnectionProfileID, "mac-a")
+        XCTAssertEqual(store.endpoint, profiles[0].endpoint)
+        XCTAssertEqual(store.token, "token-a")
+        XCTAssertEqual(store.connectionGeneration, generation)
+        XCTAssertEqual(keychain.copyCallCount, copyCallCount)
+        XCTAssertEqual(keychain.updateCallCount, 0)
+        XCTAssertEqual(keychain.addCallCount, 0)
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+        XCTAssertEqual(keychain.data(account: "agentd-profile.mac-a"), Data("token-a".utf8))
+    }
+
+    func testClearPairingDeleteFailurePreservesPreviousConnection() throws {
+        let suiteName = "PairingLinkTests.ClearPairingFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let oldEndpoint = "http://100.64.0.10:8787"
+        let oldToken = "old-token"
+        defaults.set(oldEndpoint, forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(
+            itemData: Data(oldToken.utf8),
+            forcedDeleteStatus: errSecInteractionNotAllowed
+        )
+        let store = AppStore(
+            defaults: defaults,
+            tokenStore: TokenStore(keychain: keychain)
+        )
+        store.connectionStatus = .connected("Tailscale")
+        store.lastError = "保留现场"
+        let oldGeneration = store.connectionGeneration
+        let deleteCallCountBeforeClear = keychain.deleteCallCount
+
+        XCTAssertThrowsError(try store.clearPairing()) { error in
+            guard case TokenStoreError.deleteFailed(let status) = error else {
+                return XCTFail("应返回 Keychain 删除失败，实际为：\(error)")
+            }
+            XCTAssertEqual(status, errSecInteractionNotAllowed)
+        }
+
+        XCTAssertEqual(store.endpoint, oldEndpoint)
+        XCTAssertEqual(store.token, oldToken)
+        XCTAssertEqual(store.connectionGeneration, oldGeneration)
+        XCTAssertEqual(store.connectionStatus, .connected("Tailscale"))
+        XCTAssertEqual(store.lastError, "保留现场")
+        XCTAssertEqual(defaults.string(forKey: "agentd.endpoint"), oldEndpoint)
+        XCTAssertEqual(keychain.itemData, Data(oldToken.utf8))
+        XCTAssertEqual(keychain.deleteCallCount, deleteCallCountBeforeClear + 1)
+    }
+
+    func testClearPairingCommitsAfterKeychainDeleteSucceeds() throws {
+        let suiteName = "PairingLinkTests.ClearPairingSuccess.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set("http://100.64.0.10:8787", forKey: "agentd.endpoint")
+        let keychain = TestKeychainOperations(itemData: Data("old-token".utf8))
+        let store = AppStore(
+            defaults: defaults,
+            tokenStore: TokenStore(keychain: keychain)
+        )
+        let oldGeneration = store.connectionGeneration
+        let deleteCallCountBeforeClear = keychain.deleteCallCount
+
+        try store.clearPairing()
+
+        XCTAssertEqual(store.endpoint, "http://127.0.0.1:8787")
+        XCTAssertEqual(store.token, "")
+        XCTAssertEqual(store.connectionGeneration, oldGeneration + 1)
+        XCTAssertNil(defaults.string(forKey: "agentd.endpoint"))
+        XCTAssertNil(keychain.itemData)
+        XCTAssertEqual(keychain.deleteCallCount, deleteCallCountBeforeClear + 1)
+    }
+
+    func testATSOnlyAllowsLocalNetworkingAndTailscaleDomain() throws {
+        let ats = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Any])
+        XCTAssertNil(ats["NSAllowsArbitraryLoads"], "发布包不能全局关闭 ATS")
+        XCTAssertEqual(ats["NSAllowsLocalNetworking"] as? Bool, true)
+
+        let domains = try XCTUnwrap(ats["NSExceptionDomains"] as? [String: Any])
+        let tailscale = try XCTUnwrap(domains["ts.net"] as? [String: Any])
+        XCTAssertEqual(tailscale["NSExceptionAllowsInsecureHTTPLoads"] as? Bool, true)
+        XCTAssertEqual(tailscale["NSIncludesSubdomains"] as? Bool, true)
+    }
+
     func testParsesEncodedPairingURL() throws {
         let url = try XCTUnwrap(URL(string: "mimiremote://pair?endpoint=http%3A%2F%2F100.64.0.1%3A8787&token=0123456789abcdef0123456789abcdef"))
 
@@ -93,7 +574,14 @@ final class PairingLinkTests: XCTestCase {
 
     func testRejectsPublicHTTPHost() throws {
         XCTAssertThrowsError(try AppStore.validatedEndpoint("http://example.com:8787")) { error in
-            XCTAssertTrue(error is AgentAPIError)
+            guard let apiError = error as? AgentAPIError,
+                  case .insecurePublicHTTPEndpoint(let host) = apiError
+            else {
+                return XCTFail("公网 HTTP 应返回可操作的安全错误")
+            }
+            XCTAssertEqual(host, "example.com")
+            XCTAssertTrue(error.localizedDescription.contains("HTTPS"))
+            XCTAssertTrue(error.localizedDescription.contains("agentd pair"))
         }
     }
 
@@ -116,6 +604,163 @@ final class PairingLinkTests: XCTestCase {
 
     func testAllowsHTTPSPublicHost() throws {
         XCTAssertEqual(try AppStore.validatedEndpoint("https://example.com"), "https://example.com")
+    }
+
+    func testEndpointTransportAssessmentExplainsAllowedAndBlockedRoutes() {
+        let tailscale = EndpointTransportPolicy.assess("100.100.10.20:8787")
+        XCTAssertEqual(tailscale.status, .allowedPrivateHTTP)
+        XCTAssertEqual(tailscale.normalizedEndpoint, "http://100.100.10.20:8787")
+        XCTAssertTrue(tailscale.isAllowed)
+
+        let securePublic = EndpointTransportPolicy.assess("HTTPS://example.com:8787/")
+        XCTAssertEqual(securePublic.status, .allowedHTTPS)
+        XCTAssertEqual(securePublic.normalizedEndpoint, "https://example.com:8787")
+        XCTAssertTrue(securePublic.isAllowed)
+
+        let publicHTTP = EndpointTransportPolicy.assess("http://14.103.53.126:8787")
+        XCTAssertEqual(publicHTTP.status, .blockedPublicHTTP)
+        XCTAssertEqual(publicHTTP.host, "14.103.53.126")
+        XCTAssertFalse(publicHTTP.isAllowed)
+        XCTAssertTrue(publicHTTP.guidance.contains("明文传输"))
+    }
+
+    func testAllowsLoopbackAndPrivateIPv6HTTP() throws {
+        XCTAssertEqual(try AppStore.validatedEndpoint("http://[::1]:8787"), "http://[::1]:8787")
+        XCTAssertEqual(
+            try AppStore.validatedEndpoint("http://[fd7a:115c:a1e0::1]:8787"),
+            "http://[fd7a:115c:a1e0::1]:8787"
+        )
+    }
+
+    func testPublicHTTPIsRejectedBeforeConnectionProbe() async throws {
+        let suiteName = "PairingLinkTests.PublicHTTPPreflight.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let recorder = ConnectionRouteProbeRecorder()
+        let store = AppStore(defaults: defaults, routeProbeTimeout: 0.1) { endpoint, _, _ in
+            await recorder.record(endpoint)
+        }
+
+        do {
+            _ = try await store.prepareConnectionSettings(
+                endpoint: "http://example.com:8787",
+                token: "test-token"
+            )
+            XCTFail("公网 HTTP 不应进入连接探测")
+        } catch let error as AgentAPIError {
+            guard case .insecurePublicHTTPEndpoint(let host) = error else {
+                return XCTFail("应返回公网 HTTP 安全错误")
+            }
+            XCTAssertEqual(host, "example.com")
+        }
+        let probedEndpoints = await recorder.endpoints()
+        XCTAssertEqual(probedEndpoints, [])
+    }
+
+    func testHTTPClientRejectsPublicHTTPBeforeURLSessionRequest() async {
+        let client = AgentAPIClient(endpoint: "http://example.com:8787", token: "should-not-leave-device")
+
+        do {
+            _ = try await client.health()
+            XCTFail("HTTP Client 不应向公网 HTTP 发出请求")
+        } catch let error as AgentAPIError {
+            guard case .insecurePublicHTTPEndpoint(let host) = error else {
+                return XCTFail("HTTP Client 应复用 Endpoint 传输策略")
+            }
+            XCTAssertEqual(host, "example.com")
+        } catch {
+            XCTFail("应在进入 URLSession 前返回 Endpoint 安全错误：\(error)")
+        }
+    }
+
+    func testRESTAuthenticationRejectionBecomesTypedCredentialFailure() async {
+        for (token, expectedStatus) in [("expired-401", 401), ("expired-403", 403)] {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [AuthenticationStubURLProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let client = AgentAPIClient(
+                endpoint: "http://127.0.0.1:8787",
+                token: token,
+                session: session
+            )
+
+            do {
+                _ = try await client.version()
+                XCTFail("HTTP \(expectedStatus) 鉴权拒绝应进入访问码失效终态")
+            } catch let error as AgentAPIError {
+                guard case .credentialsInvalid(let status) = error else {
+                    return XCTFail("应保留鉴权失败类型，实际为：\(error)")
+                }
+                XCTAssertEqual(status, expectedStatus)
+                XCTAssertTrue(error.invalidatesCredentials)
+            } catch {
+                XCTFail("应返回 AgentAPIError.credentialsInvalid，实际为：\(error)")
+            }
+        }
+    }
+
+    func testRESTPolicy403DoesNotInvalidateCredentials() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AuthenticationStubURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let client = AgentAPIClient(
+            endpoint: "http://127.0.0.1:8787",
+            token: "policy-403",
+            session: session
+        )
+
+        do {
+            _ = try await client.version()
+            XCTFail("业务策略 403 应正常返回 server error")
+        } catch let error as AgentAPIError {
+            guard case .server(let status, let message) = error else {
+                return XCTFail("目录 allowlist 403 不能误判为访问码失效：\(error)")
+            }
+            XCTAssertEqual(status, 403)
+            XCTAssertEqual(message, "路径不在允许范围内或不可访问")
+            XCTAssertFalse(error.invalidatesCredentials)
+        } catch {
+            XCTFail("应返回 AgentAPIError.server，实际为：\(error)")
+        }
+    }
+
+    func testWebSocketHandshake401And403BecomeTypedCredentialFailure() throws {
+        let url = try XCTUnwrap(URL(string: "ws://127.0.0.1:8787/api/app-server/ws"))
+
+        for status in [401, 403] {
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: url,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: nil
+            ))
+            let mapped = URLSessionCodexAppServerTransport.mappedTaskError(
+                URLError(.badServerResponse),
+                response: response
+            )
+            guard case AgentAPIError.credentialsInvalid(let actualStatus) = mapped else {
+                return XCTFail("WebSocket 握手 \(status) 应保留访问码失效类型：\(mapped)")
+            }
+            XCTAssertEqual(actualStatus, status)
+            XCTAssertTrue(isCredentialInvalidatingError(mapped))
+        }
+    }
+
+    func testWebSocketGatewayRejectsPublicHTTP() {
+        XCTAssertThrowsError(
+            try CodexAppServerSessionRuntime.gatewayURL(
+                endpoint: "http://example.com:8787",
+                sessionID: "thr_security"
+            )
+        ) { error in
+            guard let apiError = error as? AgentAPIError,
+                  case .insecurePublicHTTPEndpoint = apiError
+            else {
+                return XCTFail("WebSocket 也必须阻止公网明文地址")
+            }
+        }
     }
 
     func testParsesMimiRemoteScheme() throws {
@@ -426,5 +1071,173 @@ private actor ConnectionRouteProbeRecorder {
 
     func endpoints() -> [String] {
         recordedEndpoints
+    }
+}
+
+private final class AuthenticationStubURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        let authorization = request.value(forHTTPHeaderField: "Authorization") ?? ""
+        let status: Int
+        let body: String
+        let headers: [String: String]
+        if authorization.contains("expired-401") {
+            status = 401
+            body = #"{"error":"unauthorized"}"#
+            headers = ["Content-Type": "application/json", "WWW-Authenticate": "Bearer"]
+        } else if authorization.contains("expired-403") {
+            status = 403
+            body = #"{"error":"forbidden"}"#
+            headers = ["Content-Type": "application/json"]
+        } else {
+            // 真实 agentd 的路径 allowlist 也会返回 403；该分支用于防止客户端误清有效访问码。
+            status = 403
+            body = #"{"error":"路径不在允许范围内或不可访问"}"#
+            headers = ["Content-Type": "application/json"]
+        }
+        guard let response = HTTPURLResponse(
+            url: url,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: headers
+        ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+final class TestKeychainOperations: KeychainOperating {
+    private var itemsByAccount: [String: Data]
+    var itemData: Data? {
+        get { itemsByAccount["agentd-token"] ?? itemsByAccount.values.first }
+        set {
+            if let newValue {
+                itemsByAccount["agentd-token"] = newValue
+            } else {
+                itemsByAccount.removeAll()
+            }
+        }
+    }
+    var forcedCopyStatus: OSStatus?
+    var forcedUpdateStatus: OSStatus?
+    var forcedAddStatus: OSStatus?
+    var forcedDeleteStatus: OSStatus?
+
+    private(set) var updateCallCount = 0
+    private(set) var addCallCount = 0
+    private(set) var deleteCallCount = 0
+    private(set) var copyCallCount = 0
+
+    init(
+        itemData: Data? = nil,
+        forcedCopyStatus: OSStatus? = nil,
+        forcedUpdateStatus: OSStatus? = nil,
+        forcedAddStatus: OSStatus? = nil,
+        forcedDeleteStatus: OSStatus? = nil
+    ) {
+        if let itemData {
+            itemsByAccount = ["agentd-token": itemData]
+        } else {
+            itemsByAccount = [:]
+        }
+        self.forcedCopyStatus = forcedCopyStatus
+        self.forcedUpdateStatus = forcedUpdateStatus
+        self.forcedAddStatus = forcedAddStatus
+        self.forcedDeleteStatus = forcedDeleteStatus
+    }
+
+    func copyMatching(
+        _ query: CFDictionary,
+        result: UnsafeMutablePointer<CFTypeRef?>?
+    ) -> OSStatus {
+        copyCallCount += 1
+        if let forcedCopyStatus {
+            return forcedCopyStatus
+        }
+        guard let itemData = itemsByAccount[account(from: query)] else {
+            return errSecItemNotFound
+        }
+        result?.pointee = itemData as CFData
+        return errSecSuccess
+    }
+
+    func update(
+        _ query: CFDictionary,
+        attributesToUpdate: CFDictionary
+    ) -> OSStatus {
+        updateCallCount += 1
+        if let forcedUpdateStatus {
+            return forcedUpdateStatus
+        }
+        let account = account(from: query)
+        guard itemsByAccount[account] != nil else {
+            return errSecItemNotFound
+        }
+        let attributes = attributesToUpdate as NSDictionary
+        guard let data = attributes[kSecValueData as String] as? Data else {
+            return errSecParam
+        }
+        itemsByAccount[account] = data
+        return errSecSuccess
+    }
+
+    func add(_ attributes: CFDictionary) -> OSStatus {
+        addCallCount += 1
+        if let forcedAddStatus {
+            return forcedAddStatus
+        }
+        let attributes = attributes as NSDictionary
+        guard let data = attributes[kSecValueData as String] as? Data else {
+            return errSecParam
+        }
+        itemsByAccount[account(from: attributes)] = data
+        return errSecSuccess
+    }
+
+    func delete(_ query: CFDictionary) -> OSStatus {
+        deleteCallCount += 1
+        if let forcedDeleteStatus {
+            return forcedDeleteStatus
+        }
+        let account = account(from: query)
+        guard itemsByAccount[account] != nil else {
+            return errSecItemNotFound
+        }
+        itemsByAccount.removeValue(forKey: account)
+        return errSecSuccess
+    }
+
+    func data(account: String) -> Data? {
+        itemsByAccount[account]
+    }
+
+    func setData(_ data: Data, account: String) {
+        itemsByAccount[account] = data
+    }
+
+    var accounts: Set<String> {
+        Set(itemsByAccount.keys)
+    }
+
+    private func account(from dictionary: CFDictionary) -> String {
+        let values = dictionary as NSDictionary
+        return values[kSecAttrAccount as String] as? String ?? ""
     }
 }

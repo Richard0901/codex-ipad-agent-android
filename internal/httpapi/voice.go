@@ -46,10 +46,7 @@ func (r *Router) voiceTranscribeHandler(w http.ResponseWriter, req *http.Request
 	}
 
 	var payload voiceTranscriptionRequest
-	decoder := json.NewDecoder(io.LimitReader(req.Body, voiceTranscriptionMaxBytes*2))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 	audio, err := decodeVoiceAudio(payload.AudioBase64)
@@ -97,10 +94,12 @@ func decodeVoiceAudio(raw string) ([]byte, error) {
 
 func (r *Router) createVoiceTranscription(ctx context.Context, payload voiceTranscriptionRequest, audio []byte) (voiceTranscriptionResult, error) {
 	provider := r.voiceTranscriptionProvider()
-	if provider == "openai" || provider == "auto" && strings.TrimSpace(r.cfg.Voice.TranscriptionAPIKey) != "" {
+	// auto 只保留为旧配置兼容别名，并始终走公开 API。只有显式选择 codex，
+	// 才允许读取本机登录态并调用未公开的 ChatGPT 转写接口。
+	if provider == "openai" || provider == "auto" {
 		return r.createOpenAIVoiceTranscription(ctx, payload, audio)
 	}
-	if provider == "codex" || provider == "auto" {
+	if provider == "codex" {
 		return r.createCodexVoiceTranscription(ctx, payload, audio)
 	}
 	return voiceTranscriptionResult{}, fmt.Errorf("未知语音转写 provider：%s", provider)

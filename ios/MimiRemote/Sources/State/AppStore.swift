@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum PairingLinkError: LocalizedError, Equatable {
     case unsupportedURL
@@ -205,31 +206,182 @@ struct ConnectionTestStageStability: Identifiable, Equatable {
     }
 }
 
+struct ConnectionProfile: Codable, Identifiable, Equatable {
+    let id: String
+    var displayName: String
+    var endpoint: String
+    var lastSuccessfulAt: Date?
+}
+
+struct ConnectionProfileSettingsItem: Identifiable, Equatable {
+    let profile: ConnectionProfile
+    let isCurrent: Bool
+
+    var id: String { profile.id }
+    var canSwitch: Bool { !isCurrent }
+    var canDelete: Bool { !isCurrent }
+}
+
+struct ConnectionProfileSettingsModel: Equatable {
+    let current: ConnectionProfileSettingsItem?
+    let others: [ConnectionProfileSettingsItem]
+
+    init(profiles: [ConnectionProfile], activeProfileID: String?) {
+        let items = profiles
+            .sorted { lhs, rhs in
+                let lhsDate = lhs.lastSuccessfulAt ?? .distantPast
+                let rhsDate = rhs.lastSuccessfulAt ?? .distantPast
+                if lhsDate != rhsDate { return lhsDate > rhsDate }
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+            .map { ConnectionProfileSettingsItem(profile: $0, isCurrent: $0.id == activeProfileID) }
+        current = items.first(where: \.isCurrent)
+        others = items.filter { !$0.isCurrent }
+    }
+}
+
+/// 删除连接凭据前展示的纯值确认模型。
+/// 这里只保存目标和文案，不持有删除闭包，确保第一次点击按钮只会进入确认态。
+struct ConnectionCredentialRemovalConfirmation: Identifiable, Equatable {
+    enum Target: Equatable {
+        case current(profileID: String?)
+        case savedProfile(profileID: String)
+    }
+
+    let target: Target
+    let displayName: String?
+
+    static func forgettingCurrent(_ profile: ConnectionProfile?) -> Self {
+        Self(
+            target: .current(profileID: profile?.id),
+            displayName: profile?.displayName
+        )
+    }
+
+    static func deletingSavedProfile(_ profile: ConnectionProfile) -> Self {
+        Self(
+            target: .savedProfile(profileID: profile.id),
+            displayName: profile.displayName
+        )
+    }
+
+    var id: String {
+        switch target {
+        case .current(let profileID):
+            return "forget-current:\(profileID ?? "legacy")"
+        case .savedProfile(let profileID):
+            return "delete-profile:\(profileID)"
+        }
+    }
+
+    var title: String {
+        switch target {
+        case .current:
+            return "忘记当前 Mac？"
+        case .savedProfile:
+            return "删除“\(displayName ?? "这台 Mac")”？"
+        }
+    }
+
+    var message: String {
+        switch target {
+        case .current:
+            let targetName = displayName.map { "“\($0)”" } ?? "当前 Mac"
+            return "这会从当前设备的系统钥匙串（Keychain）删除\(targetName)的访问码，并清除 App 中当前连接的会话、消息和日志。再次连接时需要重新扫码配对。"
+        case .savedProfile:
+            let targetName = displayName ?? "这台 Mac"
+            return "这会从当前设备删除“\(targetName)”的连接档案和系统钥匙串（Keychain）访问码。再次连接时需要重新扫码配对；当前 Mac 连接不会受影响。"
+        }
+    }
+
+    var confirmButtonTitle: String {
+        switch target {
+        case .current:
+            return "忘记这台 Mac"
+        case .savedProfile:
+            return "删除连接档案"
+        }
+    }
+}
+
+enum ConnectionProfileError: LocalizedError, Equatable {
+    case notFound
+    case missingToken
+    case cannotDeleteCurrent
+    case operationInProgress
+    case invalidDisplayName
+    case displayNameTooLong(maximum: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .notFound:
+            return "找不到这台 Mac 的连接档案"
+        case .missingToken:
+            return "这台 Mac 的访问码不存在，请重新配对"
+        case .cannotDeleteCurrent:
+            return "请先切换到其它 Mac，再删除这个档案"
+        case .operationInProgress:
+            return "另一项 Mac 连接操作仍在进行，请稍后再试"
+        case .invalidDisplayName:
+            return "Mac 名称不能为空"
+        case .displayNameTooLong(let maximum):
+            return "Mac 名称最多 \(maximum) 个字符"
+        }
+    }
+}
+
+enum PreparedConnectionProfileTarget: Equatable {
+    case currentOrNew(displayName: String?)
+    case newProfile(id: String, displayName: String)
+    case existingProfile(id: String)
+}
+
 struct PreparedConnectionSettings: Equatable {
     let endpoint: String
     let token: String
+    let profileTarget: PreparedConnectionProfileTarget
+    let validatedAt: Date
+
+    init(
+        endpoint: String,
+        token: String,
+        profileTarget: PreparedConnectionProfileTarget = .currentOrNew(displayName: nil),
+        validatedAt: Date = Date()
+    ) {
+        self.endpoint = endpoint
+        self.token = token
+        self.profileTarget = profileTarget
+        self.validatedAt = validatedAt
+    }
 }
 
 typealias ConnectionRouteProbe = (_ endpoint: String, _ token: String, _ timeout: TimeInterval) async throws -> Void
 
 @MainActor
 final class AppStore: ObservableObject {
+    static let connectionProfileDisplayNameLimit = 48
+
     @Published var endpoint: String
+    @Published private(set) var connectionProfiles: [ConnectionProfile]
+    @Published private(set) var activeConnectionProfileID: String?
     @Published private(set) var connectionGeneration = 0
     @Published var token: String
     @Published var connectionStatus: ConnectionStatus = .idle
+    @Published private(set) var connectionTermination: ConnectionTerminationStatus?
     @Published var lastError: String?
     @Published var lastConnectionTestDurationMillis: Int?
     @Published var lastConnectionTestReport: ConnectionTestReport?
     @Published var recentConnectionTestReports: [ConnectionTestReport] = []
 
     private let endpointKey = "agentd.endpoint"
+    private static let profilesKey = "agentd.connectionProfiles.v1"
+    private static let activeProfileIDKey = "agentd.activeConnectionProfileID.v1"
     private let retiredFallbackEndpointKey = "agentd.fallbackEndpoint"
     private let retiredConnectionModeKey = "agentd.connectionMode"
     private let defaultEndpoint = "http://127.0.0.1:8787"
     private let maxConnectionTestReportHistory = 20
     private let defaults: UserDefaults
-    private let tokenStore = TokenStore()
+    private let tokenStore: TokenStore
     private let routeProbeTimeout: TimeInterval
     private let routeProbe: ConnectionRouteProbe
     private var isConnectionPreflightRunning = false
@@ -242,15 +394,55 @@ final class AppStore: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
+        tokenStore: TokenStore = TokenStore(),
         routeProbeTimeout: TimeInterval = 5,
         routeProbe: ConnectionRouteProbe? = nil
     ) {
         self.defaults = defaults
+        self.tokenStore = tokenStore
         self.routeProbeTimeout = routeProbeTimeout
         self.routeProbe = routeProbe ?? Self.defaultConnectionRouteProbe
 
+        var initialProfiles = Self.loadConnectionProfiles(from: defaults)
+        var initialActiveProfileID = defaults.string(forKey: Self.activeProfileIDKey)
         var initialEndpoint = defaults.string(forKey: endpointKey) ?? defaultEndpoint
         var initialToken = tokenStore.load()
+
+        if let activeProfileID = initialActiveProfileID,
+           let activeProfile = initialProfiles.first(where: { $0.id == activeProfileID }),
+           let profileToken = try? tokenStore.load(profileID: activeProfileID),
+           !profileToken.isEmpty {
+            initialEndpoint = activeProfile.endpoint
+            initialToken = profileToken
+        } else if initialProfiles.isEmpty, !initialToken.isEmpty {
+            // 旧版本只有一个 endpoint + `agentd-token`。先把 Token 写入新的独立 account，
+            // 成功后才发布档案元数据；任一步失败都继续使用旧内存态和旧 Keychain 项。
+            let normalizedEndpoint = (try? Self.validatedEndpoint(initialEndpoint)) ?? defaultEndpoint
+            let migratedProfile = ConnectionProfile(
+                id: UUID().uuidString,
+                displayName: Self.defaultProfileDisplayName(endpoint: normalizedEndpoint),
+                endpoint: normalizedEndpoint,
+                lastSuccessfulAt: nil
+            )
+            do {
+                let encodedProfiles = try JSONEncoder().encode([migratedProfile])
+                try tokenStore.save(initialToken, profileID: migratedProfile.id)
+                defaults.set(encodedProfiles, forKey: Self.profilesKey)
+                defaults.set(migratedProfile.id, forKey: Self.activeProfileIDKey)
+                initialProfiles = [migratedProfile]
+                initialActiveProfileID = migratedProfile.id
+                // 新档案已完整可恢复后再清理 legacy；删除失败只会留下冗余 Keychain 项，
+                // 不会让当前连接或新档案失效。
+                try? tokenStore.delete(allowMissing: true)
+            } catch {
+                initialProfiles = []
+                initialActiveProfileID = nil
+            }
+        } else {
+            // 已存在档案时，即使 legacy item 因旧迁移清理失败而残留，也绝不能重新迁移并覆盖档案列表。
+            // 当前档案 Token 不可读时先退出 active 状态，让用户显式重试或重新配对。
+            initialActiveProfileID = nil
+        }
 #if DEBUG
         // Debug 启动参数只影响本次内存态，避免把本地调试 token 写进 Keychain 或带进 Release 流程。
         if let debugEndpoint = debugLaunchConfiguration.endpoint,
@@ -260,10 +452,15 @@ final class AppStore: ObservableObject {
         if let debugToken = debugLaunchConfiguration.token {
             initialToken = debugToken
         }
+        if debugLaunchConfiguration.endpoint != nil || debugLaunchConfiguration.token != nil {
+            initialActiveProfileID = nil
+        }
 #endif
         initialEndpoint = (try? Self.validatedEndpoint(initialEndpoint)) ?? defaultEndpoint
         self.endpoint = initialEndpoint
         self.token = initialToken
+        connectionProfiles = initialProfiles
+        activeConnectionProfileID = initialActiveProfileID
 #if DEBUG
         debugWorkbenchBypassEnabled = debugLaunchConfiguration.opensWorkbenchWithoutPairing
 #endif
@@ -274,8 +471,52 @@ final class AppStore: ObservableObject {
     }
 
     var isConfigured: Bool {
-        !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasCredentials = !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasCredentials else { return false }
+#if DEBUG
+        if debugLaunchConfiguration.endpoint != nil || debugLaunchConfiguration.token != nil {
+            return true
+        }
+#endif
+        // 迁移失败且尚无档案时继续允许旧单连接工作；一旦已经有档案，只有成功读取
+        // 当前档案专属 Token 才能进入工作台，不能把残留 legacy Token 当成 active 凭据。
+        return connectionProfiles.isEmpty || activeConnectionProfile != nil
+    }
+
+    var activeConnectionProfile: ConnectionProfile? {
+        guard let activeConnectionProfileID else { return nil }
+        return connectionProfiles.first { $0.id == activeConnectionProfileID }
+    }
+
+    /// 通知路由优先使用持久化 profile ID；legacy/debug 单连接才退回规范 endpoint 的 SHA-256。
+    /// 哈希仅用于同机比对，避免把 endpoint 明文写进系统通知数据库。
+    var notificationRoutingProfileID: String {
+        if let activeConnectionProfileID,
+           !activeConnectionProfileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return activeConnectionProfileID
+        }
+        let normalizedEndpoint = AgentAPIClient.normalizedEndpoint(endpoint)
+        let digest = SHA256.hash(data: Data(normalizedEndpoint.utf8))
+        return "endpoint-sha256:" + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    var connectionProfileSettingsModel: ConnectionProfileSettingsModel {
+        ConnectionProfileSettingsModel(
+            profiles: connectionProfiles,
+            activeProfileID: activeConnectionProfileID
+        )
+    }
+
+    var requiresRePairing: Bool {
+        connectionTermination == .credentialsInvalid
+    }
+
+    func markCredentialsInvalid() {
+        let termination = ConnectionTerminationStatus.credentialsInvalid
+        connectionTermination = termination
+        connectionStatus = .failed(termination.message)
+        lastError = termination.message
     }
 
     var canEnterWorkbench: Bool {
@@ -327,13 +568,48 @@ final class AppStore: ObservableObject {
 
     func prepareConnectionSettings(
         endpoint: String,
-        token: String
+        token: String,
+        profileTarget: PreparedConnectionProfileTarget = .currentOrNew(displayName: nil)
     ) async throws -> PreparedConnectionSettings {
         let normalizedEndpoint = try Self.validatedEndpoint(endpoint)
         // 保存前先用短超时验证控制面和 WebSocket，失败时快速反馈；通过后再跑完整诊断报告。
         try await routeProbe(normalizedEndpoint, token, routeProbeTimeout)
         let validatedEndpoint = try await validateConnection(endpoint: normalizedEndpoint, token: token)
-        return PreparedConnectionSettings(endpoint: validatedEndpoint, token: token)
+        return PreparedConnectionSettings(
+            endpoint: validatedEndpoint,
+            token: token,
+            profileTarget: profileTarget
+        )
+    }
+
+    func prepareNewConnectionProfile(
+        endpoint: String,
+        token: String,
+        displayName: String
+    ) async throws -> PreparedConnectionSettings {
+        try await prepareConnectionSettings(
+            endpoint: endpoint,
+            token: token,
+            profileTarget: .newProfile(
+                id: UUID().uuidString,
+                displayName: Self.normalizedProfileDisplayName(displayName, endpoint: endpoint)
+            )
+        )
+    }
+
+    func prepareConnectionProfileSwitch(id: String) async throws -> PreparedConnectionSettings {
+        guard let profile = connectionProfiles.first(where: { $0.id == id }) else {
+            throw ConnectionProfileError.notFound
+        }
+        let profileToken = try tokenStore.load(profileID: id)
+        guard !profileToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ConnectionProfileError.missingToken
+        }
+        return try await prepareConnectionSettings(
+            endpoint: profile.endpoint,
+            token: profileToken,
+            profileTarget: .existingProfile(id: id)
+        )
     }
 
     func preparePairingURL(_ url: URL) async throws -> PreparedConnectionSettings {
@@ -351,19 +627,80 @@ final class AppStore: ObservableObject {
         )
     }
 
+    func prepareNewPairingURL(_ url: URL, displayName: String) async throws -> PreparedConnectionSettings {
+        let prepared = try await preparePairingURL(url)
+        return PreparedConnectionSettings(
+            endpoint: prepared.endpoint,
+            token: prepared.token,
+            profileTarget: .newProfile(
+                id: UUID().uuidString,
+                displayName: Self.normalizedProfileDisplayName(displayName, endpoint: prepared.endpoint)
+            ),
+            validatedAt: prepared.validatedAt
+        )
+    }
+
     @discardableResult
     func commitConnectionSettings(_ prepared: PreparedConnectionSettings) throws -> Bool {
         let normalizedEndpoint = try Self.validatedEndpoint(prepared.endpoint)
-        let didChange = normalizedEndpoint != endpoint ||
-            prepared.token != token
+        let targetProfile: ConnectionProfile
+        switch prepared.profileTarget {
+        case .currentOrNew(let displayName):
+            if let activeConnectionProfileID,
+               let current = connectionProfiles.first(where: { $0.id == activeConnectionProfileID }) {
+                targetProfile = ConnectionProfile(
+                    id: current.id,
+                    displayName: Self.normalizedProfileDisplayName(displayName ?? current.displayName, endpoint: normalizedEndpoint),
+                    endpoint: normalizedEndpoint,
+                    lastSuccessfulAt: prepared.validatedAt
+                )
+            } else {
+                targetProfile = ConnectionProfile(
+                    id: UUID().uuidString,
+                    displayName: Self.normalizedProfileDisplayName(displayName ?? "", endpoint: normalizedEndpoint),
+                    endpoint: normalizedEndpoint,
+                    lastSuccessfulAt: prepared.validatedAt
+                )
+            }
+        case .newProfile(let id, let displayName):
+            targetProfile = ConnectionProfile(
+                id: id,
+                displayName: Self.normalizedProfileDisplayName(displayName, endpoint: normalizedEndpoint),
+                endpoint: normalizedEndpoint,
+                lastSuccessfulAt: prepared.validatedAt
+            )
+        case .existingProfile(let id):
+            guard let existing = connectionProfiles.first(where: { $0.id == id }) else {
+                throw ConnectionProfileError.notFound
+            }
+            targetProfile = ConnectionProfile(
+                id: existing.id,
+                displayName: existing.displayName,
+                endpoint: normalizedEndpoint,
+                lastSuccessfulAt: prepared.validatedAt
+            )
+        }
 
-        try tokenStore.save(prepared.token)
+        var nextProfiles = connectionProfiles.filter { $0.id != targetProfile.id }
+        nextProfiles.append(targetProfile)
+        let encodedProfiles = try JSONEncoder().encode(nextProfiles)
+        let didChange = normalizedEndpoint != endpoint ||
+            prepared.token != token ||
+            targetProfile.id != activeConnectionProfileID
+
+        // Token 必须按档案先写入 Keychain；失败时不能发布 activeID，更不能让 SessionStore 退役旧连接。
+        try tokenStore.save(prepared.token, profileID: targetProfile.id)
+        defaults.set(encodedProfiles, forKey: Self.profilesKey)
+        defaults.set(targetProfile.id, forKey: Self.activeProfileIDKey)
         defaults.set(normalizedEndpoint, forKey: endpointKey)
         defaults.removeObject(forKey: retiredFallbackEndpointKey)
         defaults.removeObject(forKey: retiredConnectionModeKey)
 
         endpoint = normalizedEndpoint
         token = prepared.token
+        connectionProfiles = nextProfiles
+        activeConnectionProfileID = targetProfile.id
+        connectionTermination = nil
         // 每次提交都开启新的连接代次。即使地址没变，也要清掉旧 config/allowlist 缓存。
         connectionGeneration += 1
         resetDirectRuntime()
@@ -384,19 +721,78 @@ final class AppStore: ObservableObject {
     }
 
     func clearPairing() throws {
+        // Keychain 删除是唯一可能失败的步骤，必须先完成它再清理 UserDefaults 和内存态。
+        // 否则系统暂时禁止 Keychain 访问时，下一次启动会变成“旧 Token + 默认 Endpoint”的半提交状态。
+        let nextProfiles: [ConnectionProfile]
+        if let activeConnectionProfileID {
+            nextProfiles = connectionProfiles.filter { $0.id != activeConnectionProfileID }
+        } else {
+            nextProfiles = connectionProfiles
+        }
+        let encodedProfiles = try JSONEncoder().encode(nextProfiles)
+        if let activeConnectionProfileID {
+            try tokenStore.delete(profileID: activeConnectionProfileID, allowMissing: true)
+        } else {
+            try tokenStore.delete(allowMissing: true)
+        }
+        defaults.set(encodedProfiles, forKey: Self.profilesKey)
+        defaults.removeObject(forKey: Self.activeProfileIDKey)
         defaults.removeObject(forKey: endpointKey)
         defaults.removeObject(forKey: retiredFallbackEndpointKey)
         defaults.removeObject(forKey: retiredConnectionModeKey)
-        try tokenStore.delete(allowMissing: true)
         resetDirectRuntime()
         endpoint = defaultEndpoint
+        connectionProfiles = nextProfiles
+        activeConnectionProfileID = nil
         connectionGeneration += 1
         token = ""
+        connectionTermination = nil
         connectionStatus = .idle
         lastError = nil
         lastConnectionTestDurationMillis = nil
         lastConnectionTestReport = nil
         recentConnectionTestReports = []
+    }
+
+    func deleteConnectionProfile(id: String) throws {
+        guard id != activeConnectionProfileID else {
+            throw ConnectionProfileError.cannotDeleteCurrent
+        }
+        guard connectionProfiles.contains(where: { $0.id == id }) else {
+            throw ConnectionProfileError.notFound
+        }
+        let nextProfiles = connectionProfiles.filter { $0.id != id }
+        let encodedProfiles = try JSONEncoder().encode(nextProfiles)
+        // 删除也以 Keychain 为提交点；系统暂时不可访问时保留整条档案，方便用户稍后重试。
+        try tokenStore.delete(profileID: id, allowMissing: true)
+        defaults.set(encodedProfiles, forKey: Self.profilesKey)
+        connectionProfiles = nextProfiles
+    }
+
+    /// 只修改 UserDefaults 中的非敏感显示名称，不进入连接切换事务，也不读取或写入 Keychain。
+    /// 先完成编码再发布内存状态，避免持久化准备失败时列表出现半提交名称。
+    @discardableResult
+    func renameConnectionProfile(id: String, displayName rawDisplayName: String) throws -> Bool {
+        guard let profileIndex = connectionProfiles.firstIndex(where: { $0.id == id }) else {
+            throw ConnectionProfileError.notFound
+        }
+        let displayName = rawDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !displayName.isEmpty else {
+            throw ConnectionProfileError.invalidDisplayName
+        }
+        guard displayName.count <= Self.connectionProfileDisplayNameLimit else {
+            throw ConnectionProfileError.displayNameTooLong(maximum: Self.connectionProfileDisplayNameLimit)
+        }
+        guard displayName != connectionProfiles[profileIndex].displayName else {
+            return false
+        }
+
+        var nextProfiles = connectionProfiles
+        nextProfiles[profileIndex].displayName = displayName
+        let encodedProfiles = try JSONEncoder().encode(nextProfiles)
+        defaults.set(encodedProfiles, forKey: Self.profilesKey)
+        connectionProfiles = nextProfiles
+        return true
     }
 
     @discardableResult
@@ -561,12 +957,17 @@ final class AppStore: ObservableObject {
             let normalizedEndpoint = try Self.validatedEndpoint(endpoint)
             // 应用只探测固定的 Tailscale 地址；底层直连、Peer Relay 或 DERP 由 Tailscale 自行选择。
             try await routeProbe(normalizedEndpoint, token, routeProbeTimeout)
+            connectionTermination = nil
             connectionStatus = .connected("Tailscale")
             lastError = nil
             return true
         } catch {
             if Task.isCancelled || error is CancellationError {
                 connectionStatus = .idle
+                return false
+            }
+            if isCredentialInvalidatingError(error) {
+                markCredentialsInvalid()
                 return false
             }
             connectionStatus = .failed(error.localizedDescription)
@@ -709,42 +1110,47 @@ final class AppStore: ObservableObject {
     }
 
     static func validatedEndpoint(_ raw: String) throws -> String {
+        try EndpointTransportPolicy.validatedEndpoint(raw)
+    }
+
+    private static func loadConnectionProfiles(from defaults: UserDefaults) -> [ConnectionProfile] {
+        guard let data = defaults.data(forKey: profilesKey),
+              let decoded = try? JSONDecoder().decode([ConnectionProfile].self, from: data)
+        else {
+            return []
+        }
+        var seenIDs = Set<String>()
+        return decoded.compactMap { profile in
+            let id = profile.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty,
+                  seenIDs.insert(id).inserted,
+                  let normalizedEndpoint = try? validatedEndpoint(profile.endpoint)
+            else {
+                return nil
+            }
+            return ConnectionProfile(
+                id: id,
+                displayName: normalizedProfileDisplayName(profile.displayName, endpoint: normalizedEndpoint),
+                endpoint: normalizedEndpoint,
+                lastSuccessfulAt: profile.lastSuccessfulAt
+            )
+        }
+    }
+
+    private static func normalizedProfileDisplayName(_ raw: String, endpoint: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw AgentAPIError.invalidEndpoint
+        return trimmed.isEmpty ? defaultProfileDisplayName(endpoint: endpoint) : trimmed
+    }
+
+    private static func defaultProfileDisplayName(endpoint: String) -> String {
+        guard let host = URLComponents(string: endpoint)?.host,
+              !host.isEmpty else {
+            return "我的 Mac"
         }
-        let candidate: String
-        if trimmed.contains("://") {
-            candidate = trimmed
-        } else {
-            candidate = "http://" + trimmed
+        if host == "127.0.0.1" || host == "::1" || host == "localhost" {
+            return "这台 Mac"
         }
-        guard var components = URLComponents(string: candidate),
-              components.scheme == "http" || components.scheme == "https",
-              components.host?.isEmpty == false
-        else {
-            throw AgentAPIError.invalidEndpoint
-        }
-        if components.scheme == "http",
-           let host = components.host,
-           !isAllowedInsecureEndpointHost(host) {
-            throw AgentAPIError.invalidEndpoint
-        }
-        if components.path == "/" {
-            components.path = ""
-        }
-        guard components.path.isEmpty,
-              components.query == nil,
-              components.fragment == nil,
-              components.user == nil,
-              components.password == nil
-        else {
-            throw AgentAPIError.invalidEndpoint
-        }
-        guard let url = components.url else {
-            throw AgentAPIError.invalidEndpoint
-        }
-        return url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return host
     }
 
     private static func defaultConnectionRouteProbe(
@@ -762,38 +1168,6 @@ final class AppStore: ObservableObject {
         )
         // 同时验证控制面和 WebSocket，避免 /healthz 可用但真实 Codex 通道不可用时误选该地址。
         try await runtime.validateDirectGateway()
-    }
-
-    private static func isAllowedInsecureEndpointHost(_ host: String) -> Bool {
-        let value = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !value.isEmpty else {
-            return false
-        }
-        if value == "localhost" || value == "::1" || value.hasSuffix(".local") || value.hasSuffix(".ts.net") {
-            return true
-        }
-        if value.contains(":") && (value.hasPrefix("fe80:") || value.hasPrefix("fc") || value.hasPrefix("fd")) {
-            return true
-        }
-        let parts = value.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4, parts.allSatisfy({ 0...255 ~= $0 }) else {
-            return false
-        }
-        switch parts[0] {
-        case 10, 127:
-            return true
-        case 100:
-            return 64...127 ~= parts[1]
-        case 169:
-            return parts[1] == 254
-        case 172:
-            return 16...31 ~= parts[1]
-        case 192:
-            return parts[1] == 168
-        default:
-            // 公网 HTTP IPv4 是旧 VPS 代理入口，单 Tailscale 架构下不再接受；公网域名如确有需要必须走 HTTPS。
-            return false
-        }
     }
 
     private func runtimeBundle(endpoint: String, token: String) -> AppServerRuntimeBundle {

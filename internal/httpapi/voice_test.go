@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -37,6 +38,36 @@ func TestVoiceTranscribeHandlerRequiresAPIKeyWhenOpenAIProvider(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "API Key") {
 		t.Fatalf("response should explain missing API key, got %s", rec.Body.String())
+	}
+}
+
+func TestVoiceTranscribeHandlerAutoDoesNotUseCodexLogin(t *testing.T) {
+	router := &Router{cfg: config.Config{
+		Voice: config.VoiceConfig{
+			TranscriptionProvider: "auto",
+			// 即使配置了登录态文件，auto 也不能隐式进入非公开 Codex 转写链路。
+			CodexAuthFile: filepath.Join(t.TempDir(), "auth.json"),
+		},
+	}}
+	body := voiceTranscriptionRequest{
+		Filename:    "clip.m4a",
+		ContentType: "audio/mp4",
+		AudioBase64: base64.StdEncoding.EncodeToString([]byte("fake audio")),
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/voice/transcribe", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	router.voiceTranscribeHandler(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "API Key") {
+		t.Fatalf("auto 应提示配置公开 API Key，而不是读取 Codex 登录态：%s", rec.Body.String())
 	}
 }
 

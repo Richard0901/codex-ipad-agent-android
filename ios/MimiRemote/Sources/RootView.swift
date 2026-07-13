@@ -5,6 +5,7 @@ struct RootView: View {
     @EnvironmentObject private var appStore: AppStore
     @EnvironmentObject private var sessionStore: SessionStore
     @EnvironmentObject private var themeStore: ThemeStore
+    @EnvironmentObject private var notificationResponseAdapter: SessionNotificationResponseAdapter
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
@@ -13,6 +14,8 @@ struct RootView: View {
     @SceneStorage("root.selectedAppTab") private var selectedAppTabRawValue = AppTab.sessions.rawValue
     @SceneStorage("root.lastSessionSnapshot") private var lastSessionSnapshot = ""
     @AppStorage("runtime.keepAwakeWhileRunning") private var keepAwakeWhileRunning = false
+    @State private var notificationRouteAlertMessage: String?
+    @State private var hasCompletedInitialBootstrap = false
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -27,10 +30,20 @@ struct RootView: View {
         }
         .task {
             await sessionStore.bootstrap(restoring: decodedSessionRestoreSnapshot)
+            hasCompletedInitialBootstrap = true
         }
         .task {
             // 冷启动先并行探测真实控制面和 WebSocket，设置页无需用户手动测试即可看到连接状态。
             await appStore.preflightConnection()
+        }
+        .task(id: notificationRouteTaskID) {
+            // 冷启动恢复必须先结束，否则 restoreSessionIfPossible 可能覆盖通知刚选中的会话。
+            // bootstrap 完成前不 consume；完成状态变化会连同 pending route 重新触发此 task。
+            guard hasCompletedInitialBootstrap,
+                  let route = notificationResponseAdapter.pendingRoute else { return }
+            // 先消费再做网络操作；新点击可独立入队，不会被旧任务结束时误清。
+            notificationResponseAdapter.consume(route)
+            await handleNotificationRoute(route)
         }
         .task(id: scenePhase == .active ? sessionStore.selectedProjectID : nil) {
             guard scenePhase == .active else {
@@ -44,6 +57,10 @@ struct RootView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             applyIdleTimerPolicy()
+            if phase == .background {
+                sessionStore.suspendForBackground()
+                return
+            }
             guard phase == .active else {
                 return
             }
@@ -74,6 +91,46 @@ struct RootView: View {
         .preferredColorScheme(themeStore.preferredColorScheme)
         .tint(tokens.accent)
         .background(tokens.background.ignoresSafeArea())
+        .alert("无法打开通知", isPresented: notificationRouteAlertBinding) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(notificationRouteAlertMessage ?? "请稍后重试。")
+        }
+    }
+
+    private var notificationRouteAlertBinding: Binding<Bool> {
+        Binding(
+            get: { notificationRouteAlertMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    notificationRouteAlertMessage = nil
+                }
+            }
+        )
+    }
+
+    private var notificationRouteTaskID: NotificationRouteTaskID {
+        NotificationRouteTaskID(
+            route: notificationResponseAdapter.pendingRoute,
+            hasCompletedInitialBootstrap: hasCompletedInitialBootstrap
+        )
+    }
+
+    private func handleNotificationRoute(_ route: SessionNotificationRoute) async {
+        switch await sessionStore.openSessionFromNotification(route) {
+        case .opened:
+            selectedAppTabRawValue = AppTab.sessions.rawValue
+        case .requiresProfileSwitch(let displayName):
+            if let displayName {
+                notificationRouteAlertMessage = "此通知来自“\(displayName)”，请先在设置中切换到该连接档案。"
+            } else {
+                notificationRouteAlertMessage = "此通知来自其他 Mac，请先在设置中切换到对应连接档案。"
+            }
+        case .unavailable(let message):
+            notificationRouteAlertMessage = message
+        case .ignored:
+            break
+        }
     }
 
     private func applyIdleTimerPolicy() {
@@ -412,10 +469,12 @@ struct RootView: View {
             case .connecting:
                 // 运行中但 WebSocket 还在握手，不算健康成功态，避免误导用户以为实时链路已就绪。
                 return .neutral
-            case .disconnected, .failed:
+            case .disconnected, .failed, .terminated:
                 return .warning
             }
         } else if case .failed = sessionStore.webSocketStatus {
+            return .warning
+        } else if case .terminated = sessionStore.webSocketStatus {
             return .warning
         }
         return .neutral
@@ -428,6 +487,9 @@ struct RootView: View {
         }
         if case .failed = sessionStore.webSocketStatus {
             return "exclamationmark.triangle.fill"
+        }
+        if case .terminated = sessionStore.webSocketStatus {
+            return "lock.trianglebadge.exclamationmark"
         }
         guard session.isRunning else {
             // closed/history 是普通完成态，不在顶部常驻提示；异常和运行态才需要占用视觉注意力。
@@ -442,6 +504,8 @@ struct RootView: View {
             return "wifi.slash"
         case .failed:
             return "exclamationmark.triangle.fill"
+        case .terminated:
+            return "lock.trianglebadge.exclamationmark"
         }
     }
 
@@ -481,6 +545,11 @@ struct RootView: View {
             sessionStore.returnToSessionList()
         })
     }
+}
+
+private struct NotificationRouteTaskID: Equatable {
+    let route: SessionNotificationRoute?
+    let hasCompletedInitialBootstrap: Bool
 }
 
 private enum AppTab: String, CaseIterable, Identifiable {
@@ -1717,6 +1786,7 @@ private struct MacConnectionPanel: View {
     @State private var isSavingConnection = false
     @State private var isShowingQRCodeScanner = false
     @State private var isShowingManualFields = false
+    @State private var pendingRemovalConfirmation: ConnectionCredentialRemovalConfirmation?
     @State private var localError: String?
 
     var body: some View {
@@ -1765,10 +1835,40 @@ private struct MacConnectionPanel: View {
         }
         .onAppear(perform: loadInitialConnectionIfNeeded)
         .sheet(isPresented: $isShowingQRCodeScanner) {
-            QRCodeScannerSheet { rawValue in
+            QRCodeScannerSheet(onChooseManualConnection: {
+                isShowingManualFields = true
+            }) { rawValue in
                 Task { await applyScannedConnection(rawValue) }
             }
         }
+        .confirmationDialog(
+            pendingRemovalConfirmation?.title ?? "确认删除连接凭据？",
+            isPresented: removalConfirmationBinding,
+            titleVisibility: .visible,
+            presenting: pendingRemovalConfirmation
+        ) { confirmation in
+            Button(confirmation.confirmButtonTitle, role: .destructive) {
+                confirmForgetCurrent(confirmation)
+            }
+            .accessibilityIdentifier("root.connection.forget.confirm")
+
+            Button("取消", role: .cancel) {
+                pendingRemovalConfirmation = nil
+            }
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
+    }
+
+    private var removalConfirmationBinding: Binding<Bool> {
+        Binding(
+            get: { pendingRemovalConfirmation != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingRemovalConfirmation = nil
+                }
+            }
+        )
     }
 
     @ViewBuilder
@@ -1889,12 +1989,13 @@ private struct MacConnectionPanel: View {
 
         if appStore.isConfigured {
             Button(role: .destructive) {
-                clearPairing()
+                requestForgetCurrent()
             } label: {
                 Label("忘记", systemImage: "trash")
             }
             .buttonStyle(.bordered)
             .disabled(isSavingConnection)
+            .accessibilityIdentifier("root.connection.forget")
         }
     }
 
@@ -1977,12 +2078,13 @@ private struct MacConnectionPanel: View {
 
     private var forgetConnectionCompactButton: some View {
         Button(role: .destructive) {
-            clearPairing()
+            requestForgetCurrent()
         } label: {
             compactActionLabel("忘记", systemImage: "trash")
         }
         .buttonStyle(.bordered)
         .disabled(isSavingConnection)
+        .accessibilityIdentifier("root.connection.forget.compact")
     }
 
     @ViewBuilder
@@ -2046,14 +2148,14 @@ private struct MacConnectionPanel: View {
         isSavingConnection = true
         defer { isSavingConnection = false }
         do {
+            let wasConfigured = appStore.isConfigured
             _ = try await sessionStore.applyConnectionSettings(
                 endpoint: endpoint,
                 token: token
             )
             endpoint = appStore.endpoint
             token = appStore.token
-            localError = nil
-            await sessionStore.refreshAll(autoAttach: true)
+            _ = await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45)
         } catch {
             appStore.connectionStatus = .failed(error.localizedDescription)
             appStore.lastError = error.localizedDescription
@@ -2065,6 +2167,7 @@ private struct MacConnectionPanel: View {
         isSavingConnection = true
         defer { isSavingConnection = false }
         do {
+            let wasConfigured = appStore.isConfigured
             let raw = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let url = URL(string: raw) else {
                 throw PairingLinkError.unsupportedURL
@@ -2072,13 +2175,24 @@ private struct MacConnectionPanel: View {
             _ = try await sessionStore.applyPairingURL(url)
             endpoint = appStore.endpoint
             token = appStore.token
-            localError = nil
-            await sessionStore.refreshAll(autoAttach: true)
+            _ = await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45)
         } catch {
             appStore.connectionStatus = .failed(error.localizedDescription)
             appStore.lastError = error.localizedDescription
             localError = error.localizedDescription
         }
+    }
+
+    private func refreshCommittedConnection(maxWait: TimeInterval) async -> Bool {
+        let didLoad = await sessionStore.refreshAfterConnectionCommit(maxWait: maxWait)
+        if didLoad {
+            localError = nil
+        } else if Task.isCancelled {
+            localError = nil
+        } else {
+            localError = appStore.lastError ?? sessionStore.errorMessage
+        }
+        return didLoad
     }
 
     private func clearPairing() {
@@ -2091,6 +2205,24 @@ private struct MacConnectionPanel: View {
         } catch {
             localError = error.localizedDescription
         }
+    }
+
+    private func requestForgetCurrent() {
+        pendingRemovalConfirmation = .forgettingCurrent(appStore.activeConnectionProfile)
+    }
+
+    private func confirmForgetCurrent(_ confirmation: ConnectionCredentialRemovalConfirmation) {
+        guard case .current(let expectedProfileID) = confirmation.target else {
+            return
+        }
+        guard expectedProfileID == appStore.activeConnectionProfileID else {
+            // 弹窗展示期间连接可能被其它入口切换；旧确认不得作用于新的当前 Mac。
+            pendingRemovalConfirmation = nil
+            localError = "当前 Mac 已发生变化，请重新操作。"
+            return
+        }
+        pendingRemovalConfirmation = nil
+        clearPairing()
     }
 }
 

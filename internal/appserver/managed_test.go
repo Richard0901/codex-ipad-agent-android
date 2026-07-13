@@ -130,16 +130,18 @@ while true; do sleep 1; done
 		}
 	}()
 
-	waitFor(t, func() bool {
-		_, err := os.Stat(argLog)
-		return err == nil
-	}, "等待 fake codex 写入参数")
-	args, err := os.ReadFile(argLog)
-	if err != nil {
-		t.Fatal(err)
-	}
 	want := "app-server\n--listen\nws://127.0.0.1:4222\n--ws-auth\ncapability-token\n--ws-token-file\n" + tokenFile
-	if got := strings.TrimSpace(string(args)); got != want {
+	var got string
+	// shell 重定向会先创建文件再逐项写入参数，必须等待内容完整，不能只等待文件出现。
+	waitFor(t, func() bool {
+		args, err := os.ReadFile(argLog)
+		if err != nil {
+			return false
+		}
+		got = strings.TrimSpace(string(args))
+		return got == want
+	}, "等待 fake codex 写入完整参数")
+	if got != want {
 		t.Fatalf("fake codex 参数异常，got=%q want=%q", got, want)
 	}
 	waitFor(t, func() bool {

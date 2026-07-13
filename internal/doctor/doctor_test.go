@@ -46,6 +46,44 @@ func TestCheckerRunAndPrintDoNotLeakToken(t *testing.T) {
 	}
 }
 
+func TestCheckerMarksMissingTailscaleAsWarning(t *testing.T) {
+	binDir := t.TempDir()
+	codexPath := filepath.Join(binDir, "codex")
+	writeFakeCodexWithAppServerHelp(t, codexPath)
+	t.Setenv("PATH", binDir)
+
+	checker := newTestChecker(t, config.Config{
+		Listen:    "127.0.0.1:8787",
+		Auth:      config.AuthConfig{Token: "0123456789abcdef0123456789abcdef"},
+		Runtime:   config.RuntimeConfig{Type: "codex_app_server"},
+		AppServer: config.AppServerConfig{Transport: "ws", Managed: true, Listen: "ws://127.0.0.1:4222"},
+		Codex:     config.CodexConfig{Bin: codexPath},
+		Projects: []config.ProjectConfig{{
+			ID: "demo", Name: "Demo", Path: t.TempDir(),
+		}},
+	})
+	results := checker.Run(context.Background(), false)
+	if !results.OK {
+		t.Fatalf("仅缺少 Tailscale 时 doctor 总状态应可用：%+v", results)
+	}
+	var tailscale Check
+	for _, check := range results.Checks {
+		if check.Name == "tailscale" {
+			tailscale = check
+			break
+		}
+	}
+	if tailscale.OK || tailscale.Level != "warning" {
+		t.Fatalf("Tailscale 缺失应标记为 warning：%+v", tailscale)
+	}
+
+	var out bytes.Buffer
+	Print(&out, results)
+	if !strings.Contains(out.String(), "WARN tailscale") || strings.Contains(out.String(), "需要处理") {
+		t.Fatalf("CLI 应显示 WARN 且不列为阻断错误：%s", out.String())
+	}
+}
+
 func TestCheckerFailsOnMissingCodexButIgnoresMissingTailscale(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
@@ -66,10 +104,12 @@ func TestCheckerFailsOnMissingCodexButIgnoresMissingTailscale(t *testing.T) {
 	}
 
 	var codexOK, tailscaleOK bool
+	var codexLevel string
 	for _, check := range results.Checks {
 		switch check.Name {
 		case "codex":
 			codexOK = check.OK
+			codexLevel = check.Level
 		case "tailscale":
 			tailscaleOK = check.OK
 			if check.Message != "未检测到 Tailscale 命令，本机访问仍可使用" {
@@ -79,6 +119,9 @@ func TestCheckerFailsOnMissingCodexButIgnoresMissingTailscale(t *testing.T) {
 	}
 	if codexOK {
 		t.Fatal("codex check 应失败")
+	}
+	if codexLevel != "error" {
+		t.Fatalf("阻断性检查失败应标记 level=error，实际 %q", codexLevel)
 	}
 	if !hasCheckMessage(results, "codex", "未找到 Codex CLI") {
 		t.Fatalf("codex 缺失时应给出准确文案：%+v", results.Checks)
@@ -228,6 +271,103 @@ func TestCheckerFailsWhenCodexAppServerHelpMissingWSFlags(t *testing.T) {
 	}
 }
 
+func TestSensitiveFileCheckRequiresRegularPrivateFile(t *testing.T) {
+	t.Run("secure regular file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "secret")
+		if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		check := sensitiveFileCheck("secret", "敏感文件", path)
+		if !check.OK {
+			t.Fatalf("0600 regular file 应通过：%+v", check)
+		}
+	})
+
+	t.Run("group or other permissions", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "secret")
+		if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		check := sensitiveFileCheck("secret", "敏感文件", path)
+		if check.OK || !strings.Contains(check.Message, "权限过宽") {
+			t.Fatalf("group/other 有权限时应失败：%+v", check)
+		}
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		check := sensitiveFileCheck("secret", "敏感文件", t.TempDir())
+		if check.OK || !strings.Contains(check.Message, "regular file") {
+			t.Fatalf("目录不应被当成敏感文件：%+v", check)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target")
+		link := filepath.Join(dir, "link")
+		if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		check := sensitiveFileCheck("secret", "敏感文件", link)
+		if check.OK || !strings.Contains(check.Message, "符号链接") {
+			t.Fatalf("符号链接不应通过：%+v", check)
+		}
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		check := sensitiveFileCheck("secret", "敏感文件", filepath.Join(t.TempDir(), "missing"))
+		if check.OK || !strings.Contains(check.Message, "不存在") {
+			t.Fatalf("缺失文件应失败：%+v", check)
+		}
+	})
+}
+
+func TestCheckerChecksConfigAndManagedAppServerTokenFiles(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	tokenPath := filepath.Join(t.TempDir(), "app-server-token")
+	if err := os.WriteFile(configPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("upstream-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		AppServer: config.AppServerConfig{Transport: "ws", Managed: true, WSTokenFile: tokenPath},
+	}
+	checker := NewChecker("test", cfg, &projects.Registry{}, configPath)
+
+	configCheck := checker.configFileCheck()
+	tokenCheck := checker.appServerTokenFileCheck()
+	if !configCheck.OK || !tokenCheck.OK {
+		t.Fatalf("0600 配置与 token file 应通过：config=%+v token=%+v", configCheck, tokenCheck)
+	}
+	results := checker.Run(context.Background(), false)
+	if !hasCheck(results, "config-file") || !hasCheck(results, "app-server-token-file") {
+		t.Fatalf("doctor Run 应包含两个敏感文件检查：%+v", results.Checks)
+	}
+
+	if err := os.Chmod(tokenPath, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	tokenCheck = checker.appServerTokenFileCheck()
+	if tokenCheck.OK || !strings.Contains(tokenCheck.Message, "权限过宽") {
+		t.Fatalf("token file group 可读时应失败：%+v", tokenCheck)
+	}
+
+	cfg.AppServer.WSTokenFile = ""
+	missingTokenChecker := NewChecker("test", cfg, &projects.Registry{}, configPath)
+	missingCheck := missingTokenChecker.appServerTokenFileCheck()
+	if missingCheck.OK || !strings.Contains(missingCheck.Message, "未配置") {
+		t.Fatalf("托管 app-server 缺少 token file 应失败：%+v", missingCheck)
+	}
+}
+
 func hasCheck(results Results, name string) bool {
 	for _, check := range results.Checks {
 		if check.Name == name {
@@ -248,6 +388,13 @@ func hasCheckMessage(results Results, name, want string) bool {
 
 func newTestChecker(t *testing.T, cfg config.Config) *Checker {
 	t.Helper()
+	if cfg.AppServer.Managed && strings.TrimSpace(cfg.AppServer.WSTokenFile) == "" {
+		tokenPath := filepath.Join(t.TempDir(), "app-server-token")
+		if err := os.WriteFile(tokenPath, []byte("test-upstream-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AppServer.WSTokenFile = tokenPath
+	}
 	registry, err := projects.NewRegistry(cfg.Projects)
 	if err != nil {
 		t.Fatal(err)

@@ -3,7 +3,6 @@ package httpapi
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,10 +35,7 @@ func (r *Router) workspaceResolveHandler(w http.ResponseWriter, req *http.Reques
 	}
 
 	var payload workspaceResolveRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 

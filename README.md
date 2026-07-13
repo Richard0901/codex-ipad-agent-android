@@ -12,7 +12,7 @@ Mimi Remote 是一个原生 iPhone / iPad 控制台，用来连接用户自己 M
 - 本项目不是任何商业产品的“免费替代品”，也不以复刻其他产品的 UI、交互或宣传语作为目标。
 - `Codex`、`OpenAI` 等名称只用于说明兼容的用户自有工具链；项目不会使用官方 Logo 或容易造成混淆的品牌元素。
 - 如果后续参考其他开源项目的代码、设计或文案，必须保留许可证和归属说明，并优先做出自己的产品取舍。
-- 本项目使用 [MIT License](LICENSE)，第三方归属说明见 [NOTICE.md](NOTICE.md)。
+- 本项目使用 [MIT License](LICENSE)，第三方归属说明见 [NOTICE.md](NOTICE.md)，完整依赖许可正文见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 - 当前个人部署只让 App 访问 Mac 的 Tailscale Endpoint；Tailscale 会自动选择直连、上海 VPS Peer Relay 或官方 DERP。VPS 不再提供 nginx + SSH 反向隧道形式的应用层公网入口，配置和排障命令见 [docs/tailscale-peer-relay-ops.md](docs/tailscale-peer-relay-ops.md)。
 
 ## 方案
@@ -49,7 +49,7 @@ Codex core / 本机凭证 / 项目目录
 - `agentd` 运行在开发机本地，Codex 凭证不离开开发机。
 - iPhone / iPad 原生 App 从 `agentd` 获取项目 allowlist，只能使用配置中的项目路径。
 - `browse_roots`（默认用户 Home，不开放 `/`）只扩大“目录浏览 + 打开 workspace”的范围，不参与项目发现；browse workspace 的会话被绑定到打开时的具体目录（canonical 路径），`turn/start` 切到同根下其他目录会被 gateway 拒绝。
-- direct app-server 请求必须使用远程默认值：`model=gpt-5.5`、`effort=xhigh`、`approvalPolicy=on-request`、`danger-full-access` sandbox、默认禁网。
+- 未显式选择模型时不发送 `model`，由本机 app-server rollout 决定；远程默认保持 `effort=xhigh`、`approvalPolicy=on-request`、`danger-full-access` sandbox、默认禁网。
 - API、control-plane 和 gateway 都需要 Bearer Token。
 - 默认不接受 URL query token，避免 token 出现在浏览器历史、日志或 Referer 里。
 - MVP 不建议公网暴露，只建议本机或 Tailscale 使用。
@@ -57,8 +57,21 @@ Codex core / 本机凭证 / 项目目录
 已下线旧路径：
 
 - `/api/sessions*` REST、`/api/sessions/{id}/ws` 和内置 Web/PWA 静态站点已经删除。
-- iPhone / iPad 原生 App 只通过 `/api/projects`、`/api/workspaces/resolve`、`/api/directories/list`、`/api/app-server/config` 和 `/api/app-server/ws` 工作。
+- iPhone / iPad 原生 App 的核心链路使用 `/api/projects`、`/api/workspaces/resolve`、`/api/directories/list`、`/api/app-server/config` 和 `/api/app-server/ws`；Worktree、Git、文件预览、actions、语音和能力发现使用各自受鉴权的 `/api/*` 控制面接口。
 - 浏览器/Safari 入口不再维护；需要远程使用时请安装原生 iPhone / iPad App，并通过 Tailscale 访问 `agentd`。
+
+## 文档索引
+
+- [项目现状与关键决策](docs/project-status.md)：当前架构、能力、历史同步约束和已知风险。
+- [P0 / P1 发布推进清单](docs/p0-p1-roadmap.md)：发布门禁、当前完成度和外部准备项。
+- [安装、升级与回滚](docs/install-upgrade-rollback.md)：macOS Homebrew、Linux user-systemd、备份和应急回滚。
+- [iOS 工程说明](ios/MimiRemote/README.md)：iOS 目录、构建和验收。
+- [Tailscale 直连与上海 Peer Relay 运维](docs/tailscale-peer-relay-ops.md)：部署、验证和回滚。
+- [Codex Mac App 功能对照](docs/codex-mac-feature-parity.md)：当前能力与后续优先级。
+- [与 Litter 的能力对照](docs/litter-comparison.md)：双方优势、缺口和 Mimi Remote 的取舍边界。
+- [Codex app-server 协议支持边界](docs/codex-protocol-support.md)：当前放行方法、反向 RPC 和升级检查。
+- [生产可达性审计](docs/production-reachability-audit.md)：生产主链路和旧代码边界。
+- [隐私政策](docs/privacy-policy.md)：数据处理与网络边界。
 
 ## 实现
 
@@ -84,14 +97,28 @@ agentd up
 - 默认项目扫描目录，优先 `~/code`，否则使用执行 `setup` 时所在目录
 - 默认目录浏览授权根（`browse_roots`）：用户 Home。iPad 端可以浏览并打开 Home 下任意目录作为工作区（如 `~/finance`）；它不参与项目发现，会话也只绑定打开的那个目录。隐藏目录、`~/Library` 和常见缓存目录不会出现在浏览列表里。要收窄范围用 `agentd setup --force --browse-root <目录>`，或直接编辑配置里的 `browse_roots`
 - 默认 loopback app-server upstream：`ws://127.0.0.1:4222`
-- 启动 Homebrew 后台服务，并等待 `/healthz` 可用
+- 启动 Homebrew 后台服务，并等待带 Bearer Token 的 `/api/readyz` 通过
 - 在当前终端输出 iPad 扫码配对二维码
 
 首次运行前需要先安装并登录 Codex CLI；`agentd up` 会复用已有配置，不会重复覆盖已配对的 Token。需要排查环境时运行 `agentd doctor --fix`。
 
+#### Linux Release 包
+
+Linux 不使用 Homebrew。正式 Release 包内含 `scripts/install-linux.sh`，下载归档并校验 `checksums.txt` 后执行：
+
+```bash
+bash ./scripts/install-linux.sh install
+```
+
+脚本会安装 user-systemd service，升级时保留上一版，并在新服务未就绪时自动恢复。安装后可直接使用 `agentd up/start/restart/stop/status/logs`；CLI 会在 Linux 映射到 `systemctl --user` 和 `journalctl --user`，不需要记两套日常命令。卸载使用已保存的 `install-linux.sh uninstall`，默认完整保留配置与 Token，方便重装后继续使用。完整下载、升级、回滚和卸载命令见 [安装、升级与回滚](docs/install-upgrade-rollback.md)。
+
+历史版本如果只存在 `codex-ipad-agent/config.json`，新版在默认路径启动时会把原始配置安全复制到 `mimi-remote/config.json`，新文件使用 `0600`，旧文件保留作为回退；不会重写 auth、projects、未知字段或移动旧 upstream Token/Worktree 路径。显式 `--config` 和 `AGENTD_CONFIG` 永远不触发自动迁移。
+
 如果 Mac 已安装并登录 Tailscale，`setup` 会优先把 `agentd` 绑定到 Tailscale IP；否则会使用 `127.0.0.1:8787` 并给出真机 iPad 不可直连的警告。
 
-`agentd up` 和 `agentd start` 会调用 `brew services start mimi-remote` 后台启动服务，等待 `/healthz` 可用，然后在当前终端输出扫码连接二维码。`agentd serve` 只有在交互式前台终端运行时才会输出二维码；作为 Homebrew service 后台运行时不会把 Token 写入服务日志。`agentd up`、`agentd start` 和 `agentd pair` 会输出连接信息：
+`agentd up` 和 `agentd start` 会使用当前平台的系统服务管理器后台启动服务：macOS 调用 `brew services start mimi-remote`，Linux Release 调用 `systemctl --user start mimi-remote.service`。命令等待带鉴权的 `/api/readyz` 通过后，才在当前终端输出扫码连接二维码。`agentd serve` 只有在交互式前台终端运行时才会输出二维码；后台 service 不会把 Token 写入服务日志。`agentd up`、`agentd start` 和 `agentd pair` 会输出连接信息：
+
+停止服务统一使用 `agentd stop`；底层排障时，macOS 对应 `brew services stop mimi-remote`，Linux 对应 `systemctl --user stop mimi-remote.service`。`serve` 收到退出信号时会先停止 HTTP 新请求并最多等待 5 秒排空普通请求，再关闭会话和托管 Codex upstream；超时会强制关闭连接。托管 upstream 意外退出时，`agentd` 会主动关闭 HTTP 并以非零状态退出，交给 Homebrew `keep_alive` 或 systemd `Restart=on-failure` 恢复，避免留下端口可用但核心运行时已失效的半健康进程。
 
 ```text
 Endpoint：http://100.x.x.x:8787
@@ -101,7 +128,7 @@ Token：<随机 token>
 二维码有效期至：<UTC 时间>
 ```
 
-iPad App 首次启动后优先点“扫描 Mac 上的配对二维码”，扫描二维码会先用短期签名票据向 Mac 兑换 Endpoint/Token，再自动测试连接；测试成功后点击“保存并加载”。二维码和配对链接不包含长期 `agentd` Token，也不包含本机 app-server upstream token；手动连接用的 Token 和 `connect` 链接仍作为扫码不可用时的 fallback。二维码过期后重新运行 `agentd pair` 刷新；扫码不可用时再展开“高级手动连接”输入 Endpoint/Token。
+iPad App 首次启动后优先点“扫描 Mac 上的配对二维码”，扫描二维码会先用短期签名票据向 Mac 兑换 Endpoint/Token，再自动测试连接；测试成功后点击“保存并加载”。每张短期票据在当前 `agentd` 进程内只能成功兑换一次，并发重复兑换会被拒绝；同一秒刷新二维码也会生成独立票据。二维码和配对链接不包含长期 `agentd` Token，也不包含本机 app-server upstream token；手动连接用的 Token 和 `connect` 链接仍作为扫码不可用时的 fallback。二维码已使用、过期，或兑换成功后客户端网络中断时，重新运行 `agentd pair` 刷新；扫码不可用时再展开“高级手动连接”输入 Endpoint/Token。
 
 常用命令：
 
@@ -121,8 +148,11 @@ agentd doctor --fix
 # 查看最近日志
 agentd logs
 
-# 重启 Homebrew 后台服务
+# 重启当前平台后台服务
 agentd restart
+
+# 停止当前平台后台服务
+agentd stop
 
 # 重新生成配置和 token
 agentd setup --force
@@ -146,13 +176,25 @@ agentd doctor --check-port
 agentd doctor
 ```
 
+`agentd status` 会分别显示“进程存活”和“Codex 服务可用”。机器可读输出中的 `process_ok` 只代表 `/healthz` 可达，`service_ok` 必须在带 Token 的 `/api/readyz`、配置检查和真实 app-server WebSocket 握手全部通过后才为 `true`；Linux 安装/升级脚本使用后者作为成功门禁。
+
+`agentd logs -n <行数>` 在 macOS 和 Linux 使用相同边界：正数必须在 1 到 5000 之间，`0` 或负数回落到默认 120 行，超过上限会明确报错；追加 `-f` 只切换为持续跟随，不改变行数校验。
+
 Homebrew service 会执行：
 
 ```bash
 agentd serve
 ```
 
-`brew services start mimi-remote` 本身不会把服务 stdout 回传到当前终端，所以想要“后台运行但终端显示二维码”时请用 `agentd start`。为避免 Token 留在后台服务日志里，Homebrew service 模式不会打印二维码。`agentd serve` 默认读取当前系统的用户配置目录；也可以用 `AGENTD_CONFIG=/path/to/config.json` 覆盖。在 `app_server.transport=ws` 且 `app_server.managed=true` 时，`agentd` 会自动启动并托管本机 loopback `codex app-server`，用户不需要手动再开一个终端。
+`brew services start mimi-remote` 本身不会把服务 stdout 回传到当前终端，所以想要“后台运行但终端显示二维码”时请用 `agentd start`。为避免 Token 留在后台服务日志里，Homebrew service 模式不会打印二维码。
+
+Homebrew service 固定读取当前平台的默认 `mimi-remote/config.json`。因此 `agentd up`、`agentd start` 和 `agentd restart` 不支持 `--config` 或 `AGENTD_CONFIG` 指向其他路径；命令会在修改 brew 服务状态前直接报错，避免 CLI 检查的是一份配置、launchd 实际启动的却是另一份配置。需要使用自定义配置时走前台模式：
+
+```bash
+agentd serve --config /path/to/config.json
+```
+
+`agentd serve` 默认读取当前系统的用户配置目录，也可以用 `AGENTD_CONFIG=/path/to/config.json` 覆盖。在 `app_server.transport=ws` 且 `app_server.managed=true` 时，`agentd` 会自动启动并托管本机 loopback `codex app-server`，用户不需要手动再开一个终端。
 
 ### Claude Code 实验通道
 
@@ -208,14 +250,14 @@ go run ./scripts/ipad-ws-probe.go \
 
 ### 1.1 语音输入
 
-`/api/voice/transcribe` 默认使用 `voice.transcription_provider=auto`：
+`/api/voice/transcribe` 默认使用 `voice.transcription_provider=openai`：
 
-- 如果配置了 `AGENTD_TRANSCRIPTION_API_KEY` 或 `OPENAI_API_KEY`，走公开 OpenAI Speech-to-text API。
-- 如果没有 API Key，走本机 Codex 登录态，读取 `~/.codex/auth.json`，请求 ChatGPT 后端 `/transcribe`。Token 只在 Mac 上使用，不会返回给 iPad。
-- 如果想强制使用 Codex 登录态，设置 `AGENTD_TRANSCRIPTION_PROVIDER=codex`。
-- 如果想强制使用公开 API，设置 `AGENTD_TRANSCRIPTION_PROVIDER=openai`。
+- 配置 `AGENTD_TRANSCRIPTION_API_KEY` 或 `OPENAI_API_KEY` 后，走公开 OpenAI Speech-to-text API。
+- 没有 API Key 时返回明确的配置错误，不会自动读取 `~/.codex/auth.json`。
+- 旧配置里的 `auto` 仅作为兼容别名，同样只走公开 API。
+- 如需个人实验，可显式设置 `AGENTD_TRANSCRIPTION_PROVIDER=codex`，使用本机 Codex 登录态请求 ChatGPT `/transcribe`；这是非公开接口，可能随 Codex 升级失效，不作为开源发布的稳定能力承诺。Token 只在 Mac 上使用，不会返回给 iPad。
 
-这条默认链路适合个人开发者：先在 Mac 上完成 `codex login`，iPad 端录音上传给自己的 `agentd`，由 Mac 端转写后再把文本送进真实对话。
+iPad 端录音只上传给自己的 `agentd`，由 Mac 端完成转写，再把文本送进真实对话。
 
 ### 1.2 开发构建
 
@@ -288,7 +330,7 @@ App 首次启动会进入设置页：
 - Endpoint：例如 `http://127.0.0.1:8787` 或 `http://100.x.y.z:8787`
 - Token：`AGENTD_TOKEN`
 
-Token 使用 iOS Keychain 保存，Endpoint 使用 UserDefaults 保存。iPad App 固定走 `/api/app-server/ws` + app-server JSON-RPC 直连链路。MVP 为了支持本机/Tailscale HTTP，App 已开启 ATS HTTP 例外；Tailscale 裸 IP 属于 `100.64.0.0/10`，不能用 ATS 域名例外精确覆盖，因此 App 端会先校验 Endpoint 只允许本机、局域网、Tailscale、`.ts.net` 或 HTTPS。不要把 agentd 暴露到公网。
+App 可以保存多台 Mac，但同一时间只连接一台。每台 Mac 的 Token 使用独立 iOS Keychain account 保存，UserDefaults 只保存显示名、Endpoint、最近成功时间和当前档案 ID，不保存 Token；已有档案可在设置中重命名，这个操作只更新本地显示名称，不读取 Token，也不重建当前连接。“忘记当前 Mac”或删除其它档案会先展示目标和重新配对影响，只有二次确认后才删除 Keychain 访问码。iPad App 固定走 `/api/app-server/ws` + app-server JSON-RPC 直连链路。为了支持本机/Tailscale HTTP，App 只声明 `NSAllowsLocalNetworking` 和 `ts.net` 子域例外，不再开启全局 `NSAllowsArbitraryLoads`；应用层还会在设置提交、REST 请求和 WebSocket 握手前统一校验 Endpoint，只允许本机、局域网、Tailscale、`.ts.net` 或 HTTPS。CI 会阻止全局 ATS 放行被重新引入。不要把 agentd 暴露到公网。
 
 App 端设计边界：
 
@@ -296,11 +338,11 @@ App 端设计边界：
 - 输入框、会话索引、消息、事件归并、运行日志四块分离。
 - direct 模式下 Swift 客户端自己处理 app-server JSON-RPC request/response、notification 和 server request。
 - app-server 原始事件在 Swift 端投影为内部 `AgentEvent`，再通过 `EventReducer` 分发给 `MessageStore`/`ConversationStore` 和 `LogStore`。
-- 日志有节流和最大缓冲，输入框连续输入不会触发日志刷新。
+- 日志有节流和最大缓冲，输入框连续输入不会触发日志刷新；当前会话可导出 ANSI 清洗后的有界 UTF-8 `.log`，文件头不读取 Token、Endpoint 或 Keychain。日志正文仍可能包含用户命令、代码和工具输出，对外分享前必须自行检查。
 - iOS 不再解析 PTY 文本生成消息气泡；消息区只消费 app-server 结构化 history/event。
 - app-server runtime 不依赖终端尺寸，iOS 不再发送 resize 事件。
 
-### 1.3 iPad-only 远程开发闭环
+### 1.4 iPad-only 远程开发闭环
 
 如果只通过 iPad 和 Codex 对话，不要让 Xcode 构建命令触发交互式权限确认。推荐把当前受信项目的 Codex 会话启动为：
 
@@ -474,6 +516,31 @@ curl -X POST "http://127.0.0.1:8787/api/worktrees/branches" \
   -d '{"path":"/Users/me/code/my-repo"}'
 ```
 
+长期不用的 managed Worktree 只支持“先预览、再人工确认”清理，不启用后台自动删除。服务端固定以 30 天为候选阈值，并为每个根项目至少保留最近 3 个；旧 registry、未提交改动、未知 Git 状态、运行中会话、仓库身份不匹配和托管目录外路径都会返回 blocker：
+
+```bash
+# 第一步只生成 10 分钟有效的 dry-run 计划，不删除任何文件。
+preview="$(curl --fail --silent --show-error \
+  -X POST "http://127.0.0.1:8787/api/worktrees/cleanup" \
+  -H "Authorization: Bearer $AGENTD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}')"
+
+printf '%s\n' "$preview" | jq '{policy, candidate_paths, worktrees}'
+
+# 第二步必须回传同一计划的 plan_id 和精确候选路径；执行前还会整体重新评估。
+plan_id="$(printf '%s' "$preview" | jq -r '.plan_id')"
+path="$(printf '%s' "$preview" | jq -r '.candidate_paths[0]')"
+curl --fail --silent --show-error \
+  -X POST "http://127.0.0.1:8787/api/worktrees/cleanup" \
+  -H "Authorization: Bearer $AGENTD_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -nc --arg plan_id "$plan_id" --arg path "$path" \
+    '{dry_run:false,confirm:true,plan_id:$plan_id,paths:[$path]}')"
+```
+
+清理执行永远不使用 `git worktree remove --force`，旧 `/api/worktrees/delete` 即使收到 `force=true` 也会直接拒绝。Gateway 在 managed Worktree 上建立 `thread/start`、`thread/resume` 或 `thread/fork` 时会持有 pending-use lease，成功登记 thread、明确失败或连接关闭后才释放，因此普通删除也不能撞上尚未返回的会话创建。如果预检后仍发生外部 Git 竞争，响应会同时返回已经完成的 `deleted_paths` 和 `failed_path/error`；客户端必须刷新列表，不能把部分成功误报为“完全没有执行”。如果 checkout 已删除但 registry 文件 unlink 失败，普通删除会返回 `registry_cleanup_error`，cleanup 仍把路径计入 `deleted_paths`，prune 则在 `failed_paths` 中保留失败详情，便于稍后重试。
+
 项目级快捷动作通过配置文件里的 `actions` 定义。iPad 只能读取和执行这里声明过的 action，不能临时传入任意 shell：
 
 ```json
@@ -624,7 +691,7 @@ curl -H "Authorization: Bearer $AGENTD_TOKEN" \
 
 这里的发布指公开仓库内基于 tag 的二进制和 Homebrew 发布。
 
-发布使用 GoReleaser。Release workflow 固定使用已验证的 GoReleaser `v2.9.0`，原因是当前 Homebrew Formula + `brew services` 的发布方式需要稳定生成 `Formula/mimi-remote.rb`。仓库 tag 形如 `v0.1.0` 时，GitHub Actions 会：
+发布使用 GoReleaser。Release workflow 固定使用已验证的 GoReleaser `v2.15.3`：该版本包含发布日志敏感信息保护修复，同时仍能为当前 `brew services` 方案生成 `Formula/mimi-remote.rb`。`brews` 已被上游标记为 deprecated，后续单独迁移 Cask，不能在首个公开版本前临时改发布格式。仓库 tag 形如 `v0.1.0` 时，GitHub Actions 会：
 
 1. 运行 `go test ./...`
 2. 构建 darwin/linux 的 amd64/arm64 `agentd`
@@ -633,16 +700,20 @@ curl -H "Authorization: Bearer $AGENTD_TOKEN" \
 
 发布前置条件：
 
-- `gaixianggeng/homebrew-tap` 仓库已创建，且公开或至少对目标用户可访问。
+- GitHub 主仓库名称必须为 `gaixianggeng/mimi-remote`，且 Visibility 必须为 **Public**，与 Go module、公开文档和 Formula homepage 保持一致。
+- `gaixianggeng/homebrew-tap` 已创建，且 Visibility 必须为 **Public**；只有两个仓库都公开，才能保证用户无需 GitHub 认证即可安装 Homebrew Formula。
 - 主仓库已配置 `TAP_GITHUB_TOKEN` secret，token 对 `homebrew-tap` 有 `contents:write` 权限。
 - Release workflow、GoReleaser 配置和源码改动已经 commit 并 push；确认后再打 `v*` tag。
 - 发布机或 CI 中 `go mod tidy` 不会产生额外 diff。
+
+Release workflow 会通过 GitHub API JSON 先验证主仓库名称、主仓库与 Tap 均为 PUBLIC，以及 Tap Token 具有 push 权限；任一条件不满足都会在 GoReleaser 发布前停止。门禁不输出 Token 或 API JSON 原文；本地可用 `bash ./scripts/check-release-prerequisites.sh --self-test` 验证 PUBLIC / PRIVATE / 损坏 JSON 的判定逻辑，不会访问网络。
 
 发布前本地检查：
 
 ```bash
 go mod tidy
 go test ./...
+bash ./scripts/check-public-repo-safety.sh
 
 CGO_ENABLED=0 go build \
   -trimpath \
@@ -653,12 +724,15 @@ CGO_ENABLED=0 go build \
 /tmp/agentd version
 ```
 
-如果本机安装了 GoReleaser，可以先做快照检查：
+正式打 tag 前使用仓库唯一的本地发布入口做快照检查：
 
 ```bash
-go run github.com/goreleaser/goreleaser/v2@v2.9.0 check
-go run github.com/goreleaser/goreleaser/v2@v2.9.0 release --snapshot --clean --skip=publish
+bash ./scripts/verify-release.sh
 ```
+
+脚本会要求当前 `go env GOVERSION` 与 `go.mod` 完全一致，下载并校验官方 GoReleaser `v2.15.3` 预编译包，然后生成四个平台归档、Homebrew Formula 并执行 `check-release-artifacts.sh`。不要改用 `go run ...goreleaser@v2.15.3`：GoReleaser 自身要求更高版本 Go，`go run` 会自动切换工具链，导致最终 `agentd` 可能不是 `go.mod` 声明版本构建。只检查配置、不生成 `dist` 时使用 `bash ./scripts/verify-release.sh check`。
+
+若 GitHub Release 已创建但 Homebrew tap 推送失败，不要改 tag；修复 Token/权限后重跑原 workflow 的失败任务。GoReleaser 会保留既有发布说明并替换同 tag 的同名附件，再继续更新 tap。具体边界和核对项见 [安装、升级与回滚](docs/install-upgrade-rollback.md#github-release-成功tap-更新失败)。
 
 ### iOS TestFlight 内测
 
@@ -686,7 +760,7 @@ go run github.com/goreleaser/goreleaser/v2@v2.9.0 release --snapshot --clean --s
 - 单用户、单 Token。
 - running/history 状态来自 app-server thread store。
 - 每个 session 同时只允许一个 WebSocket 客户端。
-- 终端日志只作为辅助面板，不持久化完整历史。
+- 终端日志只作为辅助面板，不持久化完整历史；可手动导出当前内存缓存窗口用于排障。
 
 安全建议：
 
@@ -698,11 +772,10 @@ go run github.com/goreleaser/goreleaser/v2@v2.9.0 release --snapshot --clean --s
 
 后续优化：
 
-- 多 Mac 配置。
-- 持久化会话和对话消息。
-- 加 session 历史和 diff 视图。
-- 加项目级权限模式和高危命令审批。
-- 扩展 Claude Code、OpenCode、自定义 shell task。
+- Cloud / projectless thread。
+- 后台 push、真正离线时的远端通知和离线状态同步。
+- GitHub Review API 级 inline comment 与更完整的 PR 更新。
+- 扩展 Claude Code 能力，但继续保持实验通道和更低权限默认值。
 
 ## License
 

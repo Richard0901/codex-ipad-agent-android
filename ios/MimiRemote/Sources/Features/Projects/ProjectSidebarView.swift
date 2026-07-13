@@ -149,6 +149,11 @@ struct ProjectSidebarView: View {
                         )
                     }
                 }
+
+                // 远端搜索是跨项目分页，只放一个全局入口；0 项目/0 可见命中时也能继续翻页。
+                if showsSessions && sessionStore.isSessionSearchActive && sessionStore.sessionSearchHasMore {
+                    sidebarSearchLoadMoreRow(tokens: tokens)
+                }
             } header: {
                 if showsInlineHeader {
                     sidebarCompactHeaderContent(tokens: tokens, projects: projects)
@@ -162,6 +167,35 @@ struct ProjectSidebarView: View {
         .background(tokens.sidebarBackground)
     }
 
+    private func sidebarSearchLoadMoreRow(tokens: ThemeTokens) -> some View {
+        Button {
+            Task { await sessionStore.loadMoreSessionSearchResults() }
+        } label: {
+            HStack(spacing: 7) {
+                if sessionStore.isLoadingMoreSessionSearchResults {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(tokens.tertiaryText)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                        .font(themeStore.uiFont(size: 12, weight: .semibold))
+                }
+                Text(sessionStore.isLoadingMoreSessionSearchResults ? "正在继续搜索…" : "继续搜索")
+                    .lineLimit(1)
+            }
+            .font(themeStore.uiFont(size: 12, weight: .medium))
+            .foregroundStyle(tokens.tertiaryText)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 30)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(sessionStore.isLoadingMoreSessionSearchResults)
+        .accessibilityIdentifier("sidebar.sessions.search.loadMore")
+        .sidebarListRow()
+    }
+
     private func shouldShowSidebarEmptyRow(projects: [AgentProject]) -> Bool {
         guard projects.isEmpty, !sessionStore.isLoading else {
             return false
@@ -171,7 +205,9 @@ struct ProjectSidebarView: View {
 
     @ViewBuilder
     private func sidebarEmptyContent() -> some View {
-        if sessionStore.isSessionSearchActive {
+        if showsSessions && sessionStore.isSessionSearchActive && sessionStore.isSearchingRemoteSessionResults {
+            SidebarSearchLoadingMessage()
+        } else if sessionStore.isSessionSearchActive {
             SidebarEmptyMessage(
                 title: showsSessions ? "没有匹配的会话" : "没有匹配的工作区",
                 detail: "换个关键词试试。"
@@ -442,6 +478,28 @@ private extension View {
 private struct SidebarThemeRenderKey: Equatable {
     let themeVersion: Int
     let colorScheme: ColorScheme
+}
+
+private struct SidebarSearchLoadingMessage: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(tokens.tertiaryText)
+            Text("正在搜索历史会话…")
+                .font(themeStore.uiFont(size: 12, weight: .medium))
+                .foregroundStyle(tokens.tertiaryText)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("sidebar.sessions.search.initialLoading")
+    }
 }
 
 private struct SidebarEmptyMessage: View {
@@ -863,6 +921,7 @@ private struct ProjectSessionRows: View {
                 isArchived: isArchived,
                 reminder: reminder,
                 isObserving: sessionStore.isSessionObserving(session),
+                searchSnippet: sessionStore.sessionSearchSnippet(for: session.id),
                 themeRenderKey: themeRenderKey
             )
                 .equatable()
@@ -1113,6 +1172,7 @@ private struct SessionRow: View, Equatable {
     let isArchived: Bool
     let reminder: SessionReminder?
     let isObserving: Bool
+    let searchSnippet: String?
     let themeRenderKey: SidebarThemeRenderKey
 
     static func == (lhs: SessionRow, rhs: SessionRow) -> Bool {
@@ -1123,6 +1183,7 @@ private struct SessionRow: View, Equatable {
             && lhs.isArchived == rhs.isArchived
             && lhs.reminder == rhs.reminder
             && lhs.isObserving == rhs.isObserving
+            && lhs.searchSnippet == rhs.searchSnippet
             // 主题 key 让色彩/字体 token 变化能刷新，但仍避免流式状态更新重绘所有侧栏行。
             && lhs.themeRenderKey == rhs.themeRenderKey
     }
@@ -1169,6 +1230,13 @@ private struct SessionRow: View, Equatable {
                     Spacer(minLength: 0)
                 }
                 .lineLimit(1)
+            }
+
+            if let searchSnippet, !searchSnippet.isEmpty {
+                Text(searchSnippet)
+                    .font(themeStore.uiFont(size: 11, weight: .regular))
+                    .foregroundStyle(tokens.tertiaryText)
+                    .lineLimit(2)
             }
         }
         .padding(.horizontal, 10)
@@ -1319,6 +1387,9 @@ private struct WorktreeManagerSheet: View {
     @EnvironmentObject private var themeStore: ThemeStore
     let rootProjectID: String
     @State private var pendingDelete: WorktreeListItem?
+    @State private var cleanupDestination: WorktreeCleanupDestination?
+    @State private var isLoadingCleanupPreview = false
+    @State private var cleanupPreviewError: String?
 
     private var worktrees: [WorktreeListItem] {
         sessionStore.managedWorktrees(rootProjectID: rootProjectID)
@@ -1357,6 +1428,17 @@ private struct WorktreeManagerSheet: View {
                 }
                 Section {
                     Button {
+                        Task { await loadCleanupPreview() }
+                    } label: {
+                        if isLoadingCleanupPreview {
+                            Label("正在评估清理候选", systemImage: "hourglass")
+                        } else {
+                            Label("清理候选", systemImage: "sparkles")
+                        }
+                    }
+                    .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isDeletingWorktree || sessionStore.isPruningWorktrees || isLoadingCleanupPreview)
+
+                    Button {
                         Task { await sessionStore.pruneMissingManagedWorktrees() }
                     } label: {
                         if sessionStore.isPruningWorktrees {
@@ -1366,8 +1448,14 @@ private struct WorktreeManagerSheet: View {
                         }
                     }
                     .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isDeletingWorktree || sessionStore.isPruningWorktrees)
+
+                    if let cleanupPreviewError {
+                        Label(cleanupPreviewError, systemImage: "exclamationmark.triangle.fill")
+                            .font(themeStore.uiFont(size: 13, weight: .medium))
+                            .foregroundStyle(.red)
+                    }
                 } footer: {
-                    Text("只移除已经不存在的 agentd Worktree registry 登记，不删除任何仍存在的 checkout。")
+                    Text("“清理候选”会先按服务端固定保留策略预览，只有无 blocker 的候选可确认删除；“清理丢失登记”只移除不存在的 registry 记录。")
                 }
             }
             .listStyle(.insetGrouped)
@@ -1408,6 +1496,12 @@ private struct WorktreeManagerSheet: View {
         .task {
             await sessionStore.refreshManagedWorktrees()
         }
+        .sheet(item: $cleanupDestination) { destination in
+            WorktreeCleanupPreviewSheet(
+                preview: destination.preview,
+                rootProjectID: rootProjectID
+            )
+        }
         .confirmationDialog("删除 Git Worktree？", isPresented: Binding(
             get: { pendingDelete != nil },
             set: { isPresented in
@@ -1422,18 +1516,312 @@ private struct WorktreeManagerSheet: View {
                     pendingDelete = nil
                     Task { await sessionStore.deleteManagedWorktree(target, force: false) }
                 }
-                Button("强制删除并丢弃改动", role: .destructive) {
-                    let target = item
-                    pendingDelete = nil
-                    Task { await sessionStore.deleteManagedWorktree(target, force: true) }
-                }
             }
             Button("取消", role: .cancel) {
                 pendingDelete = nil
             }
         } message: {
-            Text("普通删除会保留 Git 对未提交改动的保护；强制删除会丢弃该 Git Worktree 内的未提交改动。")
+            Text("删除仍会由 agentd 检查运行中会话和 Git 状态；存在未提交改动时不会强制绕过保护。")
         }
+    }
+
+    @MainActor
+    private func loadCleanupPreview() async {
+        guard !isLoadingCleanupPreview else {
+            return
+        }
+        isLoadingCleanupPreview = true
+        cleanupPreviewError = nil
+        defer { isLoadingCleanupPreview = false }
+        do {
+            let preview = try await sessionStore.previewManagedWorktreeCleanup()
+            cleanupDestination = WorktreeCleanupDestination(preview: preview)
+        } catch {
+            cleanupPreviewError = userFacingCleanupError(error)
+        }
+    }
+
+    private func userFacingCleanupError(_ error: Error) -> String {
+        if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
+            return "当前 agentd 版本还不支持清理预览，请先升级 Mac 端 agentd。"
+        }
+        return error.localizedDescription
+    }
+}
+
+private struct WorktreeCleanupDestination: Identifiable {
+    let id = UUID()
+    let preview: WorktreeCleanupResponse
+}
+
+private struct WorktreeCleanupPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
+
+    @State private var preview: WorktreeCleanupResponse
+    @State private var selectedPaths: Set<String>
+    @State private var isExecuting = false
+    @State private var isShowingDestructiveConfirmation = false
+    @State private var executionError: String?
+    let rootProjectID: String
+
+    init(preview: WorktreeCleanupResponse, rootProjectID: String) {
+        self.rootProjectID = rootProjectID
+        _preview = State(initialValue: preview)
+        let candidates = Set(preview.candidatePaths)
+        _selectedPaths = State(initialValue: Set(preview.worktrees.compactMap { item in
+            let root = item.workspace.rootProjectID ?? item.worktree.rootProjectID
+            guard root == rootProjectID,
+                  item.eligible,
+                  candidates.contains(item.worktree.path)
+            else {
+                return nil
+            }
+            return item.worktree.path
+        }))
+    }
+
+    private var projectItems: [WorktreeCleanupItem] {
+        preview.worktrees.filter { item in
+            (item.workspace.rootProjectID ?? item.worktree.rootProjectID) == rootProjectID
+        }
+    }
+
+    private var candidatePaths: Set<String> {
+        Set(preview.candidatePaths)
+    }
+
+    private var isPlanExecutable: Bool {
+        // 只有 dry-run 响应里的 plan_id 可以执行一次。执行响应即使还带着旧候选，
+        // 也只能用于展示结果，不能再次选择并提交已经消费的计划。
+        preview.dryRun && !preview.hasPartialFailure
+    }
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        NavigationStack {
+            List {
+                Section("保留策略") {
+                    LabeledContent("自动删除", value: preview.policy.autoDelete ? "开启" : "关闭")
+                    LabeledContent("候选时间", value: "超过 \(preview.policy.candidateAfterDays) 天未使用")
+                    LabeledContent("每个项目至少保留", value: "最近 \(preview.policy.keepLatestPerProject) 个")
+                    LabeledContent("评估时间", value: preview.generatedAt.formatted(date: .abbreviated, time: .shortened))
+                }
+
+                Section {
+                    if projectItems.isEmpty {
+                        ContentUnavailableView(
+                            "没有可评估的 Worktree",
+                            systemImage: "checkmark.shield",
+                            description: Text("当前项目没有进入清理策略评估的已管理 Worktree。")
+                        )
+                    } else {
+                        ForEach(projectItems) { item in
+                            WorktreeCleanupPreviewRow(
+                                item: item,
+                                isCandidate: isPlanExecutable && candidatePaths.contains(item.worktree.path),
+                                isSelected: selectedPaths.contains(item.worktree.path),
+                                isBusy: isExecuting
+                            ) {
+                                toggleSelection(item)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("候选与保护原因")
+                } footer: {
+                    Text("只有服务端 dry-run 同时标记为 eligible 的路径可以选择；有 blocker 的 Worktree 不会被提交到删除接口。")
+                }
+
+                if let executionError {
+                    Section("清理结果") {
+                        Label(executionError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                Section {
+                    Button(role: .destructive) {
+                        isShowingDestructiveConfirmation = true
+                    } label: {
+                        if isExecuting {
+                            Label("正在重新检查并清理", systemImage: "hourglass")
+                        } else {
+                            Label("删除选中的 \(selectedPaths.count) 个 Worktree", systemImage: "trash")
+                        }
+                    }
+                    .disabled(selectedPaths.isEmpty || isExecuting)
+                } footer: {
+                    Text("执行时 agentd 会重新计算 blocker；策略变化、运行中会话、未提交改动或未知 Git 状态都会阻止删除。")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(tokens.background)
+            .navigationTitle("清理 Worktree")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                        .disabled(isExecuting)
+                }
+            }
+        }
+        .confirmationDialog(
+            "确认删除 \(selectedPaths.count) 个 Worktree？",
+            isPresented: $isShowingDestructiveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("确认删除", role: .destructive) {
+                Task { await executeCleanup() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会删除对应 Git checkout。客户端不会发送 force；agentd 仍会对当前候选和所有 blocker 做最终检查。")
+        }
+    }
+
+    private func toggleSelection(_ item: WorktreeCleanupItem) {
+        guard isPlanExecutable,
+              item.eligible,
+              candidatePaths.contains(item.worktree.path),
+              !isExecuting
+        else {
+            return
+        }
+        if selectedPaths.contains(item.worktree.path) {
+            selectedPaths.remove(item.worktree.path)
+        } else {
+            selectedPaths.insert(item.worktree.path)
+        }
+        executionError = nil
+    }
+
+    @MainActor
+    private func executeCleanup() async {
+        guard !isExecuting else {
+            return
+        }
+        isExecuting = true
+        executionError = nil
+        defer { isExecuting = false }
+        do {
+            let response = try await sessionStore.cleanupManagedWorktrees(paths: selectedPaths, preview: preview)
+            if let partialFailureMessage = response.partialFailureMessage {
+                // plan_id 在执行开始后即失效；部分成功时保留结果页，但清空选择，
+                // 要求用户关闭后重新 dry-run，不能误用旧计划重试剩余路径。
+                preview = response
+                selectedPaths = []
+                executionError = partialFailureMessage
+                return
+            }
+            guard !response.deletedPaths.isEmpty else {
+                preview = response
+                selectedPaths = []
+                executionError = "agentd 重新检查后没有删除任何 Worktree，请关闭后重新生成预览。"
+                return
+            }
+            dismiss()
+        } catch {
+            executionError = error.localizedDescription
+        }
+    }
+}
+
+private struct WorktreeCleanupPreviewRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var themeStore: ThemeStore
+    let item: WorktreeCleanupItem
+    let isCandidate: Bool
+    let isSelected: Bool
+    let isBusy: Bool
+    let onToggle: () -> Void
+
+    private var isSelectable: Bool {
+        item.eligible && isCandidate
+    }
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        Button(action: onToggle) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: isSelectable ? (isSelected ? "checkmark.circle.fill" : "circle") : "lock.shield.fill")
+                    .foregroundStyle(isSelectable ? tokens.accent : tokens.secondaryText)
+                    .font(themeStore.uiFont(size: 19, weight: .semibold))
+                    .frame(width: 22)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(item.workspace.name)
+                        .font(themeStore.uiFont(size: 15, weight: .semibold))
+                        .foregroundStyle(tokens.primaryText)
+                    Text(item.worktree.path)
+                        .font(themeStore.uiFont(size: 11))
+                        .foregroundStyle(tokens.tertiaryText)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                    cleanupDates
+                    if isSelectable {
+                        Label("符合清理策略", systemImage: "checkmark.shield")
+                            .font(themeStore.uiFont(size: 12, weight: .medium))
+                            .foregroundStyle(tokens.success)
+                    } else {
+                        blockers
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isSelectable || isBusy)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var cleanupDates: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let createdAt = item.createdAt {
+                Text("创建：\(createdAt.formatted(date: .abbreviated, time: .omitted))")
+            }
+            if let lastUsedAt = item.lastUsedAt {
+                Text("最近使用：\(lastUsedAt.formatted(date: .abbreviated, time: .shortened))")
+            }
+        }
+        .font(themeStore.uiFont(size: 11))
+        .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private var blockers: some View {
+        if item.blockers.isEmpty {
+            Label("服务端未判定为可清理", systemImage: "shield")
+                .font(themeStore.uiFont(size: 12, weight: .medium))
+                .foregroundStyle(.orange)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(item.blockers) { blocker in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(blocker.message)
+                            .font(themeStore.uiFont(size: 12, weight: .medium))
+                            .foregroundStyle(.orange)
+                        Text(blocker.code)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var accessibilityLabel: String {
+        if isSelectable {
+            return "\(item.workspace.name)，可清理，\(isSelected ? "已选择" : "未选择")"
+        }
+        let reasons = item.blockers.map(\.message).joined(separator: "，")
+        return "\(item.workspace.name)，不可清理，\(reasons)"
     }
 }
 
@@ -1681,7 +2069,9 @@ private struct WorktreeManagerRow: View {
 
     private var worktreeStatusItems: [String] {
         var items: [String] = []
-        if item.worktree.dirty {
+        if item.worktree.gitState == "unknown" {
+            items.append("Git 状态未知")
+        } else if item.worktree.dirty || item.worktree.gitState == "dirty" {
             items.append("未提交")
         }
         if item.worktree.ahead > 0 {

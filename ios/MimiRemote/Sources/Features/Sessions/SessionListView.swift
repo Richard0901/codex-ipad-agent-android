@@ -54,17 +54,31 @@ struct SessionListView: View {
 
         List {
             if visibleSessions.isEmpty && !sessionStore.isLoading {
-                ContentUnavailableView {
-                    Label("没有匹配的会话", systemImage: "bubble.left.and.bubble.right")
-                } description: {
-                    Text(sessionStore.isSessionSearchActive ? "换个关键词或筛选条件试试。" : "从一个工作区创建新会话后会显示在这里。")
-                } actions: {
-                    Button("新会话", action: presentNewSession)
-                        .buttonStyle(.borderedProminent)
-                        .tint(tokens.primaryAction)
+                if sessionStore.isSessionSearchActive && sessionStore.isSearchingRemoteSessionResults {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("正在搜索历史会话…")
+                            .font(themeStore.uiFont(size: 13, weight: .medium))
+                            .foregroundStyle(tokens.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                    .accessibilityIdentifier("sessions.search.initialLoading")
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                } else {
+                    ContentUnavailableView {
+                        Label("没有匹配的会话", systemImage: "bubble.left.and.bubble.right")
+                    } description: {
+                        Text(sessionStore.isSessionSearchActive ? "换个关键词或筛选条件试试。" : "从一个工作区创建新会话后会显示在这里。")
+                    } actions: {
+                        Button("新会话", action: presentNewSession)
+                            .buttonStyle(.borderedProminent)
+                            .tint(tokens.primaryAction)
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
             } else {
                 ForEach(visibleSessions) { session in
                     SessionIndexRow(
@@ -75,7 +89,8 @@ struct SessionListView: View {
                         isArchived: sessionStore.isSessionArchived(session.id),
                         reminder: sessionStore.sessionReminder(for: session.id),
                         isObserving: sessionStore.isSessionObserving(session),
-                        style: .library
+                        style: .library,
+                        searchSnippet: sessionStore.sessionSearchSnippet(for: session.id)
                     )
                     .contentShape(Rectangle())
                     .onTapGesture { select(session) }
@@ -84,6 +99,33 @@ struct SessionListView: View {
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                 }
+            }
+
+            // Gateway 过滤后当前页可能没有可见结果但仍给出 nextCursor，入口必须独立于空态展示。
+            if sessionStore.isSessionSearchActive && sessionStore.sessionSearchHasMore {
+                Button {
+                    Task { await sessionStore.loadMoreSessionSearchResults() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if sessionStore.isLoadingMoreSessionSearchResults {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "magnifyingglass")
+                        }
+                        Text(sessionStore.isLoadingMoreSessionSearchResults ? "正在继续搜索…" : "继续搜索")
+                    }
+                    .font(themeStore.uiFont(size: 13, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(tokens.secondaryText)
+                .disabled(sessionStore.isLoadingMoreSessionSearchResults)
+                .accessibilityIdentifier("sessions.search.loadMore")
+                .listRowInsets(.init(top: 4, leading: 20, bottom: 8, trailing: 20))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             }
         }
         .listStyle(.plain)
@@ -223,6 +265,7 @@ struct SessionIndexRow: View {
     let reminder: SessionReminder?
     let isObserving: Bool
     let style: SessionIndexRowStyle
+    var searchSnippet: String? = nil
 
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -281,6 +324,15 @@ struct SessionIndexRow: View {
             .font(themeStore.uiFont(size: style == .sidebar ? 10 : 12, weight: .regular))
             .foregroundStyle(tokens.tertiaryText)
             .lineLimit(1)
+
+            if style == .library,
+               let searchSnippet,
+               !searchSnippet.isEmpty {
+                Text(searchSnippet)
+                    .font(themeStore.uiFont(size: 12, weight: .regular))
+                    .foregroundStyle(tokens.secondaryText)
+                    .lineLimit(2)
+            }
         }
         .padding(.horizontal, style == .sidebar ? 10 : 14)
         .padding(.vertical, style == .sidebar ? 6 : 12)
@@ -344,6 +396,8 @@ struct SessionIndexRow: View {
 
 private struct SessionRowActions: ViewModifier {
     @EnvironmentObject private var sessionStore: SessionStore
+    @State private var renameTarget: SessionRenameTarget?
+    @State private var reviewPresentation: SessionReviewPresentation?
     let session: AgentSession
 
     func body(content: Content) -> some View {
@@ -364,6 +418,30 @@ private struct SessionRowActions: ViewModifier {
                 sessionStore.toggleSessionPinned(session)
             } label: {
                 Label(isPinned ? "取消置顶" : "置顶", systemImage: isPinned ? "pin.slash" : "pin")
+            }
+
+            if sessionStore.supportsCodexThreadManagement(session) {
+                Divider()
+
+                Button {
+                    renameTarget = SessionRenameTarget(session: session)
+                } label: {
+                    Label("重命名", systemImage: "pencil")
+                }
+
+                Button {
+                    Task { await sessionStore.compactSessionContext(session) }
+                } label: {
+                    Label("压缩上下文", systemImage: "arrow.down.right.and.arrow.up.left")
+                }
+                .disabled(session.isRunning)
+
+                Button {
+                    reviewPresentation = SessionReviewPresentation(session: session)
+                } label: {
+                    Label("开始代码审查", systemImage: "checklist.checked")
+                }
+                .disabled(session.isRunning)
             }
 
             Button {
@@ -388,6 +466,244 @@ private struct SessionRowActions: ViewModifier {
                 Task { await sessionStore.toggleSessionArchivedRemote(session) }
             } label: {
                 Label(isArchived ? "取消归档" : "归档", systemImage: isArchived ? "archivebox.fill" : "archivebox")
+            }
+        }
+        .sheet(item: $renameTarget) { target in
+            SessionRenameSheet(session: target.session)
+        }
+        .sheet(item: $reviewPresentation) { presentation in
+            SessionReviewSheet(session: presentation.session)
+        }
+    }
+}
+
+private struct SessionRenameTarget: Identifiable {
+    let session: AgentSession
+    var id: SessionID { session.id }
+}
+
+private struct SessionReviewPresentation: Identifiable {
+    let session: AgentSession
+    var id: SessionID { session.id }
+}
+
+private enum SessionReviewScope: String, CaseIterable, Identifiable {
+    case uncommittedChanges
+    case baseBranch
+    case commit
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .uncommittedChanges: return "未提交改动"
+        case .baseBranch: return "相对基准分支"
+        case .commit: return "指定提交"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .uncommittedChanges: return "pencil.and.list.clipboard"
+        case .baseBranch: return "arrow.triangle.branch"
+        case .commit: return "point.topleft.down.to.point.bottomright.curvepath"
+        }
+    }
+}
+
+private struct SessionReviewSheet: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+
+    let session: AgentSession
+    @State private var scope: SessionReviewScope = .uncommittedChanges
+    @State private var baseBranch = ""
+    @State private var commitSHA = ""
+    @State private var isSubmitting = false
+    @State private var submissionError: String?
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        NavigationStack {
+            Form {
+                Section("审查目标") {
+                    Picker("目标类型", selection: $scope) {
+                        ForEach(SessionReviewScope.allCases) { option in
+                            Label(option.title, systemImage: option.systemImage)
+                                .tag(option)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                }
+
+                switch scope {
+                case .uncommittedChanges:
+                    Section {
+                        Label("审查当前工作区尚未提交的全部改动", systemImage: "info.circle")
+                            .foregroundStyle(tokens.secondaryText)
+                    }
+                case .baseBranch:
+                    Section {
+                        TextField("例如 main", text: $baseBranch)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .submitLabel(.go)
+                            .onSubmit(submit)
+                            .accessibilityIdentifier("sessions.review.baseBranch")
+                    } header: {
+                        Text("基准分支")
+                    } footer: {
+                        Text(normalizedBaseBranch.isEmpty ? "请输入非空分支名。" : "将审查当前分支相对 \(normalizedBaseBranch) 的差异。")
+                            .foregroundStyle(normalizedBaseBranch.isEmpty ? tokens.warning : tokens.tertiaryText)
+                    }
+                case .commit:
+                    Section {
+                        TextField("Commit SHA", text: $commitSHA)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .submitLabel(.go)
+                            .onSubmit(submit)
+                            .accessibilityIdentifier("sessions.review.commit")
+                    } header: {
+                        Text("提交")
+                    } footer: {
+                        Text(normalizedCommitSHA.isEmpty ? "请输入非空 Commit SHA。" : "将只审查提交 \(normalizedCommitSHA)。")
+                            .foregroundStyle(normalizedCommitSHA.isEmpty ? tokens.warning : tokens.tertiaryText)
+                    }
+                }
+
+                Section {
+                    Label("Review 始终在当前会话内执行，不会创建 detached 会话。", systemImage: "lock.shield")
+                        .foregroundStyle(tokens.tertiaryText)
+                }
+
+                if let submissionError {
+                    Section {
+                        Label(submissionError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(tokens.warning)
+                    }
+                }
+            }
+            .font(themeStore.uiFont(.body))
+            .scrollContentBackground(.hidden)
+            .background(tokens.background)
+            .navigationTitle("开始代码审查")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                        .disabled(isSubmitting)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(action: submit) {
+                        if isSubmitting {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("开始")
+                        }
+                    }
+                    .disabled(isSubmitting || session.isRunning || normalizedTarget == nil)
+                    .accessibilityIdentifier("sessions.review.submit")
+                }
+            }
+        }
+        .tint(tokens.primaryAction)
+        .interactiveDismissDisabled(isSubmitting)
+        .presentationDetents([.medium, .large])
+    }
+
+    private var normalizedBaseBranch: String {
+        baseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var normalizedCommitSHA: String {
+        commitSHA.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var normalizedTarget: CodexAppServerReviewTarget? {
+        switch scope {
+        case .uncommittedChanges:
+            return .uncommittedChanges
+        case .baseBranch:
+            guard !normalizedBaseBranch.isEmpty else { return nil }
+            return .baseBranch(normalizedBaseBranch)
+        case .commit:
+            guard !normalizedCommitSHA.isEmpty else { return nil }
+            return .commit(sha: normalizedCommitSHA)
+        }
+    }
+
+    private func submit() {
+        guard !isSubmitting, !session.isRunning, let target = normalizedTarget else { return }
+        isSubmitting = true
+        submissionError = nil
+        Task {
+            let didStart = await sessionStore.startReview(session, target: target)
+            isSubmitting = false
+            if didStart {
+                dismiss()
+            } else {
+                submissionError = sessionStore.statusMessage ?? "Review 启动失败，请稍后重试。"
+            }
+        }
+    }
+}
+
+private struct SessionRenameSheet: View {
+    @EnvironmentObject private var sessionStore: SessionStore
+    @Environment(\.dismiss) private var dismiss
+
+    let session: AgentSession
+    @State private var name: String
+    @State private var isSaving = false
+
+    init(session: AgentSession) {
+        self.session = session
+        _name = State(initialValue: session.title)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("会话名称") {
+                    TextField("输入名称", text: $name)
+                        .textInputAutocapitalization(.sentences)
+                        .submitLabel(.done)
+                        .onSubmit(save)
+                }
+            }
+            .navigationTitle("重命名会话")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                        .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSaving ? "保存中…" : "保存", action: save)
+                        .disabled(isSaving || normalizedName.isEmpty || normalizedName == session.title)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private var normalizedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func save() {
+        guard !isSaving, !normalizedName.isEmpty else { return }
+        isSaving = true
+        Task {
+            let didRename = await sessionStore.renameSession(session, name: normalizedName)
+            isSaving = false
+            if didRename {
+                dismiss()
             }
         }
     }

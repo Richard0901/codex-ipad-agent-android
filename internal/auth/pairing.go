@@ -19,9 +19,11 @@ type PairingTicket struct {
 
 func NewPairingTicket(endpoint string, secret string, issuedAt time.Time, expiresAt time.Time) PairingTicket {
 	ticket := PairingTicket{
-		Endpoint:  strings.TrimSpace(endpoint),
-		IssuedAt:  issuedAt.UTC().Format(time.RFC3339),
-		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+		Endpoint: strings.TrimSpace(endpoint),
+		// 保留亚秒精度，避免用户连续刷新二维码时在同一秒得到完全相同、无法独立消费的票据。
+		// time.Parse(RFC3339Nano) 仍兼容旧版本生成的不含小数秒 RFC3339 时间。
+		IssuedAt:  issuedAt.UTC().Format(time.RFC3339Nano),
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339Nano),
 	}
 	ticket.Signature = SignPairingTicket(secret, ticket.Endpoint, ticket.IssuedAt, ticket.ExpiresAt)
 	return ticket
@@ -49,14 +51,14 @@ func ValidatePairingTicket(secret string, ticket PairingTicket, now time.Time) e
 	if endpoint == "" || issuedAt == "" || expiresAt == "" || signature == "" {
 		return fmt.Errorf("配对票据缺少必要字段")
 	}
-	expiry, err := time.Parse(time.RFC3339, expiresAt)
+	expiry, err := time.Parse(time.RFC3339Nano, expiresAt)
 	if err != nil {
 		return fmt.Errorf("配对票据 expires_at 无效")
 	}
 	if !now.Before(expiry) {
 		return fmt.Errorf("配对二维码已过期")
 	}
-	issued, err := time.Parse(time.RFC3339, issuedAt)
+	issued, err := time.Parse(time.RFC3339Nano, issuedAt)
 	if err != nil {
 		return fmt.Errorf("配对票据 issued_at 无效")
 	}

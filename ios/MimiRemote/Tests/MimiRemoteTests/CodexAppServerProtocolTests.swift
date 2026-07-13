@@ -2,6 +2,141 @@ import XCTest
 @testable import MimiRemote
 
 final class CodexAppServerProtocolTests: XCTestCase {
+    func testWorktreeDeleteResponseDecodesLegacyAndRegistryCleanupWarning() throws {
+        let legacyJSON = #"{"deleted_path":"/tmp/worktree-a","worktrees":[]}"#
+        let legacy = try AgentAPIClient.decoder.decode(WorktreeDeleteResponse.self, from: Data(legacyJSON.utf8))
+        XCTAssertEqual(legacy.deletedPath, "/tmp/worktree-a")
+        XCTAssertNil(legacy.registryCleanupError)
+
+        let warningJSON = #"{"deleted_path":"/tmp/worktree-a","worktrees":[],"registry_cleanup_error":"registry 文件只读"}"#
+        let warning = try AgentAPIClient.decoder.decode(WorktreeDeleteResponse.self, from: Data(warningJSON.utf8))
+        XCTAssertEqual(warning.registryCleanupError, "registry 文件只读")
+    }
+
+    func testWorktreePruneResponseDecodesLegacyAndPartialFailures() throws {
+        let legacyJSON = #"{"pruned_paths":["/tmp/worktree-a"],"worktrees":[]}"#
+        let legacy = try AgentAPIClient.decoder.decode(WorktreePruneResponse.self, from: Data(legacyJSON.utf8))
+        XCTAssertEqual(legacy.prunedPaths, ["/tmp/worktree-a"])
+        XCTAssertNil(legacy.failedPaths)
+
+        let partialJSON = #"{"pruned_paths":["/tmp/worktree-a"],"worktrees":[],"failed_paths":{"/tmp/worktree-b":"permission denied"}}"#
+        let partial = try AgentAPIClient.decoder.decode(WorktreePruneResponse.self, from: Data(partialJSON.utf8))
+        XCTAssertEqual(partial.failedPaths, ["/tmp/worktree-b": "permission denied"])
+    }
+
+    func testWorktreeCleanupResponseDecodesPolicyCandidatesAndBlockers() throws {
+        let json = #"""
+        {
+          "dry_run": true,
+          "plan_id": "wtc_preview_1",
+          "policy": {
+            "auto_delete": false,
+            "candidate_after_days": 30,
+            "keep_latest_per_project": 3
+          },
+          "generated_at": "2027-01-15T08:30:00Z",
+          "worktrees": [
+            {
+              "workspace": {
+                "id": "ws_cleanup",
+                "name": "old-review",
+                "path": "/tmp/mimi-worktrees/proj/old-review",
+                "root_project_id": "proj",
+                "root_project_name": "Project",
+                "root_project_path": "/tmp/proj"
+              },
+              "worktree": {
+                "path": "/tmp/mimi-worktrees/proj/old-review",
+                "repository_path": "/tmp/proj",
+                "base": "main",
+                "branch": "mimi/old-review",
+                "git_state": "dirty",
+                "dirty": true,
+                "root_project_id": "proj",
+                "root_project_name": "Project",
+                "root_project_path": "/tmp/proj"
+              },
+              "created_at": "2026-10-01T08:00:00Z",
+              "last_used_at": "2026-10-10T09:00:00Z",
+              "eligible": false,
+              "blockers": [
+                "git_dirty"
+              ]
+            }
+          ],
+          "candidate_paths": [],
+          "deleted_paths": []
+        }
+        """#
+
+        let response = try AgentAPIClient.decoder.decode(WorktreeCleanupResponse.self, from: Data(json.utf8))
+
+        XCTAssertFalse(response.policy.autoDelete)
+        XCTAssertTrue(response.dryRun)
+        XCTAssertEqual(response.planID, "wtc_preview_1")
+        XCTAssertEqual(response.policy.candidateAfterDays, 30)
+        XCTAssertEqual(response.policy.keepLatestPerProject, 3)
+        XCTAssertEqual(response.worktrees.first?.worktree.gitState, "dirty")
+        XCTAssertEqual(response.worktrees.first?.blockers, [
+            WorktreeCleanupBlocker(rawValue: "git_dirty")
+        ])
+        XCTAssertEqual(response.worktrees.first?.blockers.first?.message, "包含未提交改动")
+        XCTAssertEqual(WorktreeCleanupBlocker(rawValue: "future_guard").message, "agentd 返回了新的保护原因")
+        XCTAssertTrue(response.candidatePaths.isEmpty)
+        XCTAssertTrue(response.deletedPaths.isEmpty)
+        XCTAssertNil(response.failedPath)
+        XCTAssertNil(response.error)
+        XCTAssertFalse(response.hasPartialFailure)
+    }
+
+    func testWorktreeCleanupResponseDecodesStructuredPartialFailure() throws {
+        let json = #"""
+        {
+          "dry_run": false,
+          "plan_id": "wtc_consumed",
+          "policy": {
+            "auto_delete": false,
+            "candidate_after_days": 30,
+            "keep_latest_per_project": 3
+          },
+          "generated_at": "2027-01-15T08:30:00Z",
+          "worktrees": [],
+          "candidate_paths": [],
+          "deleted_paths": ["/tmp/worktree-a"],
+          "failed_path": "/tmp/worktree-b",
+          "error": "git worktree remove 失败"
+        }
+        """#
+
+        let response = try AgentAPIClient.decoder.decode(WorktreeCleanupResponse.self, from: Data(json.utf8))
+
+        XCTAssertEqual(response.deletedPaths, ["/tmp/worktree-a"])
+        XCTAssertEqual(response.failedPath, "/tmp/worktree-b")
+        XCTAssertEqual(response.error, "git worktree remove 失败")
+        XCTAssertTrue(response.hasPartialFailure)
+        XCTAssertEqual(
+            response.partialFailureMessage,
+            "已删除 1 个 Worktree，但在 /tmp/worktree-b 失败：git worktree remove 失败。请重新生成清理预览。"
+        )
+    }
+
+    func testWorktreeCleanupRequestKeepsPreviewEmptyAndExecutionExplicit() throws {
+        let previewData = try JSONEncoder().encode(WorktreeCleanupRequest.preview)
+        let preview = try XCTUnwrap(JSONSerialization.jsonObject(with: previewData) as? [String: Any])
+        XCTAssertTrue(preview.isEmpty, "dry_run 缺省应由服务端解释为 true")
+
+        let executionData = try JSONEncoder().encode(WorktreeCleanupRequest.confirmed(
+            paths: ["/tmp/worktree-a"],
+            planID: "wtc_preview_1"
+        ))
+        let execution = try XCTUnwrap(JSONSerialization.jsonObject(with: executionData) as? [String: Any])
+        XCTAssertEqual(execution["dry_run"] as? Bool, false)
+        XCTAssertEqual(execution["confirm"] as? Bool, true)
+        XCTAssertEqual(execution["paths"] as? [String], ["/tmp/worktree-a"])
+        XCTAssertEqual(execution["plan_id"] as? String, "wtc_preview_1")
+        XCTAssertNil(execution["force"])
+    }
+
     func testWireMessageClassifiesResponseNotificationAndServerRequest() throws {
         let decoder = JSONDecoder()
 
@@ -96,6 +231,23 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(params["sortDirection"]?.stringValue, "desc")
         XCTAssertEqual(params["archived"]?.boolValue, false)
         XCTAssertEqual(params["useStateDbOnly"]?.boolValue, true)
+    }
+
+    func testThreadSearchBuilderUsesCodexSchemaWithoutCWD() throws {
+        let project = AgentProject(id: "repo", name: "Repo", path: "/Users/me/repo")
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: [project])
+
+        let request = try builder.threadSearch(query: "  关键实现  ", limit: 50, cursor: "next-search")
+        let params = try XCTUnwrap(request.params?.objectValue)
+
+        XCTAssertEqual(request.method, "thread/search")
+        XCTAssertEqual(params["searchTerm"]?.stringValue, "关键实现")
+        XCTAssertEqual(params["limit"]?.intValue, 50)
+        XCTAssertEqual(params["cursor"]?.stringValue, "next-search")
+        XCTAssertEqual(params["sortKey"]?.stringValue, "updated_at")
+        XCTAssertEqual(params["sortDirection"]?.stringValue, "desc")
+        XCTAssertEqual(params["archived"]?.boolValue, false)
+        XCTAssertNil(params["cwd"], "thread/search 不应由 iOS 注入任意 cwd")
     }
 
     func testThreadResumeBuilderRequestsBoundedRecentTurns() throws {
@@ -541,5 +693,351 @@ final class CodexAppServerProtocolTests: XCTestCase {
             return XCTFail("expected goal cleared")
         }
         XCTAssertEqual(clearMetadata.sessionID, "thread-1")
+    }
+
+    func testCurrentThreadAndReviewRequestBuildersUseOfficialMethodNames() throws {
+        let builder = CodexAppServerRequestBuilder(allowlistedProjects: [])
+
+        let setName = try builder.threadSetName(threadID: "thread-1", name: "  发布前收尾  ")
+        XCTAssertEqual(setName.method, "thread/name/set")
+        XCTAssertEqual(setName.params?["threadId"]?.stringValue, "thread-1")
+        XCTAssertEqual(setName.params?["name"]?.stringValue, "发布前收尾")
+
+        XCTAssertEqual(builder.threadCompactStart(threadID: "thread-1").method, "thread/compact/start")
+        XCTAssertEqual(builder.threadUnsubscribe(threadID: "thread-1").method, "thread/unsubscribe")
+
+        let review = try builder.reviewStart(
+            threadID: "thread-1",
+            target: .baseBranch(" main "),
+            delivery: .inline
+        )
+        XCTAssertEqual(review.method, "review/start")
+        XCTAssertEqual(review.params?["target"]?.objectValue?["type"]?.stringValue, "baseBranch")
+        XCTAssertEqual(review.params?["target"]?.objectValue?["branch"]?.stringValue, "main")
+        XCTAssertEqual(review.params?["delivery"]?.stringValue, "inline")
+
+        let uncommitted = try builder.reviewStart(
+            threadID: "thread-1",
+            target: .uncommittedChanges,
+            delivery: .inline
+        )
+        XCTAssertEqual(uncommitted.params?["target"]?.objectValue?["type"]?.stringValue, "uncommittedChanges")
+
+        let commit = try builder.reviewStart(
+            threadID: "thread-1",
+            target: .commit(sha: " abc123 ", title: " 修复崩溃 "),
+            delivery: .inline
+        )
+        XCTAssertEqual(commit.params?["target"]?.objectValue?["type"]?.stringValue, "commit")
+        XCTAssertEqual(commit.params?["target"]?.objectValue?["sha"]?.stringValue, "abc123")
+        XCTAssertEqual(commit.params?["target"]?.objectValue?["title"]?.stringValue, "修复崩溃")
+
+        XCTAssertThrowsError(try builder.reviewStart(
+            threadID: "thread-1",
+            target: .uncommittedChanges,
+            delivery: .detached
+        ))
+        XCTAssertThrowsError(try builder.reviewStart(
+            threadID: "thread-1",
+            target: .custom("绕过常规 Turn")
+        ))
+        XCTAssertThrowsError(try builder.reviewStart(
+            threadID: "thread-1",
+            target: .baseBranch(" \n "),
+            delivery: .inline
+        ))
+        XCTAssertThrowsError(try builder.reviewStart(
+            threadID: "thread-1",
+            target: .commit(sha: " \t "),
+            delivery: .inline
+        ))
+    }
+
+    func testMcpElicitationFormProjectsToUserInputAndIgnoresUnknownFields() throws {
+        let data = Data(#"""
+        {
+          "id":"mcp-1",
+          "method":"mcpServer/elicitation/request",
+          "params":{
+            "threadId":"thread-1",
+            "turnId":"turn-1",
+            "serverName":"github",
+            "mode":"form",
+            "message":"请选择环境",
+            "requestedSchema":{
+              "type":"object",
+              "properties":{
+                "environment":{"type":"string","title":"环境","enum":["staging","production"]},
+                "confirmed":{"type":"boolean","title":"确认"}
+              }
+            },
+            "futureField":{"nested":true}
+          },
+          "futureEnvelope":"ignored"
+        }
+        """#.utf8)
+        let message = try JSONDecoder().decode(CodexAppServerMessage.self, from: data)
+        guard case .serverRequest(let request) = message else {
+            return XCTFail("expected server request")
+        }
+        var projector = CodexAppServerEventProjector()
+        guard case .userInputRequest(let userInput, let metadata) = projector.project(request) else {
+            return XCTFail("expected MCP form user input")
+        }
+        XCTAssertEqual(metadata.sessionID, "thread-1")
+        XCTAssertEqual(userInput.id, "mcp-1")
+        XCTAssertEqual(userInput.questions.map(\.id), ["confirmed", "environment"])
+        XCTAssertEqual(userInput.questions.first(where: { $0.id == "confirmed" })?.options.map(\.label), ["true", "false"])
+        XCTAssertEqual(userInput.questions.first(where: { $0.id == "environment" })?.options.map(\.label), ["staging", "production"])
+    }
+
+    func testMcpURLelicitationProjectsToExplicitApproval() {
+        let request = CodexAppServerServerRequest(
+            id: .int(17),
+            method: "mcpServer/elicitation/request",
+            params: .object([
+                "threadId": .string("thread-1"),
+                "serverName": .string("calendar"),
+                "mode": .string("url"),
+                "message": .string("请完成授权"),
+                "url": .string("https://example.test/oauth")
+            ])
+        )
+        var projector = CodexAppServerEventProjector()
+        guard case .approvalRequest(let approval, let metadata) = projector.project(request) else {
+            return XCTFail("expected MCP URL approval")
+        }
+        XCTAssertEqual(metadata.sessionID, "thread-1")
+        XCTAssertEqual(approval.id, "17")
+        XCTAssertEqual(approval.kind, "mcp_elicitation")
+        XCTAssertTrue(approval.body?.contains("https://example.test/oauth") == true)
+    }
+
+    func testRuntimeBuildsTypedMcpElicitationResponses() async {
+        let runtime = CodexAppServerSessionRuntime(endpoint: "http://127.0.0.1:8787", token: "test")
+        let form = CodexAppServerServerRequest(
+            id: .string("mcp-form"),
+            method: "mcpServer/elicitation/request",
+            params: .object([
+                "threadId": .string("thread-1"),
+                "mode": .string("form"),
+                "requestedSchema": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "confirmed": .object(["type": .string("boolean")]),
+                        "retries": .object(["type": .string("integer")]),
+                        "scopes": .object(["type": .string("array")])
+                    ])
+                ])
+            ])
+        )
+        let accepted = await runtime.userInputResponse(for: form, answers: [
+            "confirmed": ["true"],
+            "retries": ["3"],
+            "scopes": ["read", "write"]
+        ])
+        XCTAssertEqual(accepted["action"]?.stringValue, "accept")
+        XCTAssertEqual(accepted["content"]?.objectValue?["confirmed"]?.boolValue, true)
+        XCTAssertEqual(accepted["content"]?.objectValue?["retries"]?.intValue, 3)
+        XCTAssertEqual(accepted["content"]?.objectValue?["scopes"]?.arrayValue?.compactMap(\.stringValue), ["read", "write"])
+
+        let declined = await runtime.userInputResponse(for: form, answers: [:])
+        XCTAssertEqual(declined["action"]?.stringValue, "decline")
+        XCTAssertEqual(declined["content"], .null)
+
+        let url = CodexAppServerServerRequest(
+            id: .int(7),
+            method: "mcpServer/elicitation/request",
+            params: .object(["threadId": .string("thread-1"), "mode": .string("url")])
+        )
+        let urlAccepted = await runtime.approvalResponse(method: url.method, params: url.params?.objectValue ?? [:], decision: "accept")
+        XCTAssertEqual(urlAccepted["action"]?.stringValue, "accept")
+        XCTAssertEqual(urlAccepted["content"], .null)
+    }
+
+    func testProjectorMapsPlanReasoningUsageCompactionNameMCPAndDeprecationNotifications() throws {
+        var projector = CodexAppServerEventProjector()
+
+        let plan = CodexAppServerNotification(method: "turn/plan/updated", params: .object([
+            "threadId": .string("thread-1"),
+            "turnId": .string("turn-1"),
+            "plan": .array([
+                .object(["step": .string("补齐协议"), "status": .string("completed")]),
+                .object(["step": .string("运行测试"), "status": .string("inProgress")])
+            ])
+        ]))
+        guard case .messageCompleted(let planMessage, _) = projector.project(plan) else {
+            return XCTFail("expected plan message")
+        }
+        XCTAssertEqual(planMessage.kind, .plan)
+        XCTAssertTrue(planMessage.content.contains("补齐协议"))
+
+        let planDelta = CodexAppServerNotification(method: "item/plan/delta", params: .object([
+            "threadId": .string("thread-1"), "turnId": .string("turn-1"), "itemId": .string("plan-item"),
+            "delta": .string("正在补齐协议")
+        ]))
+        guard case .messageCompleted(let planDeltaMessage, _) = projector.project(planDelta) else {
+            return XCTFail("expected plan delta message")
+        }
+        XCTAssertEqual(planDeltaMessage.kind, .plan)
+        XCTAssertEqual(planDeltaMessage.content, "正在补齐协议")
+
+        let reasoning1 = CodexAppServerNotification(method: "item/reasoning/summaryTextDelta", params: .object([
+            "threadId": .string("thread-1"), "turnId": .string("turn-1"), "itemId": .string("reason-1"),
+            "summaryIndex": .int(0), "delta": .string("先检查")
+        ]))
+        let reasoning2 = CodexAppServerNotification(method: "item/reasoning/summaryTextDelta", params: .object([
+            "threadId": .string("thread-1"), "turnId": .string("turn-1"), "itemId": .string("reason-1"),
+            "summaryIndex": .int(0), "delta": .string("再修复")
+        ]))
+        _ = projector.project(reasoning1)
+        let summaryBoundary = CodexAppServerNotification(method: "item/reasoning/summaryPartAdded", params: .object([
+            "threadId": .string("thread-1"), "turnId": .string("turn-1"), "itemId": .string("reason-1"),
+            "summaryIndex": .int(1)
+        ]))
+        XCTAssertNil(projector.project(summaryBoundary), "summaryPartAdded 仅是分段边界，不应制造空消息")
+        guard case .messageCompleted(let reasoningMessage, _) = projector.project(reasoning2) else {
+            return XCTFail("expected reasoning message")
+        }
+        XCTAssertEqual(reasoningMessage.kind, .reasoningSummary)
+        XCTAssertEqual(reasoningMessage.content, "先检查再修复")
+
+        let usage = CodexAppServerNotification(method: "thread/tokenUsage/updated", params: .object([
+            "threadId": .string("thread-1"), "turnId": .string("turn-1"),
+            "tokenUsage": .object([
+                "total": .object(["inputTokens": .int(100), "outputTokens": .int(50), "totalTokens": .int(150)]),
+                "modelContextWindow": .int(200_000)
+            ])
+        ]))
+        guard case .sessionContext(let usageContext, _) = projector.project(usage) else {
+            return XCTFail("expected token context")
+        }
+        XCTAssertEqual(usageContext.tasks.first?.kind, "token_usage")
+        XCTAssertTrue(usageContext.tasks.first?.subtitle?.contains("150") == true)
+
+        let compacted = CodexAppServerNotification(method: "thread/compacted", params: .object([
+            "threadId": .string("thread-1"), "turnId": .string("turn-1")
+        ]))
+        guard case .messageCompleted(let compactedMessage, _) = projector.project(compacted) else {
+            return XCTFail("expected compaction message")
+        }
+        XCTAssertEqual(compactedMessage.content, "上下文已压缩")
+
+        let named = CodexAppServerNotification(method: "thread/name/updated", params: .object([
+            "threadId": .string("thread-1"), "threadName": .string("新名称")
+        ]))
+        guard case .messageCompleted(let nameMessage, _) = projector.project(named) else {
+            return XCTFail("expected name message")
+        }
+        XCTAssertTrue(nameMessage.content.contains("新名称"))
+
+        let mcp = CodexAppServerNotification(method: "item/mcpToolCall/progress", params: .object([
+            "threadId": .string("thread-1"), "turnId": .string("turn-1"), "itemId": .string("mcp-item"),
+            "message": .string("正在读取日历")
+        ]))
+        guard case .sessionContext(let mcpContext, _) = projector.project(mcp) else {
+            return XCTFail("expected MCP progress context")
+        }
+        XCTAssertEqual(mcpContext.tasks.first?.subtitle, "正在读取日历")
+
+        let deprecation = CodexAppServerNotification(method: "deprecationNotice", params: .object([
+            "summary": .string("旧方法已废弃"), "details": .string("请迁移")
+        ]))
+        guard case .warning(let warning, _) = projector.project(deprecation) else {
+            return XCTFail("expected deprecation warning")
+        }
+        XCTAssertEqual(warning.code, "deprecationNotice")
+        XCTAssertTrue(warning.message.contains("请迁移"))
+    }
+}
+
+final class DoctorDiagnosticsTests: XCTestCase {
+    func testParsesStructuredDoctorResponseAndKeepsPrettyRawJSON() throws {
+        let url = try XCTUnwrap(URL(string: "https://mac.example/api/doctor"))
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        ))
+        let data = Data(#"{"ok":false,"version":"1.4.0","listen":"127.0.0.1:8787","checks":[{"name":"token","ok":true,"level":"ok","message":"Token 已配置"},{"name":"tailscale","ok":false,"level":"warning","message":"未检测到 Tailscale"},{"name":"codex","ok":false,"level":"error","message":"未找到 Codex CLI","fix":"安装 Codex CLI"}],"future":{"ignored":true}}"#.utf8)
+
+        let document = try DoctorDiagnosticsParser.parseDoctorResponse(data: data, response: response)
+
+        XCTAssertFalse(document.report.ok)
+        XCTAssertEqual(document.report.version, "1.4.0")
+        XCTAssertEqual(document.report.listen, "127.0.0.1:8787")
+        XCTAssertEqual(document.report.checks.count, 3)
+        XCTAssertEqual(document.report.checks[0].displayName, "访问令牌")
+        XCTAssertNil(document.report.checks[0].normalizedFix)
+        XCTAssertTrue(document.report.checks[1].isWarning)
+        XCTAssertEqual(document.report.checks[2].normalizedFix, "安装 Codex CLI")
+        XCTAssertTrue(document.rawJSON.contains("\n"))
+        XCTAssertTrue(document.rawJSON.contains(#""version" : "1.4.0""#))
+    }
+
+    func testRejectsNonSuccessHTTPResponseWithServerMessage() throws {
+        let url = try XCTUnwrap(URL(string: "https://mac.example/api/doctor"))
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: url,
+            statusCode: 401,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        let data = Data(#"{"error":{"message":"token 无效"}}"#.utf8)
+
+        XCTAssertThrowsError(try DoctorDiagnosticsParser.parseDoctorResponse(data: data, response: response)) { error in
+            XCTAssertEqual(
+                error as? DoctorDiagnosticError,
+                .httpStatus(code: 401, message: "token 无效")
+            )
+            XCTAssertEqual(error.localizedDescription, "诊断请求失败（HTTP 401）：token 无效")
+        }
+    }
+
+    func testRejectsNonHTTPResponseAndMalformedPayload() throws {
+        let url = try XCTUnwrap(URL(string: "https://mac.example/api/doctor"))
+        let nonHTTP = URLResponse(
+            url: url,
+            mimeType: "application/json",
+            expectedContentLength: 2,
+            textEncodingName: "utf-8"
+        )
+        XCTAssertThrowsError(
+            try DoctorDiagnosticsParser.parseDoctorResponse(data: Data("{}".utf8), response: nonHTTP)
+        ) { error in
+            XCTAssertEqual(error as? DoctorDiagnosticError, .invalidHTTPResponse)
+        }
+
+        let okResponse = try XCTUnwrap(HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        XCTAssertThrowsError(
+            try DoctorDiagnosticsParser.parseDoctorResponse(data: Data(#"{"ok":true}"#.utf8), response: okResponse)
+        ) { error in
+            guard case .invalidPayload = error as? DoctorDiagnosticError else {
+                return XCTFail("expected invalidPayload, got \(error)")
+            }
+        }
+    }
+
+    func testBuildsDoctorURLAndFormatsFallbackPayload() throws {
+        let url = try DoctorDiagnosticsParser.doctorURL(endpoint: " https://mac.example:8787/old/path?token=ignored ")
+        XCTAssertEqual(url.scheme, "https")
+        XCTAssertEqual(url.host, "mac.example")
+        XCTAssertEqual(url.port, 8787)
+        XCTAssertEqual(url.path, "/api/doctor")
+        XCTAssertNil(url.query)
+
+        XCTAssertThrowsError(try DoctorDiagnosticsParser.doctorURL(endpoint: "not a URL")) { error in
+            XCTAssertEqual(error as? DoctorDiagnosticError, .invalidEndpoint)
+        }
+        XCTAssertEqual(
+            DoctorDiagnosticsParser.formatDiagnosticPayload(Data([0xFF]), fallback: "无法解码"),
+            "无法解码"
+        )
     }
 }

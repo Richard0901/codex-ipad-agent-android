@@ -28,3 +28,25 @@ func TestPairingTicketRejectsExpiredTicket(t *testing.T) {
 		t.Fatalf("过期配对票据应被拒绝，got=%v", err)
 	}
 }
+
+func TestPairingTicketUsesSubsecondPrecisionAndAcceptsLegacyTimestamp(t *testing.T) {
+	secret := "0123456789abcdef0123456789abcdef"
+	base := time.Date(2026, 7, 13, 8, 0, 0, 100, time.UTC)
+	first := NewPairingTicket("http://100.64.0.1:8787", secret, base, base.Add(10*time.Minute))
+	second := NewPairingTicket("http://100.64.0.1:8787", secret, base.Add(200*time.Nanosecond), base.Add(10*time.Minute+200*time.Nanosecond))
+	if first.Signature == second.Signature {
+		t.Fatal("同一秒内刷新生成的票据必须可独立消费")
+	}
+
+	legacyIssued := base.Format(time.RFC3339)
+	legacyExpires := base.Add(10 * time.Minute).Format(time.RFC3339)
+	legacy := PairingTicket{
+		Endpoint:  "http://100.64.0.1:8787",
+		IssuedAt:  legacyIssued,
+		ExpiresAt: legacyExpires,
+		Signature: SignPairingTicket(secret, "http://100.64.0.1:8787", legacyIssued, legacyExpires),
+	}
+	if err := ValidatePairingTicket(secret, legacy, base.Add(time.Minute)); err != nil {
+		t.Fatalf("升级后仍应接受有效的旧 RFC3339 票据：%v", err)
+	}
+}

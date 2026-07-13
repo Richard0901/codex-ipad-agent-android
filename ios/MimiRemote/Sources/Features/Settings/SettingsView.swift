@@ -59,9 +59,22 @@ struct SettingsView: View {
                 NavigationLink {
                     ConnectionManagementView()
                 } label: {
-                    LabeledContent("状态", value: appStore.connectionStatus.title)
+                    LabeledContent(
+                        "状态",
+                        value: appStore.connectionTermination?.title
+                            ?? (sessionStore.isNetworkUnavailable ? "网络不可用" : appStore.connectionStatus.title)
+                    )
                 }
                 LabeledContent("连接地址", value: appStore.endpoint)
+                if let termination = appStore.connectionTermination {
+                    Label(termination.message, systemImage: "lock.trianglebadge.exclamationmark")
+                        .font(.footnote)
+                        .foregroundStyle(tokens.warning)
+                } else if sessionStore.isNetworkUnavailable {
+                    Label("网络不可用，已暂停同步；恢复后会自动重连。", systemImage: "wifi.slash")
+                        .font(.footnote)
+                        .foregroundStyle(tokens.warning)
+                }
             }
 
             Section("Codex 用量") {
@@ -102,6 +115,11 @@ struct SettingsView: View {
                 } label: {
                     Label("能力清单", systemImage: "wand.and.stars")
                 }
+                NavigationLink {
+                    ThirdPartyNoticesView()
+                } label: {
+                    Label("开源许可", systemImage: "doc.text")
+                }
             } header: {
                 Text("高级")
             } footer: {
@@ -111,7 +129,20 @@ struct SettingsView: View {
         .themedSettingsForm(tokens: tokens)
         .task {
             // 设置页也作为失败后的自然重试入口；成功态会直接复用，不产生重复请求。
-            await appStore.preflightConnection()
+            guard !appStore.requiresRePairing else {
+                return
+            }
+            guard await appStore.preflightConnection(), appStore.isConfigured else {
+                return
+            }
+            let hasNotLoadedInitialData = sessionStore.projects.isEmpty
+                && sessionStore.statusMessage == nil
+            guard sessionStore.errorMessage != nil || hasNotLoadedInitialData else {
+                return
+            }
+            // 45 秒首配超时后凭据已经安全落盘；用户打开设置即用健康连接做一次短恢复，
+            // 不要求重新扫码，也不在已有首屏数据的正常连接上额外刷新。
+            _ = await sessionStore.refreshAfterConnectionCommit(maxWait: 10)
         }
     }
 }
@@ -433,6 +464,11 @@ private struct InitialConnectionSettingsSections: View {
     @State private var isShowingConnectionSuccess = false
     @State private var connectionSuccessMessage = ""
     @State private var isSavingConnection = false
+    @State private var isAddingConnectionProfile = false
+    @State private var profileDisplayName = ""
+    @State private var profileOperationID: String?
+    @State private var profileRenameTarget: ConnectionProfile?
+    @State private var pendingRemovalConfirmation: ConnectionCredentialRemovalConfirmation?
     @State private var isShowingAdvancedManualConnection = false
     @State private var localError: String?
 
@@ -440,6 +476,38 @@ private struct InitialConnectionSettingsSections: View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         Group {
+            Section {
+                if let current = appStore.connectionProfileSettingsModel.current {
+                    connectionProfileRow(current)
+                }
+                ForEach(appStore.connectionProfileSettingsModel.others) { item in
+                    connectionProfileRow(item)
+                }
+                if appStore.connectionProfiles.isEmpty {
+                    Text("还没有保存的 Mac")
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    beginAddingConnectionProfile()
+                } label: {
+                    Label("新增 Mac", systemImage: "plus.circle")
+                }
+                .disabled(isSavingConnection)
+
+                if appStore.activeConnectionProfile != nil {
+                    Button {
+                        beginRepairingCurrentProfile()
+                    } label: {
+                        Label("重新配对当前 Mac", systemImage: "qrcode")
+                    }
+                    .disabled(isSavingConnection)
+                }
+            } header: {
+                Text("连接档案")
+            } footer: {
+                Text("同一时间只连接一台 Mac。切换会先验证新连接，失败时保留当前会话。访问码仅保存在系统 Keychain。")
+            }
+
             Section {
                 VStack(alignment: .leading, spacing: 10) {
                     Label("在 Mac 上准备 Mimi Mac 助手", systemImage: "desktopcomputer")
@@ -473,18 +541,24 @@ private struct InitialConnectionSettingsSections: View {
 
             Section {
                 DisclosureGroup(isExpanded: $isShowingAdvancedManualConnection) {
+                    if isAddingConnectionProfile {
+                        TextField("显示名称，例如：工作室 Mac", text: $profileDisplayName)
+                            .textInputAutocapitalization(.words)
+                            .accessibilityIdentifier("settings.profileDisplayName")
+                    }
                     StableEndpointTextField(placeholder: "Tailscale 地址", text: $endpoint)
                         .frame(minHeight: 28)
                     SecureField("访问码", text: $token)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    EndpointTransportNotice(assessment: endpointTransportAssessment)
                 } label: {
-                    Label("手动连接", systemImage: "slider.horizontal.3")
+                    Label(isAddingConnectionProfile ? "手动新增 Mac" : "手动连接", systemImage: "slider.horizontal.3")
                 }
             } header: {
                 Text("其他方式")
             } footer: {
-                Text("App 始终连接这台 Mac 的 Tailscale 地址；直连与中继切换由 Tailscale 自动处理。")
+                Text("HTTP 只允许本机、Tailscale 和局域网私有地址；公网地址必须使用 HTTPS。推荐扫描 Mac 上的二维码，直连与中继切换交给 Tailscale。")
             }
 
             Section {
@@ -506,7 +580,7 @@ private struct InitialConnectionSettingsSections: View {
                 Button {
                     Task { await save() }
                 } label: {
-                    Label("保存并进入工作台", systemImage: "checkmark.circle")
+                    Label(isAddingConnectionProfile ? "保存新 Mac 并切换" : "保存并进入工作台", systemImage: "checkmark.circle")
                 }
                 .disabled(!canSubmit)
             }
@@ -573,19 +647,28 @@ private struct InitialConnectionSettingsSections: View {
 
             Section {
                 Button(role: .destructive) {
-                    clearPairing()
+                    pendingRemovalConfirmation = .forgettingCurrent(appStore.activeConnectionProfile)
                 } label: {
                     Label("忘记这台 Mac", systemImage: "trash")
                 }
                 .disabled(isSavingConnection || !appStore.isConfigured)
+                .accessibilityIdentifier("settings.connection.forget")
             }
         }
         .listRowBackground(tokens.elevatedSurface)
         // 连接地址/Token 是高频编辑状态，放在这个小子树里，避免每次删字都重绘整个设置页。
         .onAppear(perform: loadInitialConnectionIfNeeded)
         .sheet(isPresented: $isShowingQRCodeScanner) {
-            QRCodeScannerSheet { rawValue in
+            QRCodeScannerSheet(onChooseManualConnection: {
+                isShowingAdvancedManualConnection = true
+            }) { rawValue in
                 Task { await applyScannedConnection(rawValue) }
+            }
+        }
+        .sheet(item: $profileRenameTarget) { profile in
+            ConnectionProfileRenameSheet(profile: profile) { displayName in
+                try appStore.renameConnectionProfile(id: profile.id, displayName: displayName)
+                localError = nil
             }
         }
         .alert("已找到这台 Mac", isPresented: $isShowingConnectionSuccess) {
@@ -593,13 +676,99 @@ private struct InitialConnectionSettingsSections: View {
         } message: {
             Text(connectionSuccessMessage)
         }
+        .confirmationDialog(
+            pendingRemovalConfirmation?.title ?? "确认删除连接凭据？",
+            isPresented: removalConfirmationBinding,
+            titleVisibility: .visible,
+            presenting: pendingRemovalConfirmation
+        ) { confirmation in
+            Button(confirmation.confirmButtonTitle, role: .destructive) {
+                performCredentialRemoval(confirmation)
+            }
+            .accessibilityIdentifier(removalConfirmationAccessibilityIdentifier(confirmation))
+
+            Button("取消", role: .cancel) {
+                pendingRemovalConfirmation = nil
+            }
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
+    }
+
+    private var removalConfirmationBinding: Binding<Bool> {
+        Binding(
+            get: { pendingRemovalConfirmation != nil },
+            set: { isPresented in
+                if !isPresented {
+                    pendingRemovalConfirmation = nil
+                }
+            }
+        )
     }
 
     private var canSubmit: Bool {
         !isSavingConnection &&
         !isConnectionTesting &&
-        !endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        endpointTransportAssessment.isAllowed &&
         !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    @ViewBuilder
+    private func connectionProfileRow(_ item: ConnectionProfileSettingsItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.profile.displayName)
+                        .font(themeStore.uiFont(.body, weight: item.isCurrent ? .semibold : .regular))
+                    Text(item.profile.endpoint)
+                        .font(themeStore.uiFont(.caption))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 10)
+                if item.isCurrent {
+                    Label("当前", systemImage: "checkmark.circle.fill")
+                        .font(themeStore.uiFont(.caption, weight: .semibold))
+                        .foregroundStyle(themeStore.tokens(for: colorScheme).success)
+                } else if profileOperationID == item.id {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            if let lastSuccessfulAt = item.profile.lastSuccessfulAt {
+                Text("最近成功：\(lastSuccessfulAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(themeStore.uiFont(.caption2))
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 16) {
+                Button("重命名") {
+                    profileRenameTarget = item.profile
+                }
+                .disabled(isSavingConnection || profileOperationID != nil)
+                .accessibilityIdentifier("settings.profile.rename.\(item.id)")
+
+                if item.canSwitch {
+                    Button("切换") {
+                        Task { await switchConnectionProfile(id: item.id) }
+                    }
+                    .disabled(isSavingConnection || profileOperationID != nil)
+                    .accessibilityIdentifier("settings.profile.switch.\(item.id)")
+
+                    Button("删除", role: .destructive) {
+                        pendingRemovalConfirmation = .deletingSavedProfile(item.profile)
+                    }
+                    .disabled(isSavingConnection || profileOperationID != nil)
+                    .accessibilityIdentifier("settings.profile.delete.\(item.id)")
+                }
+            }
+            .buttonStyle(.borderless)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("settings.profile.\(item.id)")
+    }
+
+    private var endpointTransportAssessment: EndpointTransportAssessment {
+        EndpointTransportPolicy.assess(endpoint)
     }
 
     private var isConnectionTesting: Bool {
@@ -897,6 +1066,9 @@ private struct InitialConnectionSettingsSections: View {
     }
 
     private func friendlyConnectionMessage(_ raw: String) -> String {
+        if let termination = appStore.connectionTermination {
+            return termination.message
+        }
         let lowercased = raw.lowercased()
         if lowercased.contains("expired") || raw.contains("过期") {
             return "配对二维码已过期，请在 Mac 上重新运行 agentd pair 后扫码。"
@@ -908,6 +1080,9 @@ private struct InitialConnectionSettingsSections: View {
             return "当前设备暂时找不到这台 Mac。请确认 Mimi Mac 助手正在运行，并且当前设备已连接 Tailscale。"
         }
         if raw.contains("Endpoint") || raw.contains("连接链接") {
+            return raw
+        }
+        if raw.contains("连接凭据已安全保存") {
             return raw
         }
         return "连接没有完成。请确认 Mac 助手正在运行，或重新扫描 Mac 上的配对二维码。"
@@ -922,19 +1097,105 @@ private struct InitialConnectionSettingsSections: View {
         token = appStore.token
     }
 
+    private func beginAddingConnectionProfile() {
+        isAddingConnectionProfile = true
+        profileDisplayName = ""
+        endpoint = ""
+        token = ""
+        localError = nil
+        isShowingAdvancedManualConnection = true
+    }
+
+    private func beginRepairingCurrentProfile() {
+        isAddingConnectionProfile = false
+        profileDisplayName = appStore.activeConnectionProfile?.displayName ?? ""
+        endpoint = appStore.endpoint
+        token = ""
+        localError = nil
+        isShowingAdvancedManualConnection = true
+    }
+
+    private func switchConnectionProfile(id: String) async {
+        profileOperationID = id
+        defer { profileOperationID = nil }
+        do {
+            _ = try await sessionStore.switchConnectionProfile(id: id)
+            endpoint = appStore.endpoint
+            token = appStore.token
+            isAddingConnectionProfile = false
+            guard await refreshCommittedConnection(maxWait: 10) else {
+                return
+            }
+        } catch is CancellationError {
+            // App 退后台或任务被系统取消时不把仍可用的旧连接标成失败。
+            localError = nil
+        } catch {
+            // prepare/commit 失败时 SessionStore 尚未退役旧连接，这里只展示错误。
+            localError = error.localizedDescription
+        }
+    }
+
+    private func deleteConnectionProfile(id: String) {
+        do {
+            try appStore.deleteConnectionProfile(id: id)
+            localError = nil
+        } catch {
+            localError = error.localizedDescription
+        }
+    }
+
+    private func performCredentialRemoval(_ confirmation: ConnectionCredentialRemovalConfirmation) {
+        pendingRemovalConfirmation = nil
+        switch confirmation.target {
+        case .current(let expectedProfileID):
+            guard expectedProfileID == appStore.activeConnectionProfileID else {
+                // 弹窗展示期间连接可能被 URL Scheme 或其它入口切换；不能误删后来成为当前的档案。
+                localError = "当前 Mac 已发生变化，请重新操作。"
+                return
+            }
+            clearPairing()
+        case .savedProfile(let profileID):
+            deleteConnectionProfile(id: profileID)
+        }
+    }
+
+    private func removalConfirmationAccessibilityIdentifier(
+        _ confirmation: ConnectionCredentialRemovalConfirmation
+    ) -> String {
+        switch confirmation.target {
+        case .current:
+            return "settings.connection.forget.confirm"
+        case .savedProfile(let profileID):
+            return "settings.profile.delete.confirm.\(profileID)"
+        }
+    }
+
     private func save() async {
         isSavingConnection = true
         defer { isSavingConnection = false }
         do {
-            _ = try await sessionStore.applyConnectionSettings(
-                endpoint: endpoint,
-                token: token
-            )
+            let wasConfigured = appStore.isConfigured
+            if isAddingConnectionProfile {
+                _ = try await sessionStore.addConnectionProfile(
+                    endpoint: endpoint,
+                    token: token,
+                    displayName: profileDisplayName
+                )
+            } else {
+                _ = try await sessionStore.applyConnectionSettings(
+                    endpoint: endpoint,
+                    token: token
+                )
+            }
             endpoint = appStore.endpoint
             token = appStore.token
+            isAddingConnectionProfile = false
             connectionSuccessMessage = ""
+            guard await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45) else {
+                return
+            }
+        } catch is CancellationError {
             localError = nil
-            await sessionStore.refreshAll(autoAttach: true)
         } catch {
             appStore.connectionStatus = .failed(error.localizedDescription)
             appStore.lastError = error.localizedDescription
@@ -946,23 +1207,48 @@ private struct InitialConnectionSettingsSections: View {
         isSavingConnection = true
         defer { isSavingConnection = false }
         do {
+            let wasConfigured = appStore.isConfigured
             let raw = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let url = URL(string: raw) else {
                 throw PairingLinkError.unsupportedURL
             }
-            _ = try await sessionStore.applyPairingURL(url)
+            if isAddingConnectionProfile {
+                _ = try await sessionStore.addConnectionProfile(
+                    pairingURL: url,
+                    displayName: profileDisplayName
+                )
+            } else {
+                _ = try await sessionStore.applyPairingURL(url)
+            }
             endpoint = appStore.endpoint
             token = appStore.token
+            isAddingConnectionProfile = false
+            connectionSuccessMessage = ""
+            isShowingConnectionSuccess = false
+            guard await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45) else {
+                return
+            }
             connectionSuccessMessage = "已连接这台 Mac，正在进入工作台。"
-            localError = nil
-            await sessionStore.refreshAll(autoAttach: true)
             isShowingConnectionSuccess = true
+        } catch is CancellationError {
             localError = nil
         } catch {
             appStore.connectionStatus = .failed(error.localizedDescription)
             appStore.lastError = error.localizedDescription
             localError = error.localizedDescription
         }
+    }
+
+    private func refreshCommittedConnection(maxWait: TimeInterval) async -> Bool {
+        let didLoad = await sessionStore.refreshAfterConnectionCommit(maxWait: maxWait)
+        if didLoad {
+            localError = nil
+        } else if Task.isCancelled {
+            localError = nil
+        } else {
+            localError = appStore.lastError ?? sessionStore.errorMessage
+        }
+        return didLoad
     }
 
     private func clearPairing() {
@@ -975,6 +1261,134 @@ private struct InitialConnectionSettingsSections: View {
             localError = nil
         } catch {
             localError = error.localizedDescription
+        }
+    }
+}
+
+private struct ConnectionProfileRenameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let profile: ConnectionProfile
+    let onRename: (String) throws -> Void
+    @State private var displayName: String
+    @State private var submitError: String?
+
+    init(profile: ConnectionProfile, onRename: @escaping (String) throws -> Void) {
+        self.profile = profile
+        self.onRename = onRename
+        _displayName = State(initialValue: profile.displayName)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Mac 名称", text: $displayName)
+                        .textInputAutocapitalization(.words)
+                        .submitLabel(.done)
+                        .onSubmit(rename)
+                        .accessibilityIdentifier("settings.profile.rename.name")
+                } footer: {
+                    Text(validationMessage ?? "最多 \(AppStore.connectionProfileDisplayNameLimit) 个字符，只修改本机显示名称。")
+                        .foregroundStyle(validationMessage == nil ? Color.secondary : Color.red)
+                }
+
+                if let submitError {
+                    Section {
+                        Text(submitError)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("settings.profile.rename.error")
+                    }
+                }
+            }
+            .navigationTitle("重命名 Mac")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存", action: rename)
+                        .disabled(validationMessage != nil)
+                        .accessibilityIdentifier("settings.profile.rename.save")
+                }
+            }
+            .onChange(of: displayName) { _, _ in
+                submitError = nil
+            }
+        }
+        .presentationDetents([.medium])
+    }
+
+    private var normalizedDisplayName: String {
+        displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var validationMessage: String? {
+        if normalizedDisplayName.isEmpty {
+            return ConnectionProfileError.invalidDisplayName.localizedDescription
+        }
+        if normalizedDisplayName.count > AppStore.connectionProfileDisplayNameLimit {
+            return ConnectionProfileError.displayNameTooLong(
+                maximum: AppStore.connectionProfileDisplayNameLimit
+            ).localizedDescription
+        }
+        return nil
+    }
+
+    private func rename() {
+        guard validationMessage == nil else { return }
+        do {
+            try onRename(displayName)
+            dismiss()
+        } catch {
+            // 档案若在 Sheet 展示期间被其它操作移除，保留输入并明确展示失败原因。
+            submitError = error.localizedDescription
+        }
+    }
+}
+
+private struct EndpointTransportNotice: View {
+    let assessment: EndpointTransportAssessment
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label(assessment.title, systemImage: systemImage)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(tint)
+            Text(assessment.guidance)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("settings.endpointTransportNotice")
+    }
+
+    private var systemImage: String {
+        switch assessment.status {
+        case .empty:
+            return "network"
+        case .invalid, .blockedPublicHTTP:
+            return "exclamationmark.shield.fill"
+        case .allowedPrivateHTTP:
+            return "lock.shield"
+        case .allowedHTTPS:
+            return "lock.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch assessment.status {
+        case .empty:
+            return .secondary
+        case .invalid, .blockedPublicHTTP:
+            return .red
+        case .allowedPrivateHTTP:
+            return .orange
+        case .allowedHTTPS:
+            return .green
         }
     }
 }

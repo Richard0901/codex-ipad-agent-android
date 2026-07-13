@@ -47,11 +47,19 @@ type Result struct {
 }
 
 func Run(ctx context.Context, options Options) (Result, error) {
+	return runWithFileOps(ctx, options, defaultSetupFileTransactionOps())
+}
+
+func runWithFileOps(ctx context.Context, options Options, fileOps setupFileTransactionOps) (Result, error) {
 	cfgPath, err := resolveConfigPath(options.ConfigPath)
 	if err != nil {
 		return Result{}, err
 	}
-	if fileExists(cfgPath) && !options.Force {
+	configExisted, err := regularFileOrMissing(cfgPath, "配置文件")
+	if err != nil {
+		return Result{}, err
+	}
+	if configExisted && !options.Force {
 		// 已有配置时默认只读取配对信息，避免误覆盖用户已经绑定到 iPad 的 token。
 		result, err := Pair(ctx, cfgPath)
 		if err != nil {
@@ -62,9 +70,25 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	}
 
 	cfgDir := filepath.Dir(cfgPath)
+	cfgDirExisted := true
+	if info, statErr := os.Stat(cfgDir); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return Result{}, fmt.Errorf("读取配置目录状态失败：%w", statErr)
+		}
+		cfgDirExisted = false
+	} else if !info.IsDir() {
+		return Result{}, fmt.Errorf("配置目录路径不是目录：%s", cfgDir)
+	}
 	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		return Result{}, fmt.Errorf("创建配置目录失败：%w", err)
 	}
+	filesCommitted := false
+	defer func() {
+		if !cfgDirExisted && !filesCommitted {
+			// 首次安装失败时只删除本次新建且仍为空的末级目录；并发写入或残留文件会让 Remove 安全失败。
+			_ = os.Remove(cfgDir)
+		}
+	}()
 	token, err := randomHex(32)
 	if err != nil {
 		return Result{}, err
@@ -75,9 +99,6 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		return Result{}, err
 	}
 	tokenFile := filepath.Join(cfgDir, "app-server-ws-token")
-	if err := os.WriteFile(tokenFile, []byte(appServerToken+"\n"), 0o600); err != nil {
-		return Result{}, fmt.Errorf("写入 app-server token 文件失败：%w", err)
-	}
 
 	scanRoot, err := defaultScanRoot(options.ScanRoot)
 	if err != nil {
@@ -128,9 +149,16 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("编码配置失败：%w", err)
 	}
-	if err := os.WriteFile(cfgPath, append(raw, '\n'), 0o600); err != nil {
-		return Result{}, fmt.Errorf("写入配置文件失败：%w", err)
+	if err := writeSetupFilesAtomically(
+		cfgPath,
+		tokenFile,
+		append(raw, '\n'),
+		[]byte(appServerToken+"\n"),
+		fileOps,
+	); err != nil {
+		return Result{}, fmt.Errorf("原子写入 setup 配置失败：%w", err)
 	}
+	filesCommitted = true
 
 	result, err := Pair(ctx, cfgPath)
 	if err != nil {
@@ -361,9 +389,4 @@ func randomHex(bytes int) (string, error) {
 		return "", fmt.Errorf("生成随机 token 失败：%w", err)
 	}
 	return hex.EncodeToString(buf), nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

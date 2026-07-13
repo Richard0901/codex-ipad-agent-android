@@ -190,6 +190,80 @@ final class LogStoreTests: XCTestCase {
         XCTAssertEqual(store.log(for: sessionID), "")
     }
 
+    func testSessionLogExportUsesCleanedCurrentCacheWindowAndSafeHeader() async throws {
+        let store = LogStore()
+        let session = makeSession(id: "sess_export", title: "导出会话")
+        let rawLog = "cache-prefix\n"
+            + String(repeating: "x", count: 90_000)
+            + "\nvisible-original \u{001B}[31mcache-tail\u{001B}[0m"
+
+        store.append(rawLog, sessionID: session.id)
+        let didFlush = await waitUntil {
+            store.cachedLogForExport(for: session.id).hasSuffix("visible-original cache-tail")
+        }
+        XCTAssertTrue(didFlush)
+
+        let cachedLog = store.cachedLogForExport(for: session.id)
+        XCTAssertTrue(cachedLog.contains("cache-prefix"))
+        XCTAssertFalse(store.log(for: session.id).contains("cache-prefix"))
+        XCTAssertFalse(cachedLog.contains("\u{001B}"))
+
+        let generatedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-07-14T01:02:03Z"))
+        let payload = try XCTUnwrap(SessionLogExportBuilder.makePayload(
+            session: session,
+            cachedLog: cachedLog,
+            generatedAt: generatedAt,
+            appVersion: "1.0 (31)",
+            macDisplayName: "工作室 Mac"
+        ))
+        let sections = payload.content.components(separatedBy: "\n\n")
+        XCTAssertEqual(sections.first?.components(separatedBy: "\n"), [
+            "生成时间：2026-07-14T01:02:03Z",
+            "App 版本：1.0 (31)",
+            "会话 ID：sess_export",
+            "会话标题：导出会话",
+            "当前 Mac：工作室 Mac"
+        ])
+        XCTAssertEqual(Array(sections.dropFirst()).joined(separator: "\n\n"), cachedLog)
+        XCTAssertFalse(payload.content.contains("super-secret-token"))
+        XCTAssertFalse(payload.content.contains("http://100.64.0.1:8080"))
+        XCTAssertFalse(payload.content.localizedCaseInsensitiveContains("keychain"))
+    }
+
+    func testSessionLogExportFilenameBoundsUnsafeMultibyteTitle() throws {
+        let title = String(repeating: "😀", count: 200) + "/../../坏文件\\名:?%*|\"<>\n"
+        let session = makeSession(id: "sess_filename", title: title)
+        let generatedAt = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-07-14T01:02:03Z"))
+
+        let filename = SessionLogExportBuilder.safeFilename(session: session, generatedAt: generatedAt)
+
+        XCTAssertTrue(filename.hasSuffix("-20260714-010203.log"))
+        XCTAssertLessThanOrEqual(filename.count, SessionLogExportBuilder.maximumFilenameLength)
+        XCTAssertLessThanOrEqual(filename.utf8.count, SessionLogExportBuilder.maximumFilenameUTF8Bytes)
+        XCTAssertNil(filename.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\:?%*|\"<>\n")))
+        XCTAssertFalse(filename.contains(".."))
+    }
+
+    func testSessionLogExportRejectsMissingSessionOrEmptyCache() {
+        let session = makeSession(id: "sess_empty", title: "空日志")
+        let generatedAt = Date(timeIntervalSince1970: 0)
+
+        XCTAssertNil(SessionLogExportBuilder.makePayload(
+            session: nil,
+            cachedLog: "log",
+            generatedAt: generatedAt,
+            appVersion: "1.0",
+            macDisplayName: "Mac"
+        ))
+        XCTAssertNil(SessionLogExportBuilder.makePayload(
+            session: session,
+            cachedLog: " \n\t ",
+            generatedAt: generatedAt,
+            appVersion: "1.0",
+            macDisplayName: "Mac"
+        ))
+    }
+
     private func waitUntil(
         timeout: TimeInterval = 2.0,
         intervalNanoseconds: UInt64 = 20_000_000,
@@ -203,6 +277,21 @@ final class LogStoreTests: XCTestCase {
             try? await Task.sleep(nanoseconds: intervalNanoseconds)
         }
         return condition()
+    }
+
+    private func makeSession(id: String, title: String) -> AgentSession {
+        AgentSession(
+            id: id,
+            projectID: "project_export",
+            project: "Export Project",
+            dir: "/tmp/export-project",
+            title: title,
+            status: "idle",
+            source: "app-server",
+            resumeID: nil,
+            createdAt: nil,
+            updatedAt: nil
+        )
     }
 
     func testLogFormatterKeepsAbsoluteLineIDsAfterTailLimit() {

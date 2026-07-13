@@ -1,7 +1,10 @@
 package setup
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -149,6 +152,10 @@ func TestRunKeepsExistingConfigWithoutForce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstUpstreamToken, err := os.ReadFile(first.AppServerTokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	second, err := Run(context.Background(), Options{
 		ConfigPath: cfgPath,
 		ScanRoot:   scanRoot,
@@ -162,6 +169,157 @@ func TestRunKeepsExistingConfigWithoutForce(t *testing.T) {
 	}
 	if second.Token != first.Token || second.Endpoint != first.Endpoint {
 		t.Fatalf("未 force 时应保留原配置：first=%+v second=%+v", first, second)
+	}
+	secondUpstreamToken, err := os.ReadFile(second.AppServerTokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(secondUpstreamToken, firstUpstreamToken) {
+		t.Fatal("未 force 时不能轮换正在运行服务使用的 upstream token")
+	}
+}
+
+func TestRepairManagedWSTokenFileReplacesMissingConfiguredPath(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	missingPath := filepath.Join(dir, "deleted-upstream-token")
+	raw, err := json.Marshal(map[string]any{
+		"app_server": map[string]any{
+			"transport":     "ws",
+			"managed":       true,
+			"listen":        "ws://127.0.0.1:4222",
+			"ws_token_file": missingPath,
+			"future_option": "keep-me",
+		},
+		"future_root": map[string]any{"enabled": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tokenPath, repaired, err := RepairManagedWSTokenFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repaired || tokenPath == "" || tokenPath == missingPath {
+		t.Fatalf("缺失的旧 token file 应替换为新的独立文件：path=%q repaired=%v", tokenPath, repaired)
+	}
+	assertPrivateTokenFile(t, tokenPath)
+
+	updated, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(updated, &document); err != nil {
+		t.Fatal(err)
+	}
+	appServer := document["app_server"].(map[string]any)
+	if appServer["ws_token_file"] != tokenPath || appServer["future_option"] != "keep-me" {
+		t.Fatalf("修复应只替换 token 路径并保留未知字段：%+v", appServer)
+	}
+	if _, ok := document["future_root"]; !ok {
+		t.Fatalf("修复不能丢失未来新增的根字段：%+v", document)
+	}
+}
+
+func TestRepairManagedWSTokenFileFailureKeepsOldConfigAndCleansTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	original := []byte("{\n  \"app_server\": {\"transport\": \"stdio\", \"managed\": true},\n  \"future_root\": \"keep-me\"\n}\n")
+	if err := os.WriteFile(cfgPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := errors.New("injected rename failure")
+	_, repaired, err := repairManagedWSTokenFile(cfgPath, func(path string, raw []byte) error {
+		return writePrivateFileAtomicallyWithRename(path, raw, func(string, string) error {
+			return sentinel
+		})
+	})
+	if !errors.Is(err, sentinel) || repaired {
+		t.Fatalf("注入 rename 失败时应返回原错误且不报告成功：repaired=%v err=%v", repaired, err)
+	}
+	after, readErr := os.ReadFile(cfgPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(after, original) {
+		t.Fatalf("原子提交失败后旧配置必须逐字节不变：\n%s", after)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != filepath.Base(cfgPath) {
+			t.Fatalf("失败后必须清理新 token 和配置临时文件，残留：%s", entry.Name())
+		}
+	}
+}
+
+func TestRepairManagedWSTokenFileRejectsSymlinkAndDirectory(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		create func(t *testing.T, dir string) string
+	}{
+		{
+			name: "symlink",
+			create: func(t *testing.T, dir string) string {
+				t.Helper()
+				target := filepath.Join(dir, "real-token")
+				if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(dir, "token-link")
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+				return link
+			},
+		},
+		{
+			name: "directory",
+			create: func(t *testing.T, dir string) string {
+				t.Helper()
+				path := filepath.Join(dir, "token-dir")
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tokenPath := testCase.create(t, dir)
+			cfgPath := filepath.Join(dir, "config.json")
+			raw, err := json.Marshal(map[string]any{
+				"app_server": map[string]any{"ws_token_file": tokenPath},
+				"auth":       map[string]any{"token": "keep-auth-token"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, repaired, err := RepairManagedWSTokenFile(cfgPath)
+			if err == nil || repaired || !strings.Contains(err.Error(), "regular file") {
+				t.Fatalf("%s 必须 fail-closed：repaired=%v err=%v", testCase.name, repaired, err)
+			}
+			after, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, raw) {
+				t.Fatalf("拒绝危险 token 路径时不能改写配置：%s", after)
+			}
+		})
 	}
 }
 
@@ -224,4 +382,22 @@ func hasWarning(warnings []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func assertPrivateTokenFile(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("upstream token 必须是 0600 regular file：mode=%v", info.Mode())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strings.TrimSpace(string(raw))) != 64 {
+		t.Fatalf("upstream token 应为 32-byte hex：%q", raw)
+	}
 }

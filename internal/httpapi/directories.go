@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"io/fs"
 	"net/http"
 	"os"
@@ -42,10 +41,7 @@ func (r *Router) directoryListHandler(w http.ResponseWriter, req *http.Request) 
 	}
 
 	var payload directoryListRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON")
+	if !decodeJSONRequest(w, req, &payload) {
 		return
 	}
 

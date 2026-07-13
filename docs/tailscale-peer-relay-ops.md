@@ -22,12 +22,12 @@ VPS 只运行 Tailscale Peer Relay，不运行 `agentd`、nginx 或 SSH reverse 
 
 ## 方案
 
-当前个人部署使用以下配置：
+公开仓库只保留脱敏示例；实际节点名、tailnet 地址和 VPS 公网地址应放在用户自己的运维记录中：
 
-- Mac Tailscale 节点：`s-mac-studio`
-- 上海 Peer Relay 节点：`shanghai-peer-relay`
+- Mac Tailscale 节点：`<Mac-Tailscale-Hostname>`
+- 上海 Peer Relay 节点：`<Peer-Relay-Hostname>`
 - Peer Relay 监听：`40000/UDP`
-- 上海 VPS 公网地址：`124.221.80.250`
+- 上海 VPS 公网地址：`<VPS-Public-IP>`
 - Mac `agentd`：`<Mac-Tailscale-IP>:8787/TCP`
 - App Endpoint：`http://<Mac-Tailscale-IP>:8787`
 
@@ -40,12 +40,12 @@ App 冷启动、回到前台和 WebSocket 重连时都继续使用同一个 Mac 
 VPS 公网 IP 仍可用于 SSH 管理：
 
 ```bash
-ssh ubuntu@124.221.80.250
+ssh ubuntu@<VPS-Public-IP>
 
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo systemctl enable --now tailscaled
 sudo tailscale up \
-  --hostname=shanghai-peer-relay \
+  --hostname=<Peer-Relay-Hostname> \
   --accept-dns=false
 ```
 
@@ -63,7 +63,7 @@ tailscale ip -4
 ```bash
 sudo tailscale set \
   --relay-server-port=40000 \
-  --relay-server-static-endpoints="124.221.80.250:40000"
+  --relay-server-static-endpoints="<VPS-Public-IP>:40000"
 
 sudo ss -lunp | grep ':40000'
 ```
@@ -122,7 +122,7 @@ launchctl bootout \
   "$HOME/Library/LaunchAgents/com.mimi-remote.agentd-vps-tunnel.plist"
 
 # VPS：只删除 Mimi Remote 的应用层反代配置
-ssh ubuntu@124.221.80.250 \
+ssh ubuntu@<VPS-Public-IP> \
   'sudo rm -f /etc/nginx/conf.d/mimi-agentd-relay.conf && sudo nginx -t && sudo systemctl reload nginx'
 ```
 
@@ -139,7 +139,7 @@ curl -fsS http://<Mac-Tailscale-IP>:8787/healthz
 确认上海节点在线且网络可直达：
 
 ```bash
-tailscale ping shanghai-peer-relay
+tailscale ping <Peer-Relay-Hostname>
 tailscale status
 ```
 
@@ -192,7 +192,7 @@ go run -tags ipadwsprobe ./scripts/ipad-ws-probe.go \
 如果上海 VPS Peer Relay 异常，可以临时禁用它：
 
 ```bash
-ssh ubuntu@124.221.80.250 \
+ssh ubuntu@<VPS-Public-IP> \
   'sudo tailscale set --relay-server-port="" --relay-server-static-endpoints=""'
 ```
 
