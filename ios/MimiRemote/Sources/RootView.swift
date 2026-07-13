@@ -1541,13 +1541,18 @@ private struct CodexUsagePanel: View {
             header(display: display, tokens: tokens)
 
             VStack(alignment: .leading, spacing: 12) {
-                if let fiveHour = display.windows.first(where: { $0.kind == .fiveHour }) {
-                    usageWindowRow(fiveHour, tokens: tokens)
-                }
-                Divider()
-                    .overlay(tokens.border.opacity(0.72))
-                if let sevenDay = display.windows.first(where: { $0.kind == .sevenDay }) {
-                    usageWindowRow(sevenDay, tokens: tokens)
+                if display.windows.isEmpty {
+                    Text("刷新后显示 Codex 当前返回的账号窗口")
+                        .font(themeStore.uiFont(.footnote))
+                        .foregroundStyle(tokens.secondaryText)
+                } else {
+                    ForEach(Array(display.windows.enumerated()), id: \.element.id) { index, window in
+                        if index > 0 {
+                            Divider()
+                                .overlay(tokens.border.opacity(0.72))
+                        }
+                        usageWindowRow(window, tokens: tokens)
+                    }
                 }
             }
 
@@ -1577,7 +1582,7 @@ private struct CodexUsagePanel: View {
                     .font(themeStore.uiFont(.headline, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
                     .lineLimit(1)
-                Text(display.hasLiveData ? "按 Codex 账号窗口展示 5h 和 7d 限额" : "点击刷新读取 Codex 账号限额")
+                Text(display.hasLiveData ? "Codex 当前返回：\(display.windowSummaryText)" : "点击刷新读取 Codex 账号限额")
                     .font(themeStore.uiFont(.footnote))
                     .foregroundStyle(tokens.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1596,15 +1601,15 @@ private struct CodexUsagePanel: View {
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 HStack(alignment: .center, spacing: 8) {
-                    Image(systemName: windowSymbol(window.kind))
+                    Image(systemName: window.systemImage)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(tint)
                         .frame(width: 18)
-                    Text(window.kind.label)
+                    Text(window.label)
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
                         .monospacedDigit()
-                    Text(window.kind.title)
+                    Text(window.title)
                         .font(themeStore.uiFont(.footnote, weight: .medium))
                         .foregroundStyle(tokens.secondaryText)
                 }
@@ -1622,7 +1627,7 @@ private struct CodexUsagePanel: View {
             ProgressView(value: progress)
                 .tint(tint)
                 .opacity(window.progress == nil ? 0.34 : 1)
-                .accessibilityLabel("\(window.kind.label) Codex 用量")
+                .accessibilityLabel("\(window.accessibilityName)用量")
                 .accessibilityValue(window.primaryText)
 
             Text(window.resetText)
@@ -1689,25 +1694,14 @@ private struct CodexUsagePanel: View {
         await sessionStore.refreshCodexUsage()
     }
 
-    private func windowSymbol(_ kind: CodexUsageWindowKind) -> String {
-        switch kind {
-        case .fiveHour:
-            return "clock"
-        case .sevenDay:
-            return "calendar"
-        }
-    }
-
     private func windowTint(_ window: CodexUsageWindowDisplay, tokens: ThemeTokens) -> Color {
         if window.isExhausted || window.isNearLimit {
             return tokens.warning
         }
-        switch window.kind {
-        case .fiveHour:
-            return tokens.accent
-        case .sevenDay:
-            return tokens.success
+        if window.durationMinutes != nil {
+            return window.isDayScaleWindow ? tokens.success : tokens.accent
         }
+        return window.kind == .secondary ? tokens.success : tokens.accent
     }
 }
 

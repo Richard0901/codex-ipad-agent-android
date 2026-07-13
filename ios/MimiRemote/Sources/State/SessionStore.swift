@@ -1560,6 +1560,8 @@ final class SessionStore: ObservableObject {
             secondaryUsedPercent: 38,
             primaryResetsAt: Int64(now.addingTimeInterval(60 * 82).timeIntervalSince1970),
             secondaryResetsAt: Int64(now.addingTimeInterval(60 * 60 * 24 * 3).timeIntervalSince1970),
+            primaryWindowDurationMins: 300,
+            secondaryWindowDurationMins: 10_080,
             hasCredits: true,
             creditsUnlimited: false,
             creditBalance: "18.40"

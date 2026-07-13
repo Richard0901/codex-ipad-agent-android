@@ -1774,6 +1774,8 @@ struct RateLimitSummary: Codable, Hashable {
     let secondaryUsedPercent: Double?
     let primaryResetsAt: Int64?
     let secondaryResetsAt: Int64?
+    let primaryWindowDurationMins: Int?
+    let secondaryWindowDurationMins: Int?
     let hasCredits: Bool?
     let creditsUnlimited: Bool?
     let creditBalance: String?
@@ -1790,6 +1792,8 @@ struct RateLimitSummary: Codable, Hashable {
         case secondaryUsedPercent = "secondary_used_percent"
         case primaryResetsAt = "primary_resets_at"
         case secondaryResetsAt = "secondary_resets_at"
+        case primaryWindowDurationMins = "primary_window_duration_mins"
+        case secondaryWindowDurationMins = "secondary_window_duration_mins"
         case hasCredits = "has_credits"
         case creditsUnlimited = "credits_unlimited"
         case creditBalance = "credit_balance"
@@ -1807,6 +1811,8 @@ struct RateLimitSummary: Codable, Hashable {
         secondaryUsedPercent: Double? = nil,
         primaryResetsAt: Int64? = nil,
         secondaryResetsAt: Int64? = nil,
+        primaryWindowDurationMins: Int? = nil,
+        secondaryWindowDurationMins: Int? = nil,
         hasCredits: Bool? = nil,
         creditsUnlimited: Bool? = nil,
         creditBalance: String? = nil
@@ -1822,6 +1828,8 @@ struct RateLimitSummary: Codable, Hashable {
         self.secondaryUsedPercent = secondaryUsedPercent
         self.primaryResetsAt = primaryResetsAt
         self.secondaryResetsAt = secondaryResetsAt
+        self.primaryWindowDurationMins = primaryWindowDurationMins
+        self.secondaryWindowDurationMins = secondaryWindowDurationMins
         self.hasCredits = hasCredits
         self.creditsUnlimited = creditsUnlimited
         self.creditBalance = creditBalance
@@ -1975,34 +1983,19 @@ struct CodexUsageDisplaySummary: Equatable {
 }
 
 enum CodexUsageWindowKind: String, CaseIterable, Equatable, Identifiable {
-    case fiveHour
-    case sevenDay
+    case primary
+    case secondary
 
     var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .fiveHour:
-            return "5h"
-        case .sevenDay:
-            return "7d"
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .fiveHour:
-            return "短窗口"
-        case .sevenDay:
-            return "周窗口"
-        }
-    }
 }
 
 struct CodexUsageWindowDisplay: Equatable, Identifiable {
     static let nearLimitThreshold = 0.85
 
     let kind: CodexUsageWindowKind
+    let durationMinutes: Int?
+    let label: String
+    let title: String
     let usedPercentText: String?
     let progress: Double?
     let resetDate: Date?
@@ -2011,6 +2004,30 @@ struct CodexUsageWindowDisplay: Equatable, Identifiable {
     let isExhausted: Bool
 
     var id: String { kind.id }
+
+    var isDayScaleWindow: Bool {
+        guard let durationMinutes else {
+            return false
+        }
+        return durationMinutes >= 24 * 60
+    }
+
+    var systemImage: String {
+        isDayScaleWindow ? "calendar" : "clock"
+    }
+
+    var accessibilityName: String {
+        guard let durationMinutes, durationMinutes > 0 else {
+            return "Codex 账号窗口"
+        }
+        if durationMinutes % (24 * 60) == 0 {
+            return "Codex \(durationMinutes / (24 * 60)) 天窗口"
+        }
+        if durationMinutes % 60 == 0 {
+            return "Codex \(durationMinutes / 60) 小时窗口"
+        }
+        return "Codex \(durationMinutes) 分钟窗口"
+    }
 
     var primaryText: String {
         guard let usedPercentText else {
@@ -2044,17 +2061,32 @@ struct CodexUsageWindowDisplay: Equatable, Identifiable {
     }
 }
 
-// app-server 的账号限额以 primary/secondary 返回；移动端按 Codex 当前语义分别展示为 5h/7d，
-// 不再合并成单一“最危险窗口”，让“我的”页可以同时看短窗口和周窗口。
+// primary/secondary 只是 app-server 的窗口槽位，并不保证永远对应 5h/7d。
+// 展示层必须以服务端返回的 windowDurationMins 为准，避免产品调整额度策略后误标窗口。
 struct CodexUsageWindowsDisplay: Equatable {
     let displayName: String
     let creditText: String
     let windows: [CodexUsageWindowDisplay]
     let hasLiveData: Bool
 
+    var windowSummaryText: String {
+        guard !windows.isEmpty else {
+            return "尚未取得账号用量"
+        }
+        return "\(windows.map(\.label).joined(separator: " 和 ")) 账号窗口"
+    }
+
     static func make(rateLimit: RateLimitSummary?, now: Date = Date()) -> CodexUsageWindowsDisplay {
-        let windows = CodexUsageWindowKind.allCases.map { kind in
+        let windows = CodexUsageWindowKind.allCases.compactMap { kind in
             window(kind: kind, rateLimit: rateLimit, now: now)
+        }
+        .sorted { lhs, rhs in
+            let lhsDuration = lhs.durationMinutes ?? Int.max
+            let rhsDuration = rhs.durationMinutes ?? Int.max
+            if lhsDuration == rhsDuration {
+                return lhs.kind.rawValue < rhs.kind.rawValue
+            }
+            return lhsDuration < rhsDuration
         }
         return CodexUsageWindowsDisplay(
             displayName: rateLimit?.displayName ?? "Codex",
@@ -2068,16 +2100,24 @@ struct CodexUsageWindowsDisplay: Equatable {
         kind: CodexUsageWindowKind,
         rateLimit: RateLimitSummary?,
         now: Date
-    ) -> CodexUsageWindowDisplay {
+    ) -> CodexUsageWindowDisplay? {
         let percent: Double?
         let resetEpoch: Int64?
+        let durationMinutes: Int?
         switch kind {
-        case .fiveHour:
+        case .primary:
             percent = rateLimit?.primaryUsedPercent
             resetEpoch = rateLimit?.primaryResetsAt
-        case .sevenDay:
+            durationMinutes = rateLimit?.primaryWindowDurationMins
+        case .secondary:
             percent = rateLimit?.secondaryUsedPercent
             resetEpoch = rateLimit?.secondaryResetsAt
+            durationMinutes = rateLimit?.secondaryWindowDurationMins
+        }
+
+        // 只渲染服务端实际返回的窗口。nil rateLimit 时由外层空态承接，不伪造 5h/7d 占位行。
+        guard percent != nil || resetEpoch != nil || durationMinutes != nil else {
+            return nil
         }
 
         let progress = percent.map { min(max($0 / 100, 0), 1) }
@@ -2086,15 +2126,18 @@ struct CodexUsageWindowsDisplay: Equatable {
         let reachedType = rateLimit?.reachedType?.lowercased() ?? ""
         let reachedThisWindow: Bool
         switch kind {
-        case .fiveHour:
-            reachedThisWindow = reachedType.contains("primary") || reachedType.contains("5")
-        case .sevenDay:
-            reachedThisWindow = reachedType.contains("secondary") || reachedType.contains("7")
+        case .primary:
+            reachedThisWindow = reachedType.contains("primary")
+        case .secondary:
+            reachedThisWindow = reachedType.contains("secondary")
         }
         let isExhausted = reachedThisWindow || (boundedPercent ?? 0) >= 100
 
         return CodexUsageWindowDisplay(
             kind: kind,
+            durationMinutes: durationMinutes,
+            label: durationLabel(durationMinutes),
+            title: durationTitle(durationMinutes),
             usedPercentText: boundedPercent.map(percentText),
             progress: progress,
             resetDate: resetDate,
@@ -2102,6 +2145,30 @@ struct CodexUsageWindowsDisplay: Equatable {
             isNearLimit: (progress ?? 0) >= CodexUsageWindowDisplay.nearLimitThreshold,
             isExhausted: isExhausted
         )
+    }
+
+    private static func durationLabel(_ minutes: Int?) -> String {
+        guard let minutes, minutes > 0 else {
+            return "窗口"
+        }
+        if minutes % (24 * 60) == 0 {
+            return "\(minutes / (24 * 60))d"
+        }
+        if minutes % 60 == 0 {
+            return "\(minutes / 60)h"
+        }
+        return "\(minutes)m"
+    }
+
+    private static func durationTitle(_ minutes: Int?) -> String {
+        switch minutes {
+        case 300:
+            return "短窗口"
+        case 10_080:
+            return "周窗口"
+        default:
+            return "账号窗口"
+        }
     }
 
     private static func percentText(_ percent: Double) -> String {

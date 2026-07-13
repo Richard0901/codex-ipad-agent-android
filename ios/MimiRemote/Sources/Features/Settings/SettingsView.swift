@@ -136,7 +136,7 @@ private struct CodexUsageWindowRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text(window.kind.title)
+                Text("\(window.label) \(window.title)")
                 Spacer()
                 Text(window.primaryText)
                     .foregroundStyle(.secondary)
@@ -152,7 +152,7 @@ private struct CodexUsageWindowRow: View {
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(window.kind.title) 用量")
+        .accessibilityLabel("\(window.accessibilityName)用量")
         .accessibilityValue("\(window.primaryText)，\(window.resetText)")
     }
 }

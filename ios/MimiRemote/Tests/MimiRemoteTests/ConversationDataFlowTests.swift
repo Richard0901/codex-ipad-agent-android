@@ -15427,7 +15427,9 @@ extension ConversationDataFlowTests {
             limitName: "Codex",
             primaryUsedPercent: 60,
             secondaryUsedPercent: 42,
-            primaryResetsAt: resetEpoch
+            primaryResetsAt: resetEpoch,
+            primaryWindowDurationMins: 300,
+            secondaryWindowDurationMins: 10_080
         )
         let display = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: summary, now: now))
         XCTAssertEqual(display.title, "Codex 使用量")
@@ -15440,11 +15442,14 @@ extension ConversationDataFlowTests {
         XCTAssertFalse(display.isExhausted)
 
         let windowsDisplay = CodexUsageWindowsDisplay.make(rateLimit: summary, now: now)
-        let fiveHourWindow = try XCTUnwrap(windowsDisplay.windows.first { $0.kind == .fiveHour })
-        let sevenDayWindow = try XCTUnwrap(windowsDisplay.windows.first { $0.kind == .sevenDay })
+        let fiveHourWindow = try XCTUnwrap(windowsDisplay.windows.first { $0.kind == .primary })
+        let sevenDayWindow = try XCTUnwrap(windowsDisplay.windows.first { $0.kind == .secondary })
         XCTAssertEqual(windowsDisplay.displayName, "Codex")
         XCTAssertEqual(windowsDisplay.creditText, "暂无余额信息")
         XCTAssertTrue(windowsDisplay.hasLiveData)
+        XCTAssertEqual(windowsDisplay.windowSummaryText, "5h 和 7d 账号窗口")
+        XCTAssertEqual(fiveHourWindow.label, "5h")
+        XCTAssertEqual(fiveHourWindow.title, "短窗口")
         XCTAssertEqual(fiveHourWindow.primaryText, "已用 60%")
         XCTAssertEqual(fiveHourWindow.progress ?? -1, 0.6, accuracy: 0.0001)
         XCTAssertEqual(fiveHourWindow.remainingProgress ?? -1, 0.4, accuracy: 0.0001)
@@ -15453,6 +15458,8 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(fiveHourWindow.resetDate, Date(timeIntervalSince1970: TimeInterval(resetEpoch)))
         XCTAssertEqual(fiveHourWindow.resetText.hasSuffix(" 重置"), true)
         XCTAssertEqual(sevenDayWindow.primaryText, "已用 42%")
+        XCTAssertEqual(sevenDayWindow.label, "7d")
+        XCTAssertEqual(sevenDayWindow.title, "周窗口")
         XCTAssertEqual(sevenDayWindow.remainingProgress ?? -1, 0.58, accuracy: 0.0001)
         XCTAssertEqual(sevenDayWindow.remainingText, "剩余 58%")
         XCTAssertNil(sevenDayWindow.resetDate)
@@ -15460,19 +15467,15 @@ extension ConversationDataFlowTests {
 
         let pendingWindowsDisplay = CodexUsageWindowsDisplay.make(rateLimit: nil, now: now)
         XCTAssertFalse(pendingWindowsDisplay.hasLiveData)
-        let pendingFiveHour = try XCTUnwrap(pendingWindowsDisplay.windows.first { $0.kind == .fiveHour })
-        XCTAssertEqual(pendingFiveHour.primaryText, "等待刷新")
-        XCTAssertNil(pendingFiveHour.remainingProgress)
-        XCTAssertNil(pendingFiveHour.remainingPercentText)
-        XCTAssertEqual(pendingFiveHour.remainingText, "等待刷新")
-        XCTAssertEqual(try XCTUnwrap(pendingWindowsDisplay.windows.first { $0.kind == .sevenDay }).primaryText, "等待刷新")
+        XCTAssertTrue(pendingWindowsDisplay.windows.isEmpty)
+        XCTAssertEqual(pendingWindowsDisplay.windowSummaryText, "尚未取得账号用量")
 
         let boundedWindows = CodexUsageWindowsDisplay.make(
             rateLimit: RateLimitSummary(primaryUsedPercent: -10, secondaryUsedPercent: 125),
             now: now
         )
-        let boundedFiveHour = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .fiveHour })
-        let boundedSevenDay = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .sevenDay })
+        let boundedFiveHour = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .primary })
+        let boundedSevenDay = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .secondary })
         XCTAssertEqual(boundedFiveHour.remainingProgress ?? -1, 1, accuracy: 0.0001)
         XCTAssertEqual(boundedFiveHour.remainingText, "剩余 100%")
         XCTAssertEqual(boundedSevenDay.remainingProgress ?? -1, 0, accuracy: 0.0001)
@@ -15482,8 +15485,32 @@ extension ConversationDataFlowTests {
             rateLimit: RateLimitSummary(primaryUsedPercent: 10.5),
             now: now
         )
-        let fractionalFiveHour = try XCTUnwrap(fractionalWindows.windows.first { $0.kind == .fiveHour })
+        let fractionalFiveHour = try XCTUnwrap(fractionalWindows.windows.first { $0.kind == .primary })
         XCTAssertEqual(fractionalFiveHour.remainingText, "剩余 89.5%")
+
+        let weeklyOnly = CodexUsageWindowsDisplay.make(
+            rateLimit: RateLimitSummary(
+                primaryUsedPercent: 2,
+                primaryResetsAt: resetEpoch,
+                primaryWindowDurationMins: 10_080
+            ),
+            now: now
+        )
+        XCTAssertEqual(weeklyOnly.windows.count, 1)
+        XCTAssertEqual(weeklyOnly.windows.first?.label, "7d")
+        XCTAssertEqual(weeklyOnly.windows.first?.title, "周窗口")
+        XCTAssertEqual(weeklyOnly.windowSummaryText, "7d 账号窗口")
+
+        let customAndUnknown = CodexUsageWindowsDisplay.make(
+            rateLimit: RateLimitSummary(
+                primaryUsedPercent: 12,
+                secondaryUsedPercent: 24,
+                primaryWindowDurationMins: 90
+            ),
+            now: now
+        )
+        XCTAssertEqual(customAndUnknown.windows.map(\.label), ["90m", "窗口"])
+        XCTAssertEqual(customAndUnknown.windows.map(\.title), ["账号窗口", "账号窗口"])
 
         let eightyPercent = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: RateLimitSummary(primaryUsedPercent: 80), now: now))
         XCTAssertFalse(eightyPercent.isNearLimit)
@@ -15521,8 +15548,8 @@ extension ConversationDataFlowTests {
             ),
             now: now
         )
-        XCTAssertFalse(try XCTUnwrap(secondaryWindows.windows.first { $0.kind == .fiveHour }).isExhausted)
-        XCTAssertTrue(try XCTUnwrap(secondaryWindows.windows.first { $0.kind == .sevenDay }).isExhausted)
+        XCTAssertFalse(try XCTUnwrap(secondaryWindows.windows.first { $0.kind == .primary }).isExhausted)
+        XCTAssertTrue(try XCTUnwrap(secondaryWindows.windows.first { $0.kind == .secondary }).isExhausted)
     }
 
     func testUsageRingMetricsAdaptToIPadMiniAndIPhone() {
@@ -15535,6 +15562,15 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(iPhone.diameter, 30)
         XCTAssertEqual(iPhone.innerDiameter, 20)
         XCTAssertEqual(iPhone.hitSize, 44)
+    }
+
+    func testPhotoLibraryPickerConfigurationSupportsOrderedMultipleSelection() {
+        let configuration = PhotoLibraryPicker.makeConfiguration(selectionLimit: 8)
+        XCTAssertEqual(configuration.selectionLimit, 8)
+        XCTAssertEqual(configuration.selection, .ordered)
+
+        let clampedConfiguration = PhotoLibraryPicker.makeConfiguration(selectionLimit: 0)
+        XCTAssertEqual(clampedConfiguration.selectionLimit, 1)
     }
 
     func testDirectRuntimeAttachesUsageDisplayForAvailableRateLimit() async throws {
@@ -15573,7 +15609,7 @@ extension ConversationDataFlowTests {
         XCTAssertNil(initialSession.rateLimit)
 
         let rateLimit = try await waitForFakeAppServerRequest(transport, method: "account/rateLimits/read")
-        transportResponse(transport, id: rateLimit.id, result: #"{"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":"Codex","primary":{"usedPercent":60,"resetsAt":1780494300},"secondary":{"usedPercent":42},"credits":{"hasCredits":false,"unlimited":false}}}}"#)
+        transportResponse(transport, id: rateLimit.id, result: #"{"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":"Codex","primary":{"usedPercent":60,"resetsAt":1780494300,"windowDurationMins":300},"secondary":{"usedPercent":42,"window_duration_mins":10080},"credits":{"hasCredits":false,"unlimited":false}}}}"#)
 
         let messagesBeforeSecondPage = await transport.sentMessages().count
         let secondPageTask = Task {
@@ -15585,6 +15621,8 @@ extension ConversationDataFlowTests {
         let refreshedPage = try await secondPageTask.value
         let session = try XCTUnwrap(refreshedPage.sessions.first)
         XCTAssertEqual(session.rateLimit?.compactText, "已用 60%")
+        XCTAssertEqual(session.rateLimit?.primaryWindowDurationMins, 300)
+        XCTAssertEqual(session.rateLimit?.secondaryWindowDurationMins, 10_080)
         let display = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: session.rateLimit, now: Date(timeIntervalSince1970: 1_780_490_700)))
         XCTAssertEqual(display.primaryText, "已用 60%")
         XCTAssertEqual(display.progress ?? -1, 0.6, accuracy: 0.0001)

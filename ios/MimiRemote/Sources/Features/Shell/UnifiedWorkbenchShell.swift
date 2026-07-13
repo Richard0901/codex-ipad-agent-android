@@ -507,24 +507,18 @@ private struct CodexUsageRingsControl: View {
     }
 
     private func usageRings(metrics: CodexUsageRingMetrics, tokens: ThemeTokens) -> some View {
-        let fiveHour = window(.fiveHour)
-        let sevenDay = window(.sevenDay)
+        let windows = Array(display.windows.prefix(2))
 
         return ZStack {
-            usageRing(
-                progress: sevenDay?.remainingProgress,
-                diameter: metrics.diameter,
-                lineWidth: metrics.outerLineWidth,
-                tint: tint(for: .sevenDay),
-                tokens: tokens
-            )
-            usageRing(
-                progress: fiveHour?.remainingProgress,
-                diameter: metrics.innerDiameter,
-                lineWidth: metrics.innerLineWidth,
-                tint: tint(for: .fiveHour),
-                tokens: tokens
-            )
+            ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
+                usageRing(
+                    progress: window.remainingProgress,
+                    diameter: windows.count == 1 || index == 1 ? metrics.diameter : metrics.innerDiameter,
+                    lineWidth: windows.count == 1 || index == 1 ? metrics.outerLineWidth : metrics.innerLineWidth,
+                    tint: tint(for: window),
+                    tokens: tokens
+                )
+            }
 
             if !hasUsageProgress {
                 Text("?")
@@ -565,7 +559,7 @@ private struct CodexUsageRingsControl: View {
                     Text("Codex 剩余用量")
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
-                    Text(display.hasLiveData ? "5h 和 7d 账号窗口" : "尚未取得账号用量")
+                    Text(display.windowSummaryText)
                         .font(themeStore.uiFont(.caption))
                         .foregroundStyle(tokens.secondaryText)
                 }
@@ -599,9 +593,19 @@ private struct CodexUsageRingsControl: View {
             }
 
             VStack(spacing: 14) {
-                usageWindowRow(kind: .fiveHour, tokens: tokens)
-                Divider().overlay(tokens.border.opacity(0.72))
-                usageWindowRow(kind: .sevenDay, tokens: tokens)
+                if display.windows.isEmpty {
+                    Text("刷新后显示 Codex 当前返回的账号窗口")
+                        .font(themeStore.uiFont(.caption))
+                        .foregroundStyle(tokens.secondaryText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ForEach(Array(display.windows.enumerated()), id: \.element.id) { index, window in
+                        if index > 0 {
+                            Divider().overlay(tokens.border.opacity(0.72))
+                        }
+                        usageWindowRow(window: window, tokens: tokens)
+                    }
+                }
             }
 
             HStack(spacing: 7) {
@@ -618,44 +622,43 @@ private struct CodexUsageRingsControl: View {
         .frame(maxWidth: horizontalSizeClass == .compact ? .infinity : nil, alignment: .leading)
     }
 
-    private func usageWindowRow(kind: CodexUsageWindowKind, tokens: ThemeTokens) -> some View {
-        let item = window(kind)
-        let progress = item?.remainingProgress ?? 0
-        let tint = tint(for: kind)
+    private func usageWindowRow(window: CodexUsageWindowDisplay, tokens: ThemeTokens) -> some View {
+        let progress = window.remainingProgress ?? 0
+        let tint = tint(for: window)
 
         return VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Circle()
                     .stroke(tint, lineWidth: 2.5)
                     .frame(width: 12, height: 12)
-                Text(kind.label)
+                Text(window.label)
                     .font(themeStore.uiFont(.callout, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
                     .monospacedDigit()
-                Text(kind.title)
+                Text(window.title)
                     .font(themeStore.uiFont(.caption, weight: .medium))
                     .foregroundStyle(tokens.secondaryText)
 
                 Spacer(minLength: 8)
 
-                Text(item?.remainingText ?? "等待刷新")
+                Text(window.remainingText)
                     .font(themeStore.uiFont(.callout, weight: .semibold))
-                    .foregroundStyle(item?.remainingProgress == nil ? tokens.secondaryText : tint)
+                    .foregroundStyle(window.remainingProgress == nil ? tokens.secondaryText : tint)
                     .monospacedDigit()
             }
 
             ProgressView(value: progress)
                 .tint(tint)
-                .opacity(item?.remainingProgress == nil ? 0.3 : 1)
+                .opacity(window.remainingProgress == nil ? 0.3 : 1)
 
-            Text(item?.resetText ?? "暂无重置时间")
+            Text(window.resetText)
                 .font(themeStore.uiFont(.caption))
                 .foregroundStyle(tokens.secondaryText)
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(kind.label) Codex 剩余用量")
-        .accessibilityValue("\(item?.remainingText ?? "等待刷新")，\(item?.resetText ?? "暂无重置时间")")
+        .accessibilityLabel("\(window.accessibilityName)剩余用量")
+        .accessibilityValue("\(window.remainingText)，\(window.resetText)")
     }
 
     private func refreshUsage() async {
@@ -665,27 +668,24 @@ private struct CodexUsageRingsControl: View {
         await onRefresh()
     }
 
-    private func window(_ kind: CodexUsageWindowKind) -> CodexUsageWindowDisplay? {
-        display.windows.first { $0.kind == kind }
-    }
-
     private var hasUsageProgress: Bool {
         display.windows.contains { $0.remainingProgress != nil }
     }
 
-    private func tint(for kind: CodexUsageWindowKind) -> Color {
-        switch kind {
-        case .fiveHour:
-            return .cyan
-        case .sevenDay:
-            return .pink
+    private func tint(for window: CodexUsageWindowDisplay) -> Color {
+        if window.durationMinutes != nil {
+            return window.isDayScaleWindow ? .pink : .cyan
         }
+        return window.kind == .secondary ? .pink : .cyan
     }
 
     private var accessibilityValue: String {
-        let fiveHour = window(.fiveHour)?.remainingText ?? "等待刷新"
-        let sevenDay = window(.sevenDay)?.remainingText ?? "等待刷新"
-        return "5 小时\(fiveHour)，7 天\(sevenDay)"
+        guard !display.windows.isEmpty else {
+            return "尚未取得账号用量"
+        }
+        return display.windows
+            .map { "\($0.accessibilityName)\($0.remainingText)" }
+            .joined(separator: "，")
     }
 }
 

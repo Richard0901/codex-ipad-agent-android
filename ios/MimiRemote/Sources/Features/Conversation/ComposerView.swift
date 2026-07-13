@@ -99,7 +99,7 @@ struct ComposerView: View {
     @State private var activeComposerDraftScope = ComposerDraftScopeKey.none
     @State private var composerTextExternalRevision = 0
     @StateObject private var voiceInput = VoiceInputController()
-    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    @State private var photoLibraryPickerRequest: PhotoLibraryPickerRequest?
     @State private var manualInputKind: ManualInputKind = .localImage
     @State private var showsAddContentPanel = false
     @State private var showsManualInputSheet = false
@@ -178,6 +178,16 @@ struct ComposerView: View {
                 .environmentObject(sessionStore)
                 .environmentObject(themeStore)
         }
+        .sheet(item: $photoLibraryPickerRequest) { request in
+            PhotoLibraryPicker(selectionLimit: request.selectionLimit) { results in
+                photoLibraryPickerRequest = nil
+                guard !results.isEmpty else {
+                    return
+                }
+                loadPhotoAttachments(results, targetScope: request.targetScope)
+            }
+            .ignoresSafeArea()
+        }
         .fileImporter(
             isPresented: $showsImageFileImporter,
             allowedContentTypes: [.image],
@@ -190,14 +200,6 @@ struct ComposerView: View {
             case .failure(let error):
                 attachmentErrorMessage = userFacingAttachmentError(error)
             }
-        }
-        .onChange(of: selectedPhotoItems) { _, items in
-            guard !items.isEmpty else {
-                return
-            }
-            showsAddContentPanel = false
-            selectedPhotoItems = []
-            loadPhotoAttachments(items)
         }
         .onChange(of: developerModeEnabled) { _, enabled in
             guard !enabled else {
@@ -985,11 +987,12 @@ struct ComposerView: View {
         .help("添加图片、Skill、Mention 或快捷短语")
         .popover(isPresented: $showsAddContentPanel, arrowEdge: .bottom) {
             AddContentPanel(
-                selectedPhotoItems: $selectedPhotoItems,
-                maxPhotoSelectionCount: Self.maximumImageAttachmentCount,
                 skillShortcuts: enabledSkillShortcuts,
                 capabilityErrorMessage: sessionStore.capabilityErrorMessage,
                 isRefreshingCapabilities: sessionStore.isRefreshingCapabilities,
+                onPickPhotos: {
+                    presentPhotoLibraryPicker()
+                },
                 onPickImageFile: {
                     showsAddContentPanel = false
                     showsImageFileImporter = true
@@ -2306,12 +2309,35 @@ struct ComposerView: View {
         return nil
     }
 
-    private func loadPhotoAttachments(_ items: [PhotosPickerItem]) {
+    private func presentPhotoLibraryPicker() {
         let targetScope = activeComposerDraftScope
         let availableCount = remainingImageAttachmentCapacity(for: targetScope)
-        let selectedItems = Array(items.prefix(availableCount))
-        let skippedCount = max(0, items.count - selectedItems.count)
-        guard !selectedItems.isEmpty else {
+        guard availableCount > 0 else {
+            attachmentErrorMessage = "每个草稿最多添加 \(Self.maximumImageAttachmentCount) 张图片"
+            showsAddContentPanel = false
+            return
+        }
+
+        showsAddContentPanel = false
+        let request = PhotoLibraryPickerRequest(
+            selectionLimit: availableCount,
+            targetScope: targetScope
+        )
+        Task { @MainActor in
+            // 等承载入口的 popover 完成收起后再展示系统照片库，避免 iPad 上两个 presentation 竞争。
+            await Task.yield()
+            photoLibraryPickerRequest = request
+        }
+    }
+
+    private func loadPhotoAttachments(
+        _ results: [PHPickerResult],
+        targetScope: ComposerDraftScopeKey
+    ) {
+        let availableCount = remainingImageAttachmentCapacity(for: targetScope)
+        let selectedResults = Array(results.prefix(availableCount))
+        let skippedCount = max(0, results.count - selectedResults.count)
+        guard !selectedResults.isEmpty else {
             attachmentErrorMessage = "每个草稿最多添加 \(Self.maximumImageAttachmentCount) 张图片"
             return
         }
@@ -2322,12 +2348,9 @@ struct ComposerView: View {
             var firstError: Error?
 
             // 串行读取和下采样，避免多张 iPad 截图同时完整解码造成瞬时内存峰值。
-            for item in selectedItems {
+            for result in selectedResults {
                 do {
-                    guard let data = try await item.loadTransferable(type: Data.self) else {
-                        failedCount += 1
-                        continue
-                    }
+                    let data = try await Self.loadImageData(from: result.itemProvider)
                     let prepared = try await Task.detached(priority: .userInitiated) {
                         try ImageAttachmentEncoder.prepare(data)
                     }.value
@@ -2345,6 +2368,24 @@ struct ComposerView: View {
                 skippedCount: skippedCount + max(0, preparedInputs.count - addedCount),
                 firstError: firstError
             )
+        }
+    }
+
+    private static func loadImageData(from provider: NSItemProvider) async throws -> Data {
+        guard provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) else {
+            throw PhotoLibraryPickerError.unsupportedImage
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, error in
+                if let data {
+                    continuation.resume(returning: data)
+                } else if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(throwing: PhotoLibraryPickerError.unreadableImage)
+                }
+            }
         }
     }
 
@@ -3167,15 +3208,76 @@ private struct AttachmentPreviewSheet: View {
     }
 }
 
+private struct PhotoLibraryPickerRequest: Identifiable {
+    let id = UUID()
+    let selectionLimit: Int
+    let targetScope: ComposerDraftScopeKey
+}
+
+private enum PhotoLibraryPickerError: LocalizedError {
+    case unsupportedImage
+    case unreadableImage
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedImage:
+            return "所选项目不是支持的图片"
+        case .unreadableImage:
+            return "无法读取所选图片"
+        }
+    }
+}
+
+struct PhotoLibraryPicker: UIViewControllerRepresentable {
+    let selectionLimit: Int
+    let onFinish: ([PHPickerResult]) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFinish: onFinish)
+    }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        let configuration = Self.makeConfiguration(selectionLimit: selectionLimit)
+
+        let picker = PHPickerViewController(configuration: configuration)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    static func makeConfiguration(selectionLimit: Int) -> PHPickerConfiguration {
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
+        configuration.filter = .images
+        configuration.selectionLimit = max(1, selectionLimit)
+        configuration.selection = .ordered
+        return configuration
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {
+        context.coordinator.onFinish = onFinish
+    }
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        var onFinish: ([PHPickerResult]) -> Void
+
+        init(onFinish: @escaping ([PHPickerResult]) -> Void) {
+            self.onFinish = onFinish
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            // PHPicker 只在用户点击“添加/取消”后进入这里，因此一次回传完整有序选择。
+            onFinish(results)
+        }
+    }
+}
+
 private struct AddContentPanel: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
-    @Binding var selectedPhotoItems: [PhotosPickerItem]
 
-    let maxPhotoSelectionCount: Int
     let skillShortcuts: [SkillCapability]
     let capabilityErrorMessage: String?
     let isRefreshingCapabilities: Bool
+    let onPickPhotos: () -> Void
     let onPickImageFile: () -> Void
     let onManualInput: (ManualInputKind) -> Void
     let onSkillShortcut: (SkillCapability) -> Void
@@ -3193,13 +3295,9 @@ private struct AddContentPanel: View {
         VStack(alignment: .leading, spacing: 14) {
             panelSection("图片") {
                 LazyVGrid(columns: columns, spacing: 8) {
-                    PhotosPicker(
-                        selection: $selectedPhotoItems,
-                        maxSelectionCount: maxPhotoSelectionCount,
-                        selectionBehavior: .ordered,
-                        matching: .images,
-                        preferredItemEncoding: .automatic
-                    ) {
+                    Button {
+                        onPickPhotos()
+                    } label: {
                         panelActionLabel("图片（可多选）", systemImage: "photo.on.rectangle.angled")
                     }
                     .buttonStyle(.bordered)

@@ -2249,6 +2249,14 @@ actor CodexAppServerSessionRuntime {
             secondaryUsedPercent: firstDouble(in: secondary, keys: ["usedPercent", "used_percent"]),
             primaryResetsAt: firstInt64(in: primary, keys: ["resetsAt", "resets_at"]),
             secondaryResetsAt: firstInt64(in: secondary, keys: ["resetsAt", "resets_at"]),
+            primaryWindowDurationMins: firstInt64(
+                in: primary,
+                keys: ["windowDurationMins", "window_duration_mins"]
+            ).flatMap { Int(exactly: $0) },
+            secondaryWindowDurationMins: firstInt64(
+                in: secondary,
+                keys: ["windowDurationMins", "window_duration_mins"]
+            ).flatMap { Int(exactly: $0) },
             hasCredits: firstBool(in: credits, keys: ["hasCredits", "has_credits"]),
             creditsUnlimited: firstBool(in: credits, keys: ["unlimited", "credits_unlimited"]),
             creditBalance: firstString(in: credits ?? [:], keys: ["balance", "credit_balance"])
@@ -2259,6 +2267,10 @@ actor CodexAppServerSessionRuntime {
            summary.reachedType == nil,
            summary.primaryUsedPercent == nil,
            summary.secondaryUsedPercent == nil,
+           summary.primaryResetsAt == nil,
+           summary.secondaryResetsAt == nil,
+           summary.primaryWindowDurationMins == nil,
+           summary.secondaryWindowDurationMins == nil,
            summary.hasCredits == nil,
            summary.creditBalance == nil {
             return nil
