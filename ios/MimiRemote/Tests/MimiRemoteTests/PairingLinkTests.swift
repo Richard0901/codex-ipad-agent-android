@@ -473,10 +473,17 @@ final class PairingLinkTests: XCTestCase {
         XCTAssertEqual(keychain.deleteCallCount, deleteCallCountBeforeClear + 1)
     }
 
-    func testATSOnlyAllowsLocalNetworkingAndTailscaleDomain() throws {
+    func testATSAllowsTailscaleHTTPWithoutLocalNetworkingOverride() throws {
         let ats = try XCTUnwrap(Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Any])
-        XCTAssertNil(ats["NSAllowsArbitraryLoads"], "发布包不能全局关闭 ATS")
-        XCTAssertEqual(ats["NSAllowsLocalNetworking"] as? Bool, true)
+        XCTAssertEqual(
+            ats["NSAllowsArbitraryLoads"] as? Bool,
+            true,
+            "iOS 27 上 Tailscale 裸 IP HTTP 需要系统层放行，公网 HTTP 由应用层拒绝"
+        )
+        XCTAssertNil(
+            ats["NSAllowsLocalNetworking"],
+            "不得与 NSAllowsArbitraryLoads 同时声明，否则新系统会忽略全局放行"
+        )
 
         let domains = try XCTUnwrap(ats["NSExceptionDomains"] as? [String: Any])
         let tailscale = try XCTUnwrap(domains["ts.net"] as? [String: Any])

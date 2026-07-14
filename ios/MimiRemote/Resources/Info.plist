@@ -40,8 +40,8 @@
 	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- agentd 只通过本机、局域网或 Tailscale 提供 HTTP；公网仍保持 ATS 默认 HTTPS 要求。 -->
-		<key>NSAllowsLocalNetworking</key>
+		<!-- iOS 27 上 NSAllowsLocalNetworking 仍会拦截 Tailscale 裸 IP HTTP。系统层允许 HTTP，应用层再只放行本机、局域网和 Tailscale 地址。 -->
+		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 		<key>NSExceptionDomains</key>
 		<dict>

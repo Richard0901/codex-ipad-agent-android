@@ -6,14 +6,15 @@ INFO_PLIST="$ROOT_DIR/ios/MimiRemote/Resources/Info.plist"
 
 plutil -lint "$INFO_PLIST" >/dev/null
 
-# ATS 是发布安全边界：允许本机/Tailscale 私网连接，但不能重新打开全局 HTTP。
+# iOS 27 实测中 NSAllowsLocalNetworking 仍会拦截 Tailscale 裸 IP HTTP。
+# 系统层需允许 HTTP，真正的安全边界由 EndpointTransportPolicy 在 REST 和 WebSocket 请求前统一执行。
 # 用系统 Ruby 解析 plutil JSON，避免 CI 额外安装依赖。
 plutil -convert json -o - "$INFO_PLIST" | ruby -rjson -e '
   info = JSON.parse(STDIN.read)
   ats = info.fetch("NSAppTransportSecurity")
 
-  abort "禁止启用 NSAllowsArbitraryLoads；公网连接必须使用 HTTPS" if ats["NSAllowsArbitraryLoads"] == true
-  abort "必须声明 NSAllowsLocalNetworking，供本机和 Tailscale IP 连接使用" unless ats["NSAllowsLocalNetworking"] == true
+  abort "必须启用 NSAllowsArbitraryLoads，否则 iOS 27 会拦截 Tailscale 裸 IP HTTP" unless ats["NSAllowsArbitraryLoads"] == true
+  abort "不得同时声明 NSAllowsLocalNetworking；新系统会因此忽略 NSAllowsArbitraryLoads" if ats.key?("NSAllowsLocalNetworking")
 
   domains = ats.fetch("NSExceptionDomains", {})
   insecure_domains = domains.each_with_object([]) do |(name, settings), result|
@@ -23,4 +24,4 @@ plutil -convert json -o - "$INFO_PLIST" | ruby -rjson -e '
   abort "发现未批准的 HTTP ATS 例外：#{unexpected.join(", ")}" unless unexpected.empty?
 '
 
-echo "iOS ATS 配置检查通过：仅允许本地网络和批准的 Tailscale 例外"
+echo "iOS ATS 配置检查通过：系统层允许 Tailscale HTTP，应用层负责拒绝公网 HTTP"

@@ -40,7 +40,7 @@ agentd doctor
 
 相机权限被拒绝或受设备限制时，扫码页会提供“前往系统设置”和“改用手动连接”；相机不可用或配置失败时也可选择手动连接，回到当前连接页后自动展开已有的手动连接区域。App 只在用户主动打开扫码页时申请相机权限，不增加后台相机能力。
 
-App 可以保存多台 Mac，但同一时间只连接一台。每台 Mac 的 Token 存入独立 Keychain account；UserDefaults 只保存显示名、Endpoint、最近成功时间和当前档案 ID。已有档案可在设置中重命名，名称会 trim 且最多 48 个字符；重命名只更新本地非敏感元数据，不读取 Keychain、不切换 Endpoint，也不重建 WebSocket。“忘记当前 Mac”和删除非当前档案都会先明确提示将删除系统 Keychain 访问码、需要重新扫码配对，只有用户二次确认后才执行。旧版单 Endpoint/Token 会按 Keychain-first 顺序迁移，失败时继续保留原连接。iPad 客户端只保存 Mac 的 Tailscale Endpoint，旧版本保存过的备用公网配置会在启动时自动清理。当前支持 `http://100.x.x.x:8787` 这类 Tailscale 裸 IP；ATS 已收窄为 `NSAllowsLocalNetworking` 和 `ts.net` 子域例外，应用层会额外拒绝公网 HTTP。公开发布仍推荐评估 MagicDNS HTTPS，减少私网 HTTP 的运维解释成本。
+App 可以保存多台 Mac，但同一时间只连接一台。每台 Mac 的 Token 存入独立 Keychain account；UserDefaults 只保存显示名、Endpoint、最近成功时间和当前档案 ID。已有档案可在设置中重命名，名称会 trim 且最多 48 个字符；重命名只更新本地非敏感元数据，不读取 Keychain、不切换 Endpoint，也不重建 WebSocket。“忘记当前 Mac”和删除非当前档案都会先明确提示将删除系统 Keychain 访问码、需要重新扫码配对，只有用户二次确认后才执行。旧版单 Endpoint/Token 会按 Keychain-first 顺序迁移，失败时继续保留原连接。iPad 客户端只保存 Mac 的 Tailscale Endpoint，旧版本保存过的备用公网配置会在启动时自动清理。当前支持 `http://100.x.x.x:8787` 这类 Tailscale 裸 IP；由于 iOS 27 实测中 `NSAllowsLocalNetworking` 仍会拦截该地址，系统层使用 `NSAllowsArbitraryLoads`，应用层在设置、REST 和 WebSocket 三层统一拒绝公网 HTTP。公开发布仍推荐评估 MagicDNS HTTPS，减少私网 HTTP 的运维解释成本。
 
 会话提醒和运行态本地通知支持点击回到目标会话。系统通知 payload 只保存版本、profile/project/session 路由，不保存 Token 或明文 Endpoint；只有当前活动 Mac 可以直接打开，其他档案的通知只提示用户到设置中手动切换，不会在后台读取 Token 或自动跨连接。
 
@@ -181,7 +181,7 @@ REFRESH_INSTALL=1 ./scripts/deploy-ipad.sh
 - direct 模式仍需要 app-server WebSocket transport 或 agentd 薄网关。
 - 每个 session 当前只允许一个 iOS WebSocket attach。
 - app-server runtime 走结构化事件；iOS 不再用 PTY/TUI 文本启发式解析消息气泡。
-- 当前后端默认是 HTTP，App 通过 `NSAllowsLocalNetworking` 和 `ts.net` 精确例外访问，并在应用层只允许本机、私网或 Tailscale Endpoint；不提供应用层公网备用入口。发布前仍需用真机验收 Tailscale IP、前后台切换和弱网恢复，并优先评估 MagicDNS 域名 + HTTPS。
+- 当前后端默认是 HTTP。iOS 27 上 Tailscale 裸 IP 需要 `NSAllowsArbitraryLoads`，App 再在应用层只允许本机、私网或 Tailscale Endpoint；不提供应用层公网备用入口。发布前仍需用真机验收 Tailscale IP、前后台切换和弱网恢复，并优先评估 MagicDNS 域名 + HTTPS。
 - 弱网恢复逻辑已有确定性回归测试，但仍需在真机上验证 Wi-Fi/蜂窝切换、前后台切换和 Tailscale VPN 暂停/恢复。
 - Managed Worktree 不做无人值守自动删除；多个 checkout 也不能形成文件系统事务，极端外部竞争可能返回结构化部分结果，需要以服务端最新列表为准。
 

@@ -330,7 +330,7 @@ App 首次启动会进入设置页：
 - Endpoint：例如 `http://127.0.0.1:8787` 或 `http://100.x.y.z:8787`
 - Token：`AGENTD_TOKEN`
 
-App 可以保存多台 Mac，但同一时间只连接一台。每台 Mac 的 Token 使用独立 iOS Keychain account 保存，UserDefaults 只保存显示名、Endpoint、最近成功时间和当前档案 ID，不保存 Token；已有档案可在设置中重命名，这个操作只更新本地显示名称，不读取 Token，也不重建当前连接。“忘记当前 Mac”或删除其它档案会先展示目标和重新配对影响，只有二次确认后才删除 Keychain 访问码。iPad App 固定走 `/api/app-server/ws` + app-server JSON-RPC 直连链路。为了支持本机/Tailscale HTTP，App 只声明 `NSAllowsLocalNetworking` 和 `ts.net` 子域例外，不再开启全局 `NSAllowsArbitraryLoads`；应用层还会在设置提交、REST 请求和 WebSocket 握手前统一校验 Endpoint，只允许本机、局域网、Tailscale、`.ts.net` 或 HTTPS。CI 会阻止全局 ATS 放行被重新引入。不要把 agentd 暴露到公网。
+App 可以保存多台 Mac，但同一时间只连接一台。每台 Mac 的 Token 使用独立 iOS Keychain account 保存，UserDefaults 只保存显示名、Endpoint、最近成功时间和当前档案 ID，不保存 Token；已有档案可在设置中重命名，这个操作只更新本地显示名称，不读取 Token，也不重建当前连接。“忘记当前 Mac”或删除其它档案会先展示目标和重新配对影响，只有二次确认后才删除 Keychain 访问码。iPad App 固定走 `/api/app-server/ws` + app-server JSON-RPC 直连链路。为了支持本机/Tailscale 裸 IP HTTP，App 在系统层声明 `NSAllowsArbitraryLoads`；iOS 27 实测中只声明 `NSAllowsLocalNetworking` 仍会触发 ATS `-1022`。安全边界由应用层在设置提交、REST 请求和 WebSocket 握手前统一校验 Endpoint，只允许本机、局域网、Tailscale、`.ts.net` 或 HTTPS。CI 会防止 ATS 配置再次拦截 Tailscale HTTP，并保留应用层公网 HTTP 拒绝测试。不要把 agentd 暴露到公网。
 
 App 端设计边界：
 

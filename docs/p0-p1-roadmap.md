@@ -29,7 +29,7 @@
 | Gateway 协议边界 | 已完成 | 当前只放行 23 个移动端需要的方法；`thread/search` 请求严格按 schema 重建，响应按 project、`browse_roots` 和 managed Worktree 的 cwd scope 逐条裁剪；反向 Server Request fail-closed；Review 仅允许 inline；Codex `0.144.2` 协议漂移由快照检查阻断。 |
 | PR 质量门禁 | 本轮完成配置 | Go/iOS/协议回归外，新增当前工作树 + Git 历史凭据扫描、Action SHA 固定、第三方许可证正文/版本门禁、隐私清单门禁。推送后仍需以 GitHub Actions 真实运行结果作为最终证据。 |
 | 公开二进制发布 | 本地链路已验证，外部准备未完成 | GoReleaser snapshot 已生成并校验 darwin/linux、amd64/arm64 四套归档、checksums 和 Homebrew Formula。正式发布前必须先完成下方外部仓库准备。 |
-| 真机网络与 ATS | 真机签名构建和 Mac 侧可达性通过，交互验收待执行 | 已移除全局 `NSAllowsArbitraryLoads`，只保留 `NSAllowsLocalNetworking` 和 `ts.net` 子域例外；设置提交、REST 和 WebSocket 统一拒绝公网 HTTP，CI 增加 ATS 静态门禁。2026-07-13 已对连接中的 iPad Pro 完成签名 Debug build，并通过 Mac 的 Tailscale Endpoint 验证 `/healthz`；公开文档不记录真实 tailnet 地址或设备名，且尚未安装覆盖 TestFlight 版本。发布前仍需在设备上完成 Token 鉴权、前后台切换和 Wi-Fi/蜂窝弱网验收，并决定是否切换 MagicDNS HTTPS。 |
+| 真机网络与 ATS | 已完成 iOS 27 模拟器 Tailscale 裸 IP 回归定位，真机完整验收待执行 | 2026-07-14 确认只保留 `NSAllowsLocalNetworking` 会导致 Tailscale 裸 IP HTTP 在发请求前被 ATS 以 `-1022` 拦截。系统层恢复 `NSAllowsArbitraryLoads`，设置提交、REST 和 WebSocket 仍由应用层统一拒绝公网 HTTP，CI 检查两层配置不再互相冲突。发布前仍需在真机上完成 Token 鉴权、前后台切换和 Wi-Fi/蜂窝弱网验收，并决定是否切换 MagicDNS HTTPS。 |
 
 ### P1：高频远程开发闭环
 
