@@ -367,6 +367,14 @@ struct ConversationImagePreview: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .quickLookPreview($quickLookURL)
+        .task(id: source.id) {
+            guard case .historyMedia(let id) = source else {
+                return
+            }
+            // history-media 默认接口返回 1600px 内的派生图；只在图片进入 LazyVStack 可见区域时加载，
+            // 既让截图直接展示，也避免打开长会话时一次性下载全部原图。
+            await loadHistoryMedia(id: id)
+        }
     }
 
     @ViewBuilder

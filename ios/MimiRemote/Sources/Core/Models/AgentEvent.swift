@@ -378,6 +378,7 @@ struct CodexAppServerEventProjector {
             return itemContextEvent(params: params, metadata: metadata)
         case "item/completed":
             return completedAgentMessageEvent(params: params, metadata: metadata)
+                ?? completedImageItemEvent(params: params, metadata: metadata)
                 ?? completedProcessItemEvent(params: params, metadata: metadata)
                 ?? itemContextEvent(params: params, metadata: metadata)
         case "item/commandExecution/outputDelta",
@@ -497,6 +498,35 @@ struct CodexAppServerEventProjector {
             role: isCommentary ? .system : .assistant,
             kind: isCommentary ? .reasoningSummary : .message,
             content: text,
+            createdAt: Date(),
+            seq: metadata.seq,
+            revision: metadata.revision ?? 0,
+            sendStatus: .confirmed
+        )
+        return .messageCompleted(message, metadata)
+    }
+
+    private func completedImageItemEvent(
+        params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata
+    ) -> AgentEvent? {
+        guard let item = params["item"]?.objectValue,
+              let content = ConversationImageItemProjection.markdownContent(from: item) else {
+            return nil
+        }
+        let itemID = metadata.itemID ?? item["id"]?.stringValue
+        let messageID = metadata.messageID
+            ?? appServerMessageID(turnID: metadata.turnID, itemID: itemID)
+            ?? itemID
+            ?? UUID().uuidString
+        let message = AgentMessage(
+            id: messageID,
+            sessionID: metadata.sessionID ?? "",
+            turnID: metadata.turnID,
+            itemID: itemID,
+            role: .assistant,
+            kind: .message,
+            content: content,
             createdAt: Date(),
             seq: metadata.seq,
             revision: metadata.revision ?? 0,

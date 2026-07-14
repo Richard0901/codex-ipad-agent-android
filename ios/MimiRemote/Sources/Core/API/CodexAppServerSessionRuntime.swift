@@ -2986,6 +2986,22 @@ actor CodexAppServerSessionRuntime {
                 userDelivery: isInjectedUserMessage ? .injected : nil,
                 isTimestampFallback: itemCreatedAt == nil && itemCompletedAt == nil && estimatedAt != nil
             )
+        case "imageGeneration", "imageView":
+            guard let content = ConversationImageItemProjection.markdownContent(from: item) else {
+                return nil
+            }
+            let completed = itemCompletedAt ?? completedAt
+            return CodexHistoryMessage(
+                id: messageID,
+                role: "assistant",
+                content: content,
+                createdAt: completed ?? itemCreatedAt ?? estimatedAt ?? startedAt,
+                updatedAt: completed ?? liveSnapshotUpdatedAt,
+                turnID: turnID,
+                itemID: itemID,
+                timelineOrdinal: timelineOrdinal,
+                isTimestampFallback: completed == nil && itemCreatedAt == nil && estimatedAt != nil
+            )
         case "agentMessage":
             let text = item["text"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !text.isEmpty else {

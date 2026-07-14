@@ -16344,13 +16344,30 @@ extension ConversationDataFlowTests {
         let readMessages = try await waitForFakeAppServerMessages(transport, count: 3)
         let read = try decodeAppServerRequest(readMessages[2])
         XCTAssertEqual(read.method, "thread/read")
-        transport.enqueue(#"{"id":\#(try jsonFragment(for: read.id)),"result":{"thread":{"id":"thr_hist_image","sessionId":"thr_hist_image","preview":"hist image","ephemeral":false,"modelProvider":"openai","createdAt":1780490000,"updatedAt":1780490001,"status":{"type":"idle"},"path":null,"cwd":"/tmp/hist-image","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"hist image","turns":[{"id":"turn_img","startedAt":1780490000,"items":[{"type":"userMessage","id":"item_img","content":[{"type":"text","text":"看这张截图"},{"type":"image","url":"agentd-history-media://media_abc","detail":"high","redacted":true,"contentType":"image/png","byteCount":2048}]}]}]}}}"#)
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: read.id)),"result":{"thread":{"id":"thr_hist_image","sessionId":"thr_hist_image","preview":"hist image","ephemeral":false,"modelProvider":"openai","createdAt":1780490000,"updatedAt":1780490001,"status":{"type":"idle"},"path":null,"cwd":"/tmp/hist-image","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"hist image","turns":[{"id":"turn_img","startedAt":1780490000,"items":[{"type":"userMessage","id":"item_img","content":[{"type":"text","text":"看这张截图"},{"type":"image","url":"agentd-history-media://media_abc","detail":"high","redacted":true,"contentType":"image/png","byteCount":2048}]},{"type":"imageGeneration","id":"exec-generated","status":"completed","result":"agentd-history-media://media_generated","resultContentType":"image/png","resultByteCount":1349508,"resultRedacted":true,"savedPath":"/Users/me/.codex/generated_images/thread/exec-generated.png"},{"type":"imageView","id":"view-simulator","path":"/tmp/simulator screen.png"}]}]}}}"#)
 
         let page = try await pageTask.value
-        let message = try XCTUnwrap(page.messages.first)
+        let message = try XCTUnwrap(page.messages.first { $0.role == "user" })
         XCTAssertEqual(message.content, "看这张截图")
         XCTAssertEqual(message.turnPayload?.textPrompt, "看这张截图")
         XCTAssertTrue(payloadContainsImageURL(message.turnPayload, url: "agentd-history-media://media_abc"))
+        XCTAssertEqual(
+            page.messages.first { $0.itemID == "exec-generated" }?.content,
+            "![生成的图片](agentd-history-media://media_generated)"
+        )
+        XCTAssertEqual(
+            page.messages.first { $0.itemID == "view-simulator" }?.content,
+            "![截图](file:///tmp/simulator%20screen.png)"
+        )
+
+        let conversationStore = ConversationStore()
+        conversationStore.replaceHistorySnapshot(page.messages, sessionID: "thr_hist_image")
+        let projected = conversationStore.messages(for: "thr_hist_image")
+        XCTAssertTrue(payloadContainsImageURL(
+            projected.first { $0.role == .user }?.turnPayload,
+            url: "agentd-history-media://media_abc"
+        ))
+        XCTAssertEqual(projected.filter { $0.role == .assistant }.count, 2)
     }
 
     func testDirectRuntimeParsesHistoryTurnDatesFromISOAndMilliseconds() async throws {

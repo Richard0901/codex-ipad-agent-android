@@ -848,6 +848,60 @@ struct ConversationMessageRenderFingerprint: Hashable {
     let contentByteCount: Int
 }
 
+enum ConversationImageItemProjection {
+    static func markdownContent(from item: [String: CodexAppServerJSONValue]) -> String? {
+        let title: String
+        let source: String?
+        switch item["type"]?.stringValue {
+        case "imageGeneration":
+            title = "生成的图片"
+            let result = item["result"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            // gateway 会把生成图的大段 base64 改写成短 history-media URL；若改写被关闭，
+            // 优先回退 savedPath，避免再把 1-2 MB base64 塞进 Markdown 和 SwiftUI diff。
+            source = result.flatMap(supportedImageSource) ?? firstNonEmptyPath(in: item, keys: ["savedPath", "saved_path"])
+        case "imageView":
+            title = "截图"
+            source = firstNonEmptyPath(in: item, keys: ["path"])
+        default:
+            return nil
+        }
+        guard let source else {
+            return nil
+        }
+        let destination = source.hasPrefix("/") ? URL(fileURLWithPath: source).absoluteString : source
+        return "![\(title)](\(destination))"
+    }
+
+    private static func supportedImageSource(_ value: String) -> String? {
+        guard !value.isEmpty else {
+            return nil
+        }
+        if value.range(of: "data:image/", options: [.anchored, .caseInsensitive]) != nil ||
+            value.hasPrefix("agentd-history-media://") ||
+            value.hasPrefix("/") {
+            return value
+        }
+        guard let scheme = URL(string: value)?.scheme?.lowercased(),
+              ["file", "http", "https"].contains(scheme) else {
+            return nil
+        }
+        return value
+    }
+
+    private static func firstNonEmptyPath(
+        in item: [String: CodexAppServerJSONValue],
+        keys: [String]
+    ) -> String? {
+        for key in keys {
+            if let value = item[key]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+}
+
 struct MessageRenderPlan: Hashable {
     let messageKey: String
     let content: String

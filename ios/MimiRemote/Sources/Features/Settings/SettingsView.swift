@@ -476,113 +476,151 @@ private struct InitialConnectionSettingsSections: View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         Group {
+            if !appStore.connectionProfiles.isEmpty {
+                Section {
+                    if let current = appStore.connectionProfileSettingsModel.current {
+                        connectionProfileRow(current)
+                    }
+                    ForEach(appStore.connectionProfileSettingsModel.others) { item in
+                        connectionProfileRow(item)
+                    }
+                } header: {
+                    Text("已保存的 Mac")
+                } footer: {
+                    Text("同一时间只连接一台 Mac。切换前会先验证连接，访问码保存在系统钥匙串。")
+                }
+            }
+
             Section {
-                if let current = appStore.connectionProfileSettingsModel.current {
-                    connectionProfileRow(current)
+                if !appStore.isConfigured {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Label("先在 Mac 启动 Mimi 助手", systemImage: "desktopcomputer")
+                            .font(themeStore.uiFont(.body, weight: .semibold))
+                        Text("agentd up")
+                            .font(.system(.callout, design: .monospaced, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 2)
                 }
-                ForEach(appStore.connectionProfileSettingsModel.others) { item in
-                    connectionProfileRow(item)
-                }
-                if appStore.connectionProfiles.isEmpty {
-                    Text("还没有保存的 Mac")
-                        .foregroundStyle(.secondary)
-                }
+
                 Button {
-                    beginAddingConnectionProfile()
+                    beginScanningMac()
                 } label: {
-                    Label("新增 Mac", systemImage: "plus.circle")
+                    Label(primaryScanButtonTitle, systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .disabled(isSavingConnection)
 
-                if appStore.activeConnectionProfile != nil {
-                    Button {
-                        beginRepairingCurrentProfile()
-                    } label: {
-                        Label("重新配对当前 Mac", systemImage: "qrcode")
+                DisclosureGroup("Mac 端准备") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("首次安装")
+                            .font(themeStore.uiFont(.caption, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text("brew install gaixianggeng/tap/mimi-remote")
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text("启动助手并显示二维码")
+                            .font(themeStore.uiFont(.caption, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text("agentd up")
+                            .font(.system(.callout, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text("二维码过期时运行 `agentd pair`。")
+                            .font(themeStore.uiFont(.footnote))
+                            .foregroundStyle(.secondary)
                     }
-                    .disabled(isSavingConnection)
+                    .padding(.vertical, 6)
+                }
+
+                DisclosureGroup(isExpanded: manualConnectionExpandedBinding) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if isAddingConnectionProfile {
+                            TextField("显示名称，例如：工作室 Mac", text: $profileDisplayName)
+                                .textInputAutocapitalization(.words)
+                                .accessibilityIdentifier("settings.profileDisplayName")
+                        }
+                        StableEndpointTextField(placeholder: "Tailscale 地址", text: $endpoint)
+                            .frame(minHeight: 28)
+                        SecureField("访问码", text: $token)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        EndpointTransportNotice(assessment: endpointTransportAssessment)
+                        Button {
+                            Task { await save() }
+                        } label: {
+                            HStack(spacing: 8) {
+                                if isSavingConnection {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                                Text(isSavingConnection ? "正在连接…" : manualSaveButtonTitle)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canSubmit)
+                    }
+                    .padding(.vertical, 6)
+                } label: {
+                    Label(manualConnectionTitle, systemImage: "keyboard")
                 }
             } header: {
-                Text("连接档案")
+                Text(appStore.isConfigured ? "添加 Mac" : "连接 Mac")
             } footer: {
-                Text("同一时间只连接一台 Mac。切换会先验证新连接，失败时保留当前会话。访问码仅保存在系统 Keychain。")
+                Text("推荐扫码连接；会自动验证新连接，失败时保留当前 Mac。")
             }
 
-            Section {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("在 Mac 上准备 Mimi Mac 助手", systemImage: "desktopcomputer")
-                        .font(themeStore.uiFont(.headline, weight: .semibold))
-                    Text("Mimi 需要和你的 Mac 配对一次，之后会自动连接本机 Codex 和项目目录。")
-                        .font(themeStore.uiFont(.callout))
-                        .foregroundStyle(.secondary)
-                    Text("先确认 Mac 已安装并登录 Codex CLI，然后在终端运行：")
-                        .font(themeStore.uiFont(.callout, weight: .semibold))
-                    Text("brew install gaixianggeng/tap/mimi-remote\nagentd up")
-                        .font(.system(.callout, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-                .padding(.vertical, 4)
-            } footer: {
-                Text("Mac 上出现二维码后，回到当前设备扫码连接。二维码过期时，在 Mac 运行 agentd pair 刷新。你的代码和 Codex 凭证仍留在自己的 Mac 上。")
-            }
-
-            Section {
-                Button {
-                    isShowingQRCodeScanner = true
-                } label: {
-                    Label("扫描 Mac 上的二维码", systemImage: "qrcode.viewfinder")
-                }
-                .disabled(isSavingConnection)
-            } header: {
-                Text("在当前设备上配对")
-            } footer: {
-                Text("扫描 Mimi Mac 助手显示的二维码后会自动测试连接；成功后直接进入工作台。")
-            }
-
-            Section {
-                DisclosureGroup(isExpanded: $isShowingAdvancedManualConnection) {
-                    if isAddingConnectionProfile {
-                        TextField("显示名称，例如：工作室 Mac", text: $profileDisplayName)
-                            .textInputAutocapitalization(.words)
-                            .accessibilityIdentifier("settings.profileDisplayName")
+            if shouldShowConnectionStatus {
+                Section {
+                    HStack {
+                        Label("连接状态", systemImage: connectionStatusSystemImage)
+                        Spacer()
+                        if isConnectionTesting {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(appStore.connectionStatus.title)
+                            .foregroundStyle(statusColor)
                     }
-                    StableEndpointTextField(placeholder: "Tailscale 地址", text: $endpoint)
-                        .frame(minHeight: 28)
-                    SecureField("访问码", text: $token)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    EndpointTransportNotice(assessment: endpointTransportAssessment)
-                } label: {
-                    Label(isAddingConnectionProfile ? "手动新增 Mac" : "手动连接", systemImage: "slider.horizontal.3")
-                }
-            } header: {
-                Text("其他方式")
-            } footer: {
-                Text("HTTP 只允许本机、Tailscale 和局域网私有地址；公网地址必须使用 HTTPS。推荐扫描 Mac 上的二维码，直连与中继切换交给 Tailscale。")
-            }
-
-            Section {
-                Button {
-                    Task {
-                        await appStore.testConnection(
-                            endpoint: endpoint,
-                            token: token
-                        )
+                    if let message = displayErrorMessage {
+                        Text(message)
+                            .foregroundStyle(.red)
+                            .font(themeStore.uiFont(size: 13))
                     }
-                } label: {
-                    Label(
-                        isConnectionTesting ? "正在测试" : "测试连接",
-                        systemImage: isConnectionTesting ? "timer" : "bolt.horizontal.circle"
-                    )
-                }
-                .disabled(!canSubmit)
 
-                Button {
-                    Task { await save() }
-                } label: {
-                    Label(isAddingConnectionProfile ? "保存新 Mac 并切换" : "保存并进入工作台", systemImage: "checkmark.circle")
+                    if connectionTestDurationText != nil || appStore.lastConnectionTestReport != nil {
+                        DisclosureGroup("连接诊断") {
+                            if let connectionTestDurationText {
+                                LabeledContent("测试耗时", value: connectionTestDurationText)
+                                    .foregroundStyle(statusColor)
+                            }
+                            if let report = appStore.lastConnectionTestReport {
+                                if let failedStage = report.failedStage {
+                                    connectionStageSummaryRow(title: "失败环节", stage: failedStage, color: .red)
+                                } else if let slowestStage = report.slowestStage {
+                                    connectionStageSummaryRow(title: "最慢环节", stage: slowestStage, color: tokens.warning)
+                                }
+                                if appStore.recentConnectionTestReports.count > 1,
+                                   let unstableStage = appStore.mostUnstableConnectionTestStage {
+                                    connectionStabilityRow(unstableStage)
+                                }
+                                ForEach(report.stages) { stage in
+                                    connectionStageRow(stage)
+                                }
+                                if let diagnostics = report.gatewayDiagnostics {
+                                    connectionGatewayDiagnosticsRows(diagnostics)
+                                } else if let diagnosticsError = report.gatewayDiagnosticsError {
+                                    connectionGatewayDiagnosticsErrorRow(diagnosticsError)
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("状态")
                 }
-                .disabled(!canSubmit)
             }
 
 #if DEBUG
@@ -592,68 +630,8 @@ private struct InitialConnectionSettingsSections: View {
                 } label: {
                     Label("Debug 进入工作台", systemImage: "wrench.and.screwdriver")
                 }
-            } footer: {
-                Text("仅 Debug 编译可见；只跳过首屏配对，不保存访问码，也不改变 Release 流程。")
             }
 #endif
-
-            Section {
-                HStack {
-                    Text("连接")
-                    Spacer()
-                    if isConnectionTesting {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(appStore.connectionStatus.title)
-                        .foregroundStyle(statusColor)
-                }
-                if let connectionTestDurationText {
-                    HStack {
-                        Text("测试耗时")
-                        Spacer()
-                        Text(connectionTestDurationText)
-                            .monospacedDigit()
-                            .foregroundStyle(statusColor)
-                    }
-                }
-                if let report = appStore.lastConnectionTestReport {
-                    if let failedStage = report.failedStage {
-                        connectionStageSummaryRow(title: "失败环节", stage: failedStage, color: .red)
-                    } else if let slowestStage = report.slowestStage {
-                        connectionStageSummaryRow(title: "最慢环节", stage: slowestStage, color: themeStore.tokens(for: colorScheme).warning)
-                    }
-                    if appStore.recentConnectionTestReports.count > 1,
-                       let unstableStage = appStore.mostUnstableConnectionTestStage {
-                        connectionStabilityRow(unstableStage)
-                    }
-                    ForEach(report.stages) { stage in
-                        connectionStageRow(stage)
-                    }
-                    if let diagnostics = report.gatewayDiagnostics {
-                        connectionGatewayDiagnosticsRows(diagnostics)
-                    } else if let diagnosticsError = report.gatewayDiagnosticsError {
-                        connectionGatewayDiagnosticsErrorRow(diagnosticsError)
-                    }
-                }
-                if let message = displayErrorMessage {
-                    Text(message)
-                        .foregroundStyle(.red)
-                        .font(themeStore.uiFont(size: 13))
-                }
-            } header: {
-                Text("状态")
-            }
-
-            Section {
-                Button(role: .destructive) {
-                    pendingRemovalConfirmation = .forgettingCurrent(appStore.activeConnectionProfile)
-                } label: {
-                    Label("忘记这台 Mac", systemImage: "trash")
-                }
-                .disabled(isSavingConnection || !appStore.isConfigured)
-                .accessibilityIdentifier("settings.connection.forget")
-            }
         }
         .listRowBackground(tokens.elevatedSurface)
         // 连接地址/Token 是高频编辑状态，放在这个小子树里，避免每次删字都重绘整个设置页。
@@ -662,7 +640,12 @@ private struct InitialConnectionSettingsSections: View {
             QRCodeScannerSheet(onChooseManualConnection: {
                 isShowingAdvancedManualConnection = true
             }) { rawValue in
-                Task { await applyScannedConnection(rawValue) }
+                await applyScannedConnection(rawValue)
+            }
+        }
+        .onChange(of: isShowingQRCodeScanner) { _, isPresented in
+            if !isPresented, !connectionSuccessMessage.isEmpty {
+                isShowingConnectionSuccess = true
             }
         }
         .sheet(item: $profileRenameTarget) { profile in
@@ -706,6 +689,67 @@ private struct InitialConnectionSettingsSections: View {
         )
     }
 
+    private var manualConnectionExpandedBinding: Binding<Bool> {
+        Binding(
+            get: { isShowingAdvancedManualConnection },
+            set: { isExpanded in
+                if isExpanded, !isShowingAdvancedManualConnection {
+                    if appStore.activeConnectionProfile != nil {
+                        prepareAddingConnectionProfile()
+                    } else {
+                        isAddingConnectionProfile = false
+                        endpoint = ""
+                        token = ""
+                        localError = nil
+                    }
+                }
+                isShowingAdvancedManualConnection = isExpanded
+            }
+        )
+    }
+
+    private var primaryScanButtonTitle: String {
+        appStore.isConfigured ? "扫描二维码添加 Mac" : "扫描二维码连接"
+    }
+
+    private var manualConnectionTitle: String {
+        guard appStore.activeConnectionProfile != nil else {
+            return "手动连接"
+        }
+        if !isShowingAdvancedManualConnection || isAddingConnectionProfile {
+            return "手动添加 Mac"
+        }
+        return "手动更新当前 Mac"
+    }
+
+    private var manualSaveButtonTitle: String {
+        if isAddingConnectionProfile {
+            return "添加并连接"
+        }
+        return appStore.isConfigured ? "更新连接" : "连接"
+    }
+
+    private var connectionStatusSystemImage: String {
+        switch appStore.connectionStatus {
+        case .connected:
+            return "checkmark.circle.fill"
+        case .testing:
+            return "arrow.trianglehead.2.clockwise.rotate.90"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        case .idle:
+            return "circle.dashed"
+        }
+    }
+
+    private var shouldShowConnectionStatus: Bool {
+        appStore.isConfigured ||
+        isConnectionTesting ||
+        displayErrorMessage != nil ||
+        connectionTestDurationText != nil ||
+        appStore.lastConnectionTestReport != nil
+    }
+
     private var canSubmit: Bool {
         !isSavingConnection &&
         !isConnectionTesting &&
@@ -715,53 +759,68 @@ private struct InitialConnectionSettingsSections: View {
 
     @ViewBuilder
     private func connectionProfileRow(_ item: ConnectionProfileSettingsItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.profile.displayName)
-                        .font(themeStore.uiFont(.body, weight: item.isCurrent ? .semibold : .regular))
-                    Text(item.profile.endpoint)
-                        .font(themeStore.uiFont(.caption))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 10)
-                if item.isCurrent {
-                    Label("当前", systemImage: "checkmark.circle.fill")
-                        .font(themeStore.uiFont(.caption, weight: .semibold))
-                        .foregroundStyle(themeStore.tokens(for: colorScheme).success)
-                } else if profileOperationID == item.id {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-            if let lastSuccessfulAt = item.profile.lastSuccessfulAt {
-                Text("最近成功：\(lastSuccessfulAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(themeStore.uiFont(.caption2))
+        HStack(spacing: 12) {
+            Image(systemName: item.isCurrent ? "desktopcomputer.and.macbook" : "desktopcomputer")
+                .font(themeStore.uiFont(.body, weight: .semibold))
+                .foregroundStyle(item.isCurrent ? themeStore.tokens(for: colorScheme).accent : Color.secondary)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.profile.displayName)
+                    .font(themeStore.uiFont(.body, weight: item.isCurrent ? .semibold : .regular))
+                Text(item.profile.endpoint)
+                    .font(themeStore.uiFont(.caption))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            HStack(spacing: 16) {
+
+            Spacer(minLength: 8)
+
+            if item.isCurrent {
+                Label("当前", systemImage: "checkmark.circle.fill")
+                    .font(themeStore.uiFont(.caption, weight: .semibold))
+                    .foregroundStyle(themeStore.tokens(for: colorScheme).success)
+            } else if profileOperationID == item.id {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button("切换") {
+                    Task { await switchConnectionProfile(id: item.id) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isSavingConnection || profileOperationID != nil)
+                .accessibilityIdentifier("settings.profile.switch.\(item.id)")
+            }
+
+            Menu {
                 Button("重命名") {
                     profileRenameTarget = item.profile
                 }
-                .disabled(isSavingConnection || profileOperationID != nil)
                 .accessibilityIdentifier("settings.profile.rename.\(item.id)")
 
-                if item.canSwitch {
-                    Button("切换") {
-                        Task { await switchConnectionProfile(id: item.id) }
+                if item.isCurrent {
+                    Button("重新扫码配对") {
+                        beginRepairingCurrentProfile()
                     }
-                    .disabled(isSavingConnection || profileOperationID != nil)
-                    .accessibilityIdentifier("settings.profile.switch.\(item.id)")
-
+                    Divider()
+                    Button("忘记这台 Mac", role: .destructive) {
+                        pendingRemovalConfirmation = .forgettingCurrent(item.profile)
+                    }
+                    .accessibilityIdentifier("settings.connection.forget")
+                } else {
                     Button("删除", role: .destructive) {
                         pendingRemovalConfirmation = .deletingSavedProfile(item.profile)
                     }
-                    .disabled(isSavingConnection || profileOperationID != nil)
                     .accessibilityIdentifier("settings.profile.delete.\(item.id)")
                 }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(themeStore.uiFont(.body))
+                    .frame(width: 30, height: 30)
             }
-            .buttonStyle(.borderless)
+            .disabled(isSavingConnection || profileOperationID != nil)
+            .accessibilityLabel("管理 \(item.profile.displayName)")
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings.profile.\(item.id)")
@@ -1097,13 +1156,27 @@ private struct InitialConnectionSettingsSections: View {
         token = appStore.token
     }
 
-    private func beginAddingConnectionProfile() {
+    private func prepareAddingConnectionProfile() {
         isAddingConnectionProfile = true
         profileDisplayName = ""
         endpoint = ""
         token = ""
         localError = nil
-        isShowingAdvancedManualConnection = true
+    }
+
+    private func beginScanningMac() {
+        if appStore.activeConnectionProfile != nil {
+            prepareAddingConnectionProfile()
+        } else {
+            isAddingConnectionProfile = false
+            profileDisplayName = ""
+            endpoint = ""
+            token = ""
+            localError = nil
+        }
+        connectionSuccessMessage = ""
+        isShowingAdvancedManualConnection = false
+        isShowingQRCodeScanner = true
     }
 
     private func beginRepairingCurrentProfile() {
@@ -1112,7 +1185,9 @@ private struct InitialConnectionSettingsSections: View {
         endpoint = appStore.endpoint
         token = ""
         localError = nil
-        isShowingAdvancedManualConnection = true
+        connectionSuccessMessage = ""
+        isShowingAdvancedManualConnection = false
+        isShowingQRCodeScanner = true
     }
 
     private func switchConnectionProfile(id: String) async {
@@ -1203,9 +1278,8 @@ private struct InitialConnectionSettingsSections: View {
         }
     }
 
-    private func applyScannedConnection(_ rawValue: String) async {
+    private func applyScannedConnection(_ rawValue: String) async -> QRCodeScannerSubmissionResult {
         isSavingConnection = true
-        defer { isSavingConnection = false }
         do {
             let wasConfigured = appStore.isConfigured
             let raw = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1223,19 +1297,25 @@ private struct InitialConnectionSettingsSections: View {
             endpoint = appStore.endpoint
             token = appStore.token
             isAddingConnectionProfile = false
-            connectionSuccessMessage = ""
-            isShowingConnectionSuccess = false
-            guard await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45) else {
-                return
-            }
             connectionSuccessMessage = "已连接这台 Mac，正在进入工作台。"
-            isShowingConnectionSuccess = true
+            isShowingConnectionSuccess = false
+            // 二维码在这里已经完成真实连接验证并提交。首屏数据继续后台加载，
+            // 不让扫码页额外卡住最多 45 秒，也不要求用户重复扫描一次性配对码。
+            Task { @MainActor in
+                defer { isSavingConnection = false }
+                _ = await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45)
+            }
+            return .accepted
         } catch is CancellationError {
+            isSavingConnection = false
             localError = nil
+            return .rejected("扫码已取消，请重新扫描 Mac 上的二维码。")
         } catch {
+            isSavingConnection = false
             appStore.connectionStatus = .failed(error.localizedDescription)
             appStore.lastError = error.localizedDescription
             localError = error.localizedDescription
+            return .rejected(error.localizedDescription)
         }
     }
 

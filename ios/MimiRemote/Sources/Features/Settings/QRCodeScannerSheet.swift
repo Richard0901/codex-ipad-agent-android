@@ -4,6 +4,7 @@ import UIKit
 
 enum QRCodeScannerRecoveryAction: Equatable {
     case openSettings
+    case retryScanning
     case manualConnection
 }
 
@@ -12,6 +13,7 @@ enum QRCodeScannerFailure: Equatable {
     case permissionRestricted
     case cameraUnavailable
     case configurationFailed(String)
+    case rejectedCode(String)
 
     var message: String {
         switch self {
@@ -23,6 +25,8 @@ enum QRCodeScannerFailure: Equatable {
             return "当前设备没有可用于扫描二维码的相机。"
         case .configurationFailed(let reason):
             return reason
+        case .rejectedCode(let reason):
+            return reason
         }
     }
 
@@ -32,24 +36,32 @@ enum QRCodeScannerFailure: Equatable {
             return [.openSettings, .manualConnection]
         case .cameraUnavailable, .configurationFailed:
             return [.manualConnection]
+        case .rejectedCode:
+            return [.retryScanning, .manualConnection]
         }
     }
+}
+
+enum QRCodeScannerSubmissionResult: Equatable {
+    case accepted
+    case rejected(String)
 }
 
 struct QRCodeScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var scannerFailure: QRCodeScannerFailure?
     @State private var isCameraReady = false
+    @State private var isSubmittingCode = false
+    @State private var submissionTask: Task<Void, Never>?
 
     let onChooseManualConnection: () -> Void
-    let onCode: (String) -> Void
+    let onCode: (String) async -> QRCodeScannerSubmissionResult
 
     var body: some View {
         NavigationStack {
             ZStack {
-                QRCodeScannerView { value in
-                    onCode(value)
-                    dismiss()
+                QRCodeScannerView(isScanningEnabled: isScanningEnabled) { value in
+                    submit(value)
                 } onError: { failure in
                     scannerFailure = failure
                 } onReady: {
@@ -77,6 +89,21 @@ struct QRCodeScannerSheet: View {
                     .padding(20)
                     .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .padding()
+                } else if isSubmittingCode {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.large)
+                            .tint(.white)
+                        Text("已识别二维码")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                        Text("正在验证 Mac 连接…")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.78))
+                    }
+                    .padding(20)
+                    .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .padding()
                 }
             }
             .ignoresSafeArea(edges: .bottom)
@@ -86,6 +113,7 @@ struct QRCodeScannerSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("关闭") {
                         // 用户主动关闭不代表扫码失败，保持父页面原来的展开状态。
+                        submissionTask?.cancel()
                         dismiss()
                     }
                 }
@@ -100,6 +128,11 @@ struct QRCodeScannerSheet: View {
                         openAppSettings()
                     }
                 }
+                if failure.recoveryActions.contains(.retryScanning) {
+                    Button("继续扫码") {
+                        scannerFailure = nil
+                    }
+                }
                 Button("改用手动连接") {
                     chooseManualConnection()
                 }
@@ -107,6 +140,14 @@ struct QRCodeScannerSheet: View {
                 Text(failure.message)
             }
         }
+        .onDisappear {
+            submissionTask?.cancel()
+            submissionTask = nil
+        }
+    }
+
+    private var isScanningEnabled: Bool {
+        isCameraReady && !isSubmittingCode && scannerFailure == nil
     }
 
     private var scannerFailureBinding: Binding<Bool> {
@@ -121,6 +162,7 @@ struct QRCodeScannerSheet: View {
     }
 
     private func chooseManualConnection() {
+        submissionTask?.cancel()
         scannerFailure = nil
         // 父页面只负责展开已经存在的手动连接区域，扫码 Sheet 不复制连接表单和状态。
         onChooseManualConnection()
@@ -133,21 +175,53 @@ struct QRCodeScannerSheet: View {
             return
         }
         scannerFailure = nil
+        submissionTask?.cancel()
         dismiss()
         UIApplication.shared.open(url)
+    }
+
+    private func submit(_ value: String) {
+        guard !isSubmittingCode else {
+            return
+        }
+
+        // 先停扫并在当前页面给出明确反馈；只有验证通过后才关闭，避免“相机刚弹出就退回”的错觉。
+        isSubmittingCode = true
+        scannerFailure = nil
+        submissionTask?.cancel()
+        submissionTask = Task { @MainActor in
+            let result = await onCode(value)
+            guard !Task.isCancelled else {
+                return
+            }
+
+            switch result {
+            case .accepted:
+                dismiss()
+            case .rejected(let message):
+                isSubmittingCode = false
+                scannerFailure = .rejectedCode(message)
+            }
+            submissionTask = nil
+        }
     }
 }
 
 private struct QRCodeScannerView: UIViewControllerRepresentable {
+    let isScanningEnabled: Bool
     let onCode: (String) -> Void
     let onError: (QRCodeScannerFailure) -> Void
     let onReady: () -> Void
 
     func makeUIViewController(context: Context) -> QRCodeScannerViewController {
-        QRCodeScannerViewController(onCode: onCode, onError: onError, onReady: onReady)
+        let viewController = QRCodeScannerViewController(onCode: onCode, onError: onError, onReady: onReady)
+        viewController.setScanningEnabled(isScanningEnabled)
+        return viewController
     }
 
-    func updateUIViewController(_ uiViewController: QRCodeScannerViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: QRCodeScannerViewController, context: Context) {
+        uiViewController.setScanningEnabled(isScanningEnabled)
+    }
 }
 
 private final class QRCodeScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
@@ -155,6 +229,8 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
     private let sessionQueue = DispatchQueue(label: "MimiRemote.QRCodeScanner.session")
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var didReadCode = false
+    private var isScanningEnabled = false
+    private var isViewVisible = false
 
     private let onCode: (String) -> Void
     private let onError: (QRCodeScannerFailure) -> Void
@@ -187,13 +263,37 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
         previewLayer?.frame = view.bounds
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        isViewVisible = true
+        if isScanningEnabled, previewLayer != nil {
+            startScanning()
+        }
+    }
+
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        isViewVisible = false
         stopScanning()
     }
 
     deinit {
         stopScanning()
+    }
+
+    func setScanningEnabled(_ enabled: Bool) {
+        guard isScanningEnabled != enabled else {
+            return
+        }
+        isScanningEnabled = enabled
+        if enabled {
+            didReadCode = false
+            if isViewVisible, previewLayer != nil {
+                startScanning()
+            }
+        } else {
+            stopScanning()
+        }
     }
 
     private func prepareCameraAccess() {
@@ -257,7 +357,9 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
         previewLayer = layer
         reportReady()
 
-        startScanning()
+        if isScanningEnabled, isViewVisible {
+            startScanning()
+        }
     }
 
     private func reportFailure(_ failure: QRCodeScannerFailure) {

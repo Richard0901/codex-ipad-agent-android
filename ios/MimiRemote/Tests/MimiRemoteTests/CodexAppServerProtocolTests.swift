@@ -606,6 +606,40 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(message.content, "hello world")
     }
 
+    func testProjectorMapsCompletedGeneratedAndViewedImages() throws {
+        var projector = CodexAppServerEventProjector()
+        let generated = CodexAppServerNotification(method: "item/completed", params: .object([
+            "threadId": .string("thread-image"),
+            "turnId": .string("turn-image"),
+            "item": .object([
+                "id": .string("ig-1"),
+                "type": .string("imageGeneration"),
+                "status": .string("completed"),
+                "result": .string("agentd-history-media://media-generated"),
+                "savedPath": .string("/tmp/generated.png")
+            ])
+        ]))
+        guard case .messageCompleted(let generatedMessage, _) = projector.project(generated) else {
+            return XCTFail("expected generated image message")
+        }
+        XCTAssertEqual(generatedMessage.role, .assistant)
+        XCTAssertEqual(generatedMessage.content, "![生成的图片](agentd-history-media://media-generated)")
+
+        let viewed = CodexAppServerNotification(method: "item/completed", params: .object([
+            "threadId": .string("thread-image"),
+            "turnId": .string("turn-image"),
+            "item": .object([
+                "id": .string("view-1"),
+                "type": .string("imageView"),
+                "path": .string("/tmp/simulator screen.png")
+            ])
+        ]))
+        guard case .messageCompleted(let viewedMessage, _) = projector.project(viewed) else {
+            return XCTFail("expected viewed image message")
+        }
+        XCTAssertEqual(viewedMessage.content, "![截图](file:///tmp/simulator%20screen.png)")
+    }
+
     func testProjectorMapsApprovalServerRequest() throws {
         let request = CodexAppServerServerRequest(
             id: .int(9),

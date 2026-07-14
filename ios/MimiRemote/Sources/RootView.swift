@@ -1838,7 +1838,7 @@ private struct MacConnectionPanel: View {
             QRCodeScannerSheet(onChooseManualConnection: {
                 isShowingManualFields = true
             }) { rawValue in
-                Task { await applyScannedConnection(rawValue) }
+                await applyScannedConnection(rawValue)
             }
         }
         .confirmationDialog(
@@ -2163,9 +2163,8 @@ private struct MacConnectionPanel: View {
         }
     }
 
-    private func applyScannedConnection(_ rawValue: String) async {
+    private func applyScannedConnection(_ rawValue: String) async -> QRCodeScannerSubmissionResult {
         isSavingConnection = true
-        defer { isSavingConnection = false }
         do {
             let wasConfigured = appStore.isConfigured
             let raw = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2175,11 +2174,22 @@ private struct MacConnectionPanel: View {
             _ = try await sessionStore.applyPairingURL(url)
             endpoint = appStore.endpoint
             token = appStore.token
-            _ = await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45)
+            // 配对验证成功即可退出扫码页；工作台数据在后台继续恢复。
+            Task { @MainActor in
+                defer { isSavingConnection = false }
+                _ = await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45)
+            }
+            return .accepted
+        } catch is CancellationError {
+            isSavingConnection = false
+            localError = nil
+            return .rejected("扫码已取消，请重新扫描 Mac 上的二维码。")
         } catch {
+            isSavingConnection = false
             appStore.connectionStatus = .failed(error.localizedDescription)
             appStore.lastError = error.localizedDescription
             localError = error.localizedDescription
+            return .rejected(error.localizedDescription)
         }
     }
 

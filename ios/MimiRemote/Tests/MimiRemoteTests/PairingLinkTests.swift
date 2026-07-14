@@ -22,6 +22,18 @@ final class PairingLinkTests: XCTestCase {
         }
     }
 
+    func testQRCodeScannerRejectedCodeCanRetryWithoutLeavingCamera() {
+        let failure = QRCodeScannerFailure.rejectedCode("二维码已过期")
+
+        XCTAssertEqual(failure.message, "二维码已过期")
+        XCTAssertEqual(failure.recoveryActions, [.retryScanning, .manualConnection])
+        XCTAssertEqual(QRCodeScannerSubmissionResult.accepted, .accepted)
+        XCTAssertEqual(
+            QRCodeScannerSubmissionResult.rejected("连接失败"),
+            .rejected("连接失败")
+        )
+    }
+
     func testTokenStoreUpdatesExistingItemWithoutDeletingIt() throws {
         let keychain = TestKeychainOperations(itemData: Data("old-token".utf8))
         let store = TokenStore(keychain: keychain)
