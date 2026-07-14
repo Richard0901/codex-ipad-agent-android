@@ -1835,7 +1835,9 @@ private struct MacConnectionPanel: View {
         }
         .onAppear(perform: loadInitialConnectionIfNeeded)
         .sheet(isPresented: $isShowingQRCodeScanner) {
-            QRCodeScannerSheet(onChooseManualConnection: {
+            QRCodeScannerSheet(onDismiss: {
+                isShowingQRCodeScanner = false
+            }, onChooseManualConnection: {
                 isShowingManualFields = true
             }) { rawValue in
                 await applyScannedConnection(rawValue)

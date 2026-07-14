@@ -7,7 +7,6 @@ enum QRCodeScannerRecoveryAction: Equatable {
     case retryScanning
     case manualConnection
 }
-
 enum QRCodeScannerFailure: Equatable {
     case permissionDenied
     case permissionRestricted
@@ -48,13 +47,13 @@ enum QRCodeScannerSubmissionResult: Equatable {
 }
 
 struct QRCodeScannerSheet: View {
-    @Environment(\.dismiss) private var dismiss
     @State private var scannerFailure: QRCodeScannerFailure?
     @State private var isCameraReady = false
     @State private var isSubmittingCode = false
     @State private var completionMessage: String?
     @State private var submissionTask: Task<Void, Never>?
 
+    let onDismiss: () -> Void
     let onChooseManualConnection: () -> Void
     let onCode: (String) async -> QRCodeScannerSubmissionResult
 
@@ -133,9 +132,8 @@ struct QRCodeScannerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("关闭") {
-                        // 用户主动关闭不代表扫码失败，保持父页面原来的展开状态。
-                        submissionTask?.cancel()
-                        dismiss()
+                        // 明确只改父页面持有的扫码展示状态，不能用嵌套环境 dismiss 误关设置页。
+                        dismissScanner()
                     }
                 }
             }
@@ -183,11 +181,10 @@ struct QRCodeScannerSheet: View {
     }
 
     private func chooseManualConnection() {
-        submissionTask?.cancel()
         scannerFailure = nil
         // 父页面只负责展开已经存在的手动连接区域，扫码 Sheet 不复制连接表单和状态。
         onChooseManualConnection()
-        dismiss()
+        dismissScanner()
     }
 
     private func openAppSettings() {
@@ -196,9 +193,15 @@ struct QRCodeScannerSheet: View {
             return
         }
         scannerFailure = nil
-        submissionTask?.cancel()
-        dismiss()
+        dismissScanner()
         UIApplication.shared.open(url)
+    }
+
+    private func dismissScanner(cancelSubmission: Bool = true) {
+        if cancelSubmission {
+            submissionTask?.cancel()
+        }
+        onDismiss()
     }
 
     private func submit(_ value: String) {
@@ -230,7 +233,7 @@ struct QRCodeScannerSheet: View {
                 guard !Task.isCancelled else {
                     return
                 }
-                dismiss()
+                dismissScanner(cancelSubmission: false)
             case .rejected(let message):
                 isSubmittingCode = false
                 scannerFailure = .rejectedCode(message)

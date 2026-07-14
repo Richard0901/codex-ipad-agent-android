@@ -573,7 +573,9 @@ private struct InitialConnectionSettingsSections: View {
             // Form 会把透明 Group 展开成多个 Section。所有弹窗必须挂在这个始终存在的
             // 具体 Section 上，确保已连接时新增的“已保存/状态”Section 不会生成多个 presenter。
             .sheet(isPresented: $isShowingQRCodeScanner) {
-                QRCodeScannerSheet(onChooseManualConnection: {
+                QRCodeScannerSheet(onDismiss: {
+                    isShowingQRCodeScanner = false
+                }, onChooseManualConnection: {
                     isShowingAdvancedManualConnection = true
                 }) { rawValue in
                     await applyScannedConnection(rawValue)
