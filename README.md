@@ -116,7 +116,7 @@ bash ./scripts/install-linux.sh install
 
 如果 Mac 已安装并登录 Tailscale，`setup` 会优先把 `agentd` 绑定到 Tailscale IP；否则会使用 `127.0.0.1:8787` 并给出真机 iPad 不可直连的警告。
 
-`agentd up` 和 `agentd start` 会使用当前平台的系统服务管理器后台启动服务：macOS 调用 `brew services start mimi-remote`，Linux Release 调用 `systemctl --user start mimi-remote.service`。命令等待带鉴权的 `/api/readyz` 通过后，才在当前终端输出扫码连接二维码。`agentd serve` 只有在交互式前台终端运行时才会输出二维码；后台 service 不会把 Token 写入服务日志。`agentd up`、`agentd start` 和 `agentd pair` 会输出连接信息：
+`agentd up`、`agentd start`、`agentd restart` 和后台 `serve` 会在启动服务前检查 `codex.bin`。旧绝对路径失效时，程序会依次检查当前 PATH、ChatGPT App 和 Codex App 内置二进制，并将可执行的绝对路径原子写回配置；这个修复只修改 `codex.bin`，不会轮换 Token 或覆盖项目。随后命令使用当前平台的系统服务管理器后台启动服务：macOS 调用 `brew services start mimi-remote`，Linux Release 调用 `systemctl --user start mimi-remote.service`。命令等待带鉴权的 `/api/readyz` 通过后，才在当前终端输出扫码连接二维码。`agentd serve` 只有在交互式前台终端运行时才会输出二维码；后台 service 不会把 Token 写入服务日志。`agentd up`、`agentd start` 和 `agentd pair` 会输出连接信息：
 
 停止服务统一使用 `agentd stop`；底层排障时，macOS 对应 `brew services stop mimi-remote`，Linux 对应 `systemctl --user stop mimi-remote.service`。`serve` 收到退出信号时会先停止 HTTP 新请求并最多等待 5 秒排空普通请求，再关闭会话和托管 Codex upstream；超时会强制关闭连接。托管 upstream 意外退出时，`agentd` 会主动关闭 HTTP 并以非零状态退出，交给 Homebrew `keep_alive` 或 systemd `Restart=on-failure` 恢复，避免留下端口可用但核心运行时已失效的半健康进程。
 

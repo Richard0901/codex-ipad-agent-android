@@ -971,6 +971,51 @@ func TestRunDoctorFixMissingConfigStillUsesFullSetup(t *testing.T) {
 	}
 }
 
+func TestEnsureCodexCLIAvailableRepairsStalePathBeforeServiceStart(t *testing.T) {
+	clearAgentdEnvForMainTest(t)
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	codexPath := filepath.Join(binDir, "codex")
+	writeMainTestCodex(t, codexPath)
+	t.Setenv("PATH", binDir)
+	configPath := filepath.Join(dir, "config.json")
+	const authToken = "0123456789abcdef0123456789abcdef"
+	document := map[string]any{
+		"auth": map[string]any{"token": authToken},
+		"codex": map[string]any{
+			"bin":           "/opt/homebrew/bin/codex",
+			"future_option": "keep-codex-option",
+		},
+		"future_root": "keep-root-option",
+	}
+	raw, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureCodexCLIAvailable(configPath); err != nil {
+		t.Fatalf("启动前应自动恢复 Codex 路径：%v", err)
+	}
+	updated, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after map[string]any
+	if err := json.Unmarshal(updated, &after); err != nil {
+		t.Fatal(err)
+	}
+	afterCodex := after["codex"].(map[string]any)
+	if afterCodex["bin"] != codexPath || afterCodex["future_option"] != "keep-codex-option" {
+		t.Fatalf("只应修复路径并保留 Codex 扩展配置：%+v", afterCodex)
+	}
+	if after["future_root"] != "keep-root-option" || after["auth"].(map[string]any)["token"] != authToken {
+		t.Fatalf("启动前修复不能改写 Token 或未知字段：%+v", after)
+	}
+}
+
 func clearAgentdEnvForMainTest(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{

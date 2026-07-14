@@ -234,6 +234,9 @@ func runStart(args []string) error {
 	if err != nil {
 		return fmt.Errorf("读取连接信息失败，请先执行 agentd setup：%w", err)
 	}
+	if err := ensureCodexCLIAvailable(*configPath); err != nil {
+		return err
+	}
 
 	if managedServicePlatform == "darwin" {
 		fmt.Fprintln(os.Stdout, "正在启动 Homebrew 后台服务...")
@@ -273,6 +276,9 @@ func runRestart(args []string) error {
 	result, err := agentsetup.Pair(context.Background(), *configPath)
 	if err != nil {
 		return fmt.Errorf("读取连接信息失败，请先执行 agentd up：%w", err)
+	}
+	if err := ensureCodexCLIAvailable(*configPath); err != nil {
+		return err
 	}
 	fmt.Fprintln(os.Stdout, "正在重启 Mimi Mac 助手...")
 	if err := runManagedServiceForPlatform(managedServicePlatform, "restart", os.Stdout, os.Stderr); err != nil {
@@ -560,6 +566,12 @@ func loadRuntimeConfig(args []string, forDoctor bool, configure ...func(*flag.Fl
 	if err := prepareDefaultConfigMigration(fs, *configPath, os.Stderr); err != nil {
 		return config.Config{}, nil, nil, err
 	}
+	if !forDoctor && fileExists(*configPath) {
+		// serve 也必须自检并修复路径：用户登录后由 Homebrew 自动拉起时，不会先经过 up/start。
+		if err := ensureCodexCLIAvailable(*configPath); err != nil {
+			return config.Config{}, nil, nil, err
+		}
+	}
 	var (
 		cfg config.Config
 		err error
@@ -640,6 +652,13 @@ func runDoctorFix(ctx context.Context, configPath string, checkPort bool, curren
 			if fixed {
 				fixes = append(fixes, "已将 app-server token file 权限收紧为 0600")
 			}
+		}
+	}
+	if hasFailedCheck(current, "codex") && !needsSetup {
+		// 旧的绝对路径失效时只修复 codex.bin；无法发现替代项则保留原 Doctor 结果继续给出安装指引。
+		codexPath, repaired, repairErr := agentsetup.RepairCodexBin(configPath)
+		if repairErr == nil && repaired {
+			fixes = append(fixes, "已恢复 Codex CLI 路径："+codexPath)
 		}
 	}
 	if needsSetup {
@@ -1195,6 +1214,11 @@ func printJSONTo(w io.Writer, value any) error {
 }
 
 func ensureCodexCLIAvailable(configPath string) error {
+	// Homebrew service 的 PATH 通常比交互终端更窄。先把有效路径原子写回配置，
+	// 后台进程才不会在本次检查通过后又因找不到同一个 Codex 而失败。
+	if _, _, err := agentsetup.RepairCodexBin(configPath); err != nil {
+		return fmt.Errorf("未找到 Codex CLI，Mimi Mac 助手还不能启动。\n\n已检查配置路径、当前 PATH，以及 ChatGPT/Codex App 内置路径。\n请先在这台电脑安装并登录 Codex，然后重新运行：\n  agentd up")
+	}
 	cfg, err := config.LoadForDoctor(configPath)
 	if err != nil {
 		return fmt.Errorf("读取 Codex 配置失败：%w", err)
