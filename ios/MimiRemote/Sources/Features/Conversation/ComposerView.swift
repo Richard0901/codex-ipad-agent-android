@@ -7,13 +7,6 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-private struct ComposerChipItem: Identifiable {
-    let id: String
-    let text: String
-    let symbol: String
-    let tint: Color
-}
-
 enum VoiceInputLanguage: String, CaseIterable, Identifiable {
     case automatic
     case chineseSimplified
@@ -95,6 +88,8 @@ struct ComposerView: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var composerState = ComposerState()
     @State private var activeComposerDraftScope = ComposerDraftScopeKey.none
     @State private var composerTextExternalRevision = 0
@@ -134,13 +129,18 @@ struct ComposerView: View {
     private static let completedGoalAutoHideDelayNanoseconds: UInt64 = 3_500_000_000
     private static let maximumImageAttachmentCount = 8
 
+    private var composerMotionAnimation: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.12)
+            : .spring(response: 0.34, dampingFraction: 1, blendDuration: 0.08)
+    }
+
     var body: some View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         // 外层保持透明，由输入卡片承担唯一主表面；这样和首页“暖色底 + 白色浮层”的
         // 层级一致，也避免状态提示、输入框和底部 dock 形成三层嵌套。
         VStack(alignment: .leading, spacing: 10) {
-            foregroundActivityRow
             composerStatusTray
             pendingApprovalAction
             pendingUserInputAction
@@ -155,10 +155,11 @@ struct ComposerView: View {
                     composerKeyboardShortcutButtons
                 }
         }
-        .animation(.easeInOut(duration: 0.18), value: voiceInput.isRecording)
-        .animation(.easeInOut(duration: 0.18), value: voiceInput.isPreparing)
-        .animation(.easeInOut(duration: 0.18), value: isVoicePressActive)
-        .animation(.easeInOut(duration: 0.18), value: isVoiceTranscribing)
+        .animation(composerMotionAnimation, value: voiceInput.isRecording)
+        .animation(composerMotionAnimation, value: voiceInput.isPreparing)
+        .animation(composerMotionAnimation, value: isVoicePressActive)
+        .animation(composerMotionAnimation, value: isVoiceTranscribing)
+        .animation(composerMotionAnimation, value: composerState.draft.isEmpty)
         .sheet(isPresented: $showsManualInputSheet) {
             ManualUserInputSheet(kind: manualInputKind) { input in
                 composerState.addAttachment(input)
@@ -365,8 +366,16 @@ struct ComposerView: View {
         guard activeComposerDraftScope != nextScope else {
             return
         }
+        let previousScope = activeComposerDraftScope
         synchronizeComposerTextBeforeDraftScopeChange()
-        sessionStore.saveComposerDraft(composerState.draftSnapshot(), for: activeComposerDraftScope)
+        let outgoingDraft = composerState.draftSnapshot()
+        sessionStore.saveComposerDraft(outgoingDraft, for: previousScope)
+        if isOptimisticSessionHandoff(from: previousScope, to: nextScope) {
+            // local:* 只是创建接口返回前的临时身份。服务端 ID 回来时迁移当前可见草稿，
+            // 避免用户正在输入的追加指令被新 scope 的空草稿覆盖。
+            sessionStore.saveComposerDraft(outgoingDraft, for: nextScope)
+            sessionStore.removeComposerDraft(for: previousScope)
+        }
         cancelVoiceInteraction(clearStatus: true)
 
         // 草稿跟会话走；运行参数仍维持全局体验，只重置下一次发送这种临时开关。
@@ -379,6 +388,18 @@ struct ComposerView: View {
         guidedFollowUpEnabled = false
         measuredComposerTextHeight = 0
         isComposerTextComposing = false
+    }
+
+    private func isOptimisticSessionHandoff(
+        from previousScope: ComposerDraftScopeKey,
+        to nextScope: ComposerDraftScopeKey
+    ) -> Bool {
+        guard case .session(let previousSessionID) = previousScope,
+              case .session(let nextSessionID) = nextScope
+        else {
+            return false
+        }
+        return previousSessionID.hasPrefix("local:") && !nextSessionID.hasPrefix("local:")
     }
 
     private func synchronizeComposerTextBeforeDraftScopeChange() {
@@ -471,14 +492,6 @@ struct ComposerView: View {
         horizontalSizeClass == .compact || (availableWidth.map { $0 < 560 } ?? false)
     }
 
-    // 当前活动（“正在执行…”带 spinner 的标题）可能较长，单独占一行，不并入下面的状态行。
-    @ViewBuilder
-    private var foregroundActivityRow: some View {
-        if let activity = sessionStore.selectedForegroundActivity {
-            composerActivity(activity)
-        }
-    }
-
     @ViewBuilder
     private var composerStatusTray: some View {
         let visibleGoal = selectedVisibleThreadGoal
@@ -554,32 +567,19 @@ struct ComposerView: View {
         return goal
     }
 
-    // 输入框上方收敛成一行：左＝常驻只读信息（模型/权限 + seq/usage 等），中＝录音波形，
-    // 右＝会话运行时的 Ctrl-C / 停止。三者各就各位，不再各自独占一整行往上堆。
+    // 输入框上方只保留瞬时状态和必要控制。模型、权限、seq/usage 已有其他入口，
+    // 常驻展示只会增加工程噪音，因此收进“会话选项”或顶部状态区。
     @ViewBuilder
     private var composerStatusRow: some View {
-        // 模型、权限与运行状态放在输入框上方，方便扫读，也不挤占正文输入空间。
-        let chips = displayChipItems
         let showWave = isVoiceActive
         let showControls = canShowRunningControls
-        if !chips.isEmpty || showWave || showControls {
+        if showWave || showControls {
             HStack(spacing: 10) {
-                if !chips.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(chips) { statusChip($0) }
-                        }
-                        .padding(.vertical, 1)
-                    }
-                    .layoutPriority(0)
-                }
-                // 两侧都留弹性间距：波形固定在视觉中段，控制被推到最右，无论 chips 多长。
-                Spacer(minLength: 8)
                 if showWave {
                     voiceWaveformContent
                         .layoutPriority(1)
                 }
-                Spacer(minLength: 8)
+                Spacer(minLength: 0)
                 if showControls {
                     runningControls
                         .layoutPriority(1)
@@ -604,36 +604,6 @@ struct ComposerView: View {
             session.activeTurnID != nil &&
             sessionStore.canControlSession(session) &&
             sessionStore.webSocketStatus == .connected
-    }
-
-    // 常驻的只读状态标签：刻意做成扁平、中性底、小字，和底部那排“可点的” bordered 选项按钮
-    // 拉开差距 —— 让用户一眼看出这只是信息展示，点不动。颜色只保留在图标上做轻提示
-    // （比如“完全访问”权限的红色），文字走次要色。
-    private func statusChip(_ item: ComposerChipItem) -> some View {
-        let tokens = themeStore.tokens(for: colorScheme)
-        return HStack(spacing: 4) {
-            Image(systemName: item.symbol)
-                .font(themeStore.uiFont(.caption2, weight: .semibold))
-                .foregroundStyle(item.tint)
-            Text(item.text)
-                .font(themeStore.uiFont(.caption2, weight: .medium))
-                .foregroundStyle(tokens.secondaryText)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(tokens.surface, in: Capsule())
-        .accessibilityElement(children: .combine)
-    }
-
-    // 模型/权限等运行选项 + seq/usage 等运行时指标，都是只读展示，合并进同一组标签，
-    // 顺序上让常驻的运行选项在前（最左），实时指标在后。
-    private var displayChipItems: [ComposerChipItem] {
-        var items = turnOptionChipItems
-        for item in runtimeChipItems {
-            items.append(ComposerChipItem(id: "runtime-\(item.text)", text: item.text, symbol: item.symbol, tint: item.tint))
-        }
-        return items
     }
 
     private var runningControls: some View {
@@ -732,12 +702,22 @@ struct ComposerView: View {
         }
         .padding(composerCardPadding)
         .frame(maxWidth: .infinity)
-        .background(tokens.inputBackground, in: shape)
+        .background {
+            if reduceTransparency {
+                shape.fill(tokens.inputBackground)
+            } else {
+                shape
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        shape.fill(tokens.inputBackground.opacity(colorScheme == .light ? 0.72 : 0.58))
+                    }
+            }
+        }
         .tint(tokens.accent)
         .overlay {
             shape.strokeBorder(composerCardBorderColor(tokens), lineWidth: composerCardBorderWidth)
         }
-        .shadow(color: composerCardShadow(tokens), radius: 12, y: 5)
+        .shadow(color: composerCardShadow(tokens), radius: 8, y: 3)
     }
 
     private func composerCardShadow(_ tokens: ThemeTokens) -> Color {
@@ -846,41 +826,31 @@ struct ComposerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             followUpDeliverySendMenu(showLabels: !isCompactComposer)
-            sendButton(showLabels: !isCompactComposer)
             voiceMicControl
+            sendButton(showLabels: !isCompactComposer)
         }
     }
 
-    @ViewBuilder
     private var toolbarMenuRow: some View {
-        if isCompactComposer {
-            // iPhone 只保留“添加”这个高频入口，其余运行选项收进一个菜单；
-            // 发送和语音仍固定在右侧，避免横向滚动造成主操作位置漂移。
-            HStack(spacing: 8) {
-                addContentButton
-                compactComposerOptionsMenu
+        // iPad 上模型切换是高频触控，固定为一级入口；宽屏再直接展示权限。
+        // 窄分屏只收起权限，保证模型、语音和发送的位置不因宽度变化而漂移。
+        HStack(spacing: 8) {
+            addContentButton
+            modelOptionsMenu
+            if !isCompactComposer {
+                permissionMenu
             }
-        } else {
-            // iPad/宽窗口继续平铺运行选项，利用横向空间降低多一次菜单点击的成本。
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    addContentButton
-                    voiceLanguageMenu
-                    runSettingsMenu
-                    permissionMenu
-                    planButton
-                    goalButton
-                }
-                .padding(.vertical, 1)
-            }
+            composerOptionsMenu
         }
     }
 
-    private var compactComposerOptionsMenu: some View {
+    private var composerOptionsMenu: some View {
         Menu {
             voiceLanguageMenu
             runSettingsMenu
-            permissionMenu
+            if isCompactComposer {
+                permissionMenu
+            }
 
             Divider()
 
@@ -897,16 +867,15 @@ struct ComposerView: View {
             }
         } label: {
             composerToolbarControlLabel(
-                title: nil,
+                title: isCompactComposer ? nil : "选项",
                 systemImage: "slider.horizontal.3",
                 isSelected: composerState.isPlanModeSelected || composerState.isGoalModeSelected,
-                tint: permissionTint,
                 accessibilityLabel: "会话选项"
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("会话选项")
-        .accessibilityHint("调整模型、权限、语音语言和发送模式")
+        .accessibilityHint("调整语音语言、生成设置和发送模式")
     }
 
     private var voiceMicControl: some View {
@@ -982,7 +951,7 @@ struct ComposerView: View {
                 accessibilityLabel: "添加内容"
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("添加内容")
         .help("添加图片、Skill、Mention 或快捷短语")
         .popover(isPresented: $showsAddContentPanel, arrowEdge: .bottom) {
@@ -1151,6 +1120,7 @@ struct ComposerView: View {
         systemImage: String,
         isSelected: Bool = false,
         tint: Color? = nil,
+        titleMaxWidth: CGFloat? = nil,
         accessibilityLabel: String
     ) -> some View {
         let tokens = themeStore.tokens(for: colorScheme)
@@ -1162,6 +1132,8 @@ struct ComposerView: View {
             if let title {
                 Text(title)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: titleMaxWidth, alignment: .leading)
             }
         }
         .font(themeStore.uiFont(.caption, weight: .semibold))
@@ -1231,7 +1203,7 @@ struct ComposerView: View {
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
             .help(isGuidedSelected ? "运行中发送会直接引导当前回复" : "运行中发送会排队为下一轮消息")
             .accessibilityLabel("运行中追加方式")
             .accessibilityValue(isGuidedSelected ? "引导当前回复" : "排队下一轮")
@@ -1279,14 +1251,13 @@ struct ComposerView: View {
                 accessibilityLabel: "语音语言"
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("语音语言")
         .accessibilityValue(selectedVoiceLanguage.title)
     }
 
     private var runSettingsMenu: some View {
         Menu {
-            modelOptionsMenu
             reasoningOptionsMenu
             serviceTierOptionsMenu
             outputOptionsMenu
@@ -1300,28 +1271,33 @@ struct ComposerView: View {
             }
         } label: {
             composerToolbarControlLabel(
-                title: "运行",
+                title: "生成",
                 systemImage: "gearshape",
-                accessibilityLabel: "运行设置"
+                accessibilityLabel: "生成设置"
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("运行设置")
-        .accessibilityValue(selectedModelSummaryTitle)
+        .accessibilityLabel("生成设置")
+        .accessibilityHint("调整推理强度、速度和输出")
     }
 
     private var modelOptionsMenu: some View {
         Menu {
-            Button("默认") {
+            Button {
                 composerState.turnOptions.runtimeProvider = payloadRuntimeProviderForSelectedSessionLock()
                 composerState.turnOptions.model = nil
                 composerState.turnOptions.modelProvider = nil
+            } label: {
+                Label("默认 · \(defaultModelSummaryTitle)", systemImage: composerState.turnOptions.model == nil ? "checkmark" : "cpu")
             }
             ForEach(modelOptionsForMenu) { option in
-                Button(option.menuTitle) {
+                let isSelected = isSelectedModelOption(option)
+                Button {
                     composerState.turnOptions.runtimeProvider = option.runtimeProvider
                     composerState.turnOptions.model = option.model
                     composerState.turnOptions.modelProvider = option.provider
+                } label: {
+                    Label(option.menuTitle, systemImage: isSelected ? "checkmark" : "cpu")
                 }
             }
             Divider()
@@ -1332,8 +1308,17 @@ struct ComposerView: View {
             }
             .disabled(sessionStore.isRefreshingAppServerModels)
         } label: {
-            Label(composerState.turnOptions.model ?? "默认模型", systemImage: "cpu")
+            composerToolbarControlLabel(
+                title: isCompactComposer ? nil : selectedModelSummaryTitle,
+                systemImage: "cpu",
+                titleMaxWidth: 140,
+                accessibilityLabel: "切换模型"
+            )
         }
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
+        .accessibilityLabel("切换模型")
+        .accessibilityValue(selectedModelSummaryTitle)
+        .accessibilityHint("选择下一轮使用的模型")
     }
 
     private var reasoningOptionsMenu: some View {
@@ -1404,7 +1389,7 @@ struct ComposerView: View {
                 accessibilityLabel: "权限模式"
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("权限模式")
         .accessibilityValue(permissionTitle)
     }
@@ -1493,45 +1478,6 @@ struct ComposerView: View {
         composerState.applyPermissionMode(mode)
     }
 
-    private var turnOptionChipItems: [ComposerChipItem] {
-        var items: [ComposerChipItem] = []
-        if composerState.isGoalModeSelected {
-            items.append(ComposerChipItem(id: "send-goal", text: "目标任务", symbol: "target", tint: themeStore.tokens(for: colorScheme).accent))
-        }
-        if composerState.isPlanModeSelected {
-            items.append(ComposerChipItem(id: "send-plan", text: "计划模式", symbol: "list.clipboard", tint: themeStore.tokens(for: colorScheme).accent))
-        }
-        items.append(ComposerChipItem(id: "model", text: selectedModelSummaryTitle, symbol: "cpu", tint: themeStore.tokens(for: colorScheme).accent))
-        items.append(
-            ComposerChipItem(
-                id: "permission",
-                text: composerState.permissionMode.chipTitle,
-                symbol: composerState.permissionMode.systemImage,
-                tint: permissionTint
-            )
-        )
-
-        if let effort = composerState.turnOptions.reasoningEffort {
-            items.append(ComposerChipItem(id: "effort", text: "推理 \(effort.rawValue)", symbol: "brain.head.profile", tint: .secondary))
-        }
-        if let tier = composerState.turnOptions.serviceTier?.trimmingCharacters(in: .whitespacesAndNewlines), !tier.isEmpty {
-            items.append(ComposerChipItem(id: "tier", text: "速度 \(tier)", symbol: "speedometer", tint: .secondary))
-        }
-        if selectedVoiceLanguage != .automatic {
-            items.append(ComposerChipItem(id: "voice-language", text: "语音 \(selectedVoiceLanguage.title)", symbol: "globe", tint: .secondary))
-        }
-        if let summary = composerState.turnOptions.reasoningSummary {
-            items.append(ComposerChipItem(id: "summary", text: "摘要 \(summary.rawValue)", symbol: "text.bubble", tint: .secondary))
-        }
-        if let personality = composerState.turnOptions.personality {
-            items.append(ComposerChipItem(id: "personality", text: "人格 \(personality.rawValue)", symbol: "person.crop.circle", tint: .secondary))
-        }
-        if developerModeEnabled, hasAdvancedTurnOptions {
-            items.append(ComposerChipItem(id: "advanced", text: "高级已应用", symbol: "ellipsis.circle", tint: .orange))
-        }
-        return items
-    }
-
     private var selectedModelSummaryTitle: String {
         guard let model = composerState.turnOptions.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty else {
             return defaultModelSummaryTitle
@@ -1549,30 +1495,20 @@ struct ComposerView: View {
         return model
     }
 
+    private func isSelectedModelOption(_ option: CodexAppServerModelOption) -> Bool {
+        guard let selectedModel = composerState.turnOptions.model else {
+            return false
+        }
+        return option.model == selectedModel &&
+            option.runtimeProvider == composerState.turnOptions.runtimeProvider &&
+            (composerState.turnOptions.modelProvider == nil || option.provider == composerState.turnOptions.modelProvider)
+    }
+
     private var defaultModelSummaryTitle: String {
         guard let option = modelOptionsForMenu.first(where: \.isDefault) ?? modelOptionsForMenu.first else {
             return "默认模型"
         }
         return developerModeEnabled ? option.menuTitle : option.title
-    }
-
-    private var hasAdvancedTurnOptions: Bool {
-        hasCustomRuntimeProvider ||
-            composerState.turnOptions.config != nil ||
-            composerState.turnOptions.baseInstructions != nil ||
-            composerState.turnOptions.developerInstructions != nil ||
-            composerState.turnOptions.outputSchema != nil ||
-            composerState.turnOptions.serviceName != nil ||
-            composerState.turnOptions.sessionStartSource != nil ||
-            composerState.turnOptions.threadSource != nil
-    }
-
-    private var hasCustomRuntimeProvider: Bool {
-        guard let runtime = composerState.turnOptions.runtimeProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !runtime.isEmpty else {
-            return false
-        }
-        return runtime != "codex" && runtime != "claude"
     }
 
     private var selectedSessionRuntimeProviderForModelMenu: String? {
@@ -1725,23 +1661,6 @@ struct ComposerView: View {
         }
     }
 
-    private var runtimeChipItems: [(text: String, symbol: String, tint: Color)] {
-        guard let session = sessionStore.selectedSession else {
-            return []
-        }
-        var items: [(text: String, symbol: String, tint: Color)] = []
-        if session.activeTurnID != nil {
-            items.append(("回合处理中", "bolt.fill", themeStore.tokens(for: colorScheme).primaryAction))
-        }
-        if let lastSeq = session.lastSeq {
-            items.append(("seq \(lastSeq)", "number", .secondary))
-        }
-        if let usage = session.usage?.compactText {
-            items.append((usage, "gauge.with.dots.needle.33percent", .secondary))
-        }
-        return items
-    }
-
     @ViewBuilder
     private var pendingApprovalAction: some View {
         if !sessionStore.isSelectedSessionObserving, let approval = sessionStore.selectedSession?.pendingApproval {
@@ -1811,7 +1730,7 @@ struct ComposerView: View {
             }
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .keyboardShortcut(.return, modifiers: .command)
         .disabled(!enabled)
         .accessibilityLabel(isGoalMode ? "发送目标任务" : (composerState.voiceDraftNeedsReview ? "确认发送语音草稿" : "发送"))
@@ -1899,26 +1818,6 @@ struct ComposerView: View {
             return base
         }
         return UIFont(descriptor: descriptor, size: size)
-    }
-
-    private func composerActivity(_ activity: SessionForegroundActivity) -> some View {
-        let tokens = themeStore.tokens(for: colorScheme)
-        return HStack(spacing: 7) {
-            if activity.showsSpinner {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(tokens.success)
-            } else {
-                Circle()
-                    .fill(tokens.success)
-                    .frame(width: 7, height: 7)
-            }
-            Text(activity.title)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .font(themeStore.uiFont(.caption, weight: .medium))
-        .foregroundStyle(tokens.secondaryText)
     }
 
     private func openManualInput(_ kind: ManualInputKind) {
@@ -3417,6 +3316,7 @@ private struct AddContentPanel: View {
 private struct VoiceMicButton: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let isPreparing: Bool
     let isRecording: Bool
@@ -3443,7 +3343,7 @@ private struct VoiceMicButton: View {
             }
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .disabled(isPreparing || isTranscribing)
         .accessibilityLabel(accessibilityTitle)
         .accessibilityValue(accessibilityValue)
@@ -3468,6 +3368,22 @@ private struct VoiceMicButton: View {
             return "正在准备"
         }
         return isTranscribing ? "正在转写" : "未开始"
+    }
+}
+
+private struct ComposerPressButtonStyle: ButtonStyle {
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(reduceMotion || !configuration.isPressed ? 1 : 0.96)
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .animation(
+                reduceMotion
+                    ? .easeOut(duration: 0.08)
+                    : .spring(response: 0.22, dampingFraction: 1),
+                value: configuration.isPressed
+            )
     }
 }
 

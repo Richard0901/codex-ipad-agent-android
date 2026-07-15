@@ -467,8 +467,15 @@ struct UnifiedWorkbenchShell: View {
             guard compactPath.last != destination else {
                 return
             }
-            // 会话详情保留来源页，系统返回按钮和左缘手势可以回到会话或工作区。
-            compactPath.append(destination)
+            if let currentDestination = compactPath.last,
+               case .session = currentDestination {
+                // 新建会话会先展示 local:* 占位，接口返回真实 ID 时只替换当前详情。
+                // 如果继续 append，系统会再 push 一层会话，视觉上就是“输入中又弹出新会话”。
+                compactPath[compactPath.index(before: compactPath.endIndex)] = destination
+            } else {
+                // 从会话列表/工作区进入详情时仍然 push，保留系统返回和左缘手势。
+                compactPath.append(destination)
+            }
         }
     }
 

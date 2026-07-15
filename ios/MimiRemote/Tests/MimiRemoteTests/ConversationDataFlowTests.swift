@@ -878,7 +878,7 @@ final class ConversationDataFlowTests: XCTestCase {
         }
     }
 
-    func testTimelineBuilderDoesNotCollapseProcessMessagesIntoDifferentTurn() {
+    func testTimelineBuilderKeepsProcessGroupSeparateFromDifferentTurn() {
         let base = Date(timeIntervalSince1970: 1_500)
         let command = ConversationMessage(
             stableID: "cmd-other-turn",
@@ -901,10 +901,15 @@ final class ConversationDataFlowTests: XCTestCase {
         let items = ConversationTimelineItemBuilder.items(from: [command, assistant])
 
         XCTAssertEqual(items.count, 2)
-        if case .message(let first) = items[0] {
-            XCTAssertEqual(first.turnID, "turn-a")
+        if case .processed(let group) = items[0] {
+            XCTAssertEqual(group.messages.map(\.turnID), ["turn-a"])
         } else {
-            XCTFail("不同 turn 的过程消息不能折叠到后续 assistant")
+            XCTFail("过程消息应独立折叠，不得并入另一个 turn 的 assistant")
+        }
+        if case .message(let final) = items[1] {
+            XCTAssertEqual(final.turnID, "turn-b")
+        } else {
+            XCTFail("另一个 turn 的 assistant 必须独立展示")
         }
     }
 
@@ -958,7 +963,7 @@ final class ConversationDataFlowTests: XCTestCase {
         }
     }
 
-    func testTimelineBuilderKeepsProcessMessagesVisibleWhileAssistantIsStreaming() {
+    func testTimelineBuilderCollapsesProcessMessagesWhileAssistantIsStreaming() {
         let base = Date(timeIntervalSince1970: 2_000)
         let command = ConversationMessage(
             stableID: "cmd-streaming",
@@ -981,15 +986,17 @@ final class ConversationDataFlowTests: XCTestCase {
         let items = ConversationTimelineItemBuilder.items(from: [command, assistant])
 
         XCTAssertEqual(items.count, 2)
-        XCTAssertFalse(items.contains { item in
-            if case .processed = item {
-                return true
-            }
-            return false
-        })
+        guard case .processed(let group) = items[0] else {
+            return XCTFail("运行中的工程过程应收敛为单行入口")
+        }
+        XCTAssertEqual(group.messages.map(\.kind), [.commandSummary])
+        guard case .message(let streamingAssistant) = items[1] else {
+            return XCTFail("assistant streaming 内容仍应直接展示")
+        }
+        XCTAssertEqual(streamingAssistant.sendStatus, .sending)
     }
 
-    func testTimelineBuilderKeepsAllProcessMessagesVisibleDuringActiveTurn() {
+    func testTimelineBuilderKeepsInteractiveMessagesVisibleDuringActiveTurn() {
         let base = Date(timeIntervalSince1970: 2_200)
         let command = ConversationMessage(
             stableID: "cmd-active-interactive",
@@ -1020,12 +1027,12 @@ final class ConversationDataFlowTests: XCTestCase {
 
         let items = ConversationTimelineItemBuilder.items(from: [command, approval, assistant])
 
-        // 运行中不折叠：命令、审批、streaming assistant 全部平铺，保持实时可见可操作。
+        // 命令细节收敛，审批和 streaming assistant 仍然直接可见可操作。
         XCTAssertEqual(items.count, 3)
-        guard case .message(let visibleCommand) = items[0] else {
-            return XCTFail("运行中的命令卡必须保持完整可见")
+        guard case .processed(let processGroup) = items[0] else {
+            return XCTFail("运行中的命令应收敛为单行入口")
         }
-        XCTAssertEqual(visibleCommand.kind, .commandSummary)
+        XCTAssertEqual(processGroup.messages.map(\.kind), [.commandSummary])
         guard case .message(let visibleApproval) = items[1] else {
             return XCTFail("运行中的审批必须保持可见可操作")
         }
@@ -1036,7 +1043,7 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(streamingAssistant.sendStatus, .sending)
     }
 
-    func testTimelineBuilderKeepsProcessMessagesVisibleWhenAssistantFailed() {
+    func testTimelineBuilderCollapsesProcessMessagesButKeepsFailedAssistantVisible() {
         let base = Date(timeIntervalSince1970: 2_500)
         let command = ConversationMessage(
             stableID: "cmd-failed",
@@ -1059,12 +1066,14 @@ final class ConversationDataFlowTests: XCTestCase {
         let items = ConversationTimelineItemBuilder.items(from: [command, assistant])
 
         XCTAssertEqual(items.count, 2)
-        XCTAssertFalse(items.contains { item in
-            if case .processed = item {
-                return true
-            }
-            return false
-        })
+        guard case .processed(let group) = items[0] else {
+            return XCTFail("失败回合的命令细节仍应收敛")
+        }
+        XCTAssertEqual(group.messages.map(\.kind), [.commandSummary])
+        guard case .message(let failedAssistant) = items[1] else {
+            return XCTFail("失败 assistant 必须直接可见")
+        }
+        XCTAssertEqual(failedAssistant.sendStatus, .failed)
     }
 
     func testTimelineBuilderDoesNotHideErrorMessagesInsideProcessedGroup() {
@@ -10769,6 +10778,8 @@ final class ConversationDataFlowTests: XCTestCase {
         )))
         try await Task.sleep(nanoseconds: 160_000_000)
         XCTAssertTrue(sockets[0].sentTurns.isEmpty, "其他历史 turn 的完成事件不能放行队列")
+        XCTAssertEqual(store.selectedSession?.status, SessionStatus.running.rawValue)
+        XCTAssertEqual(store.selectedSession?.activeTurnID, "turn_queue_1")
 
         let firstCompletion = AgentEvent.turnCompleted(AgentEventMetadata(
             seq: 2,
@@ -10812,6 +10823,102 @@ final class ConversationDataFlowTests: XCTestCase {
         )))
         try await waitForSentTurnCount(2, socket: sockets[0])
         XCTAssertEqual(sockets[0].sentTurns.map(\.payload.textPrompt), ["下一轮第一条", "下一轮第二条"])
+    }
+
+    func testExistingQueueStaysFIFOWhenSnapshotTemporarilyLosesActiveTurn() async throws {
+        let project = makeProject(id: "proj_ws_queue_snapshot_gap")
+        let running = makeSession(
+            id: "sess_ws_queue_snapshot_gap",
+            projectID: project.id,
+            title: "Queue Snapshot Gap",
+            status: SessionStatus.running.rawValue,
+            source: "codex",
+            activeTurnID: "turn_snapshot_gap_1"
+        )
+        let appStore = AppStore()
+        appStore.token = "test-token"
+        let conversationStore = ConversationStore()
+        let client = MockSessionStoreClient(projects: [project], sessions: [running], messagesResult: [])
+        var sockets: [MockWebSocketClient] = []
+        let store = SessionStore(
+            appStore: appStore,
+            conversationStore: conversationStore,
+            logStore: LogStore(),
+            clientFactory: { client },
+            webSocketFactory: {
+                let socket = MockWebSocketClient()
+                sockets.append(socket)
+                return socket
+            }
+        )
+
+        await store.refreshAll(autoAttach: false)
+        store.takeOverSession(running)
+        await store.selectSession(running)
+        sockets[0].emitStatus(.connected)
+        try await waitForWebSocketStatus(.connected, store: store)
+
+        let firstQueued = await store.sendTurn(CodexAppServerTurnPayload(prompt: "恢复后第一条"))
+        XCTAssertTrue(firstQueued)
+        XCTAssertTrue(sockets[0].sentTurns.isEmpty)
+
+        // 模拟截图里的恢复窗口：历史快照先把会话投影成 completed，但当前 turn 的
+        // turn/completed 事件还没有补回。已有本地队列不能因此被后续输入绕过。
+        let completedSnapshot = makeSession(
+            id: running.id,
+            projectID: project.id,
+            title: running.title,
+            status: SessionStatus.completed.rawValue,
+            source: running.source
+        )
+        sockets[0].emitEvent(.session(completedSnapshot))
+        try await waitForSelectedSessionStatus(SessionStatus.completed.rawValue, store: store)
+
+        let secondQueued = await store.sendTurn(CodexAppServerTurnPayload(prompt: "恢复后第二条"))
+        XCTAssertTrue(secondQueued)
+        XCTAssertTrue(sockets[0].sentTurns.isEmpty)
+        XCTAssertEqual(
+            conversationStore.messages(for: running.id)
+                .filter { $0.content == "恢复后第一条" || $0.content == "恢复后第二条" }
+                .map(\.sendStatus),
+            [.local, .local]
+        )
+
+        sockets[0].emitEvent(.turnCompleted(AgentEventMetadata(
+            seq: 1,
+            sessionID: running.id,
+            turnID: "turn_snapshot_gap_1",
+            itemID: nil,
+            messageID: nil,
+            clientMessageID: nil,
+            revision: nil,
+            createdAt: nil
+        )))
+        try await waitForSentTurnCount(1, socket: sockets[0])
+        XCTAssertEqual(sockets[0].sentTurns.map(\.payload.textPrompt), ["恢复后第一条"])
+
+        sockets[0].emitEvent(.turnStarted(AgentEventMetadata(
+            seq: 2,
+            sessionID: running.id,
+            turnID: "turn_snapshot_gap_2",
+            itemID: nil,
+            messageID: nil,
+            clientMessageID: nil,
+            revision: nil,
+            createdAt: nil
+        )))
+        sockets[0].emitEvent(.turnCompleted(AgentEventMetadata(
+            seq: 3,
+            sessionID: running.id,
+            turnID: "turn_snapshot_gap_2",
+            itemID: nil,
+            messageID: nil,
+            clientMessageID: nil,
+            revision: nil,
+            createdAt: nil
+        )))
+        try await waitForSentTurnCount(2, socket: sockets[0])
+        XCTAssertEqual(sockets[0].sentTurns.map(\.payload.textPrompt), ["恢复后第一条", "恢复后第二条"])
     }
 
     func testRunningQueueDoesNotDispatchMerelyBecauseWebSocketReconnected() async throws {
@@ -16586,6 +16693,83 @@ extension ConversationDataFlowTests {
         let sent = await transport.sentMessages()
         let requests = sent.compactMap { try? decodeAppServerRequest($0) }
         XCTAssertEqual(requests.filter { $0.method == "thread/turns/list" }.count, 2)
+        XCTAssertFalse(requests.contains { request in
+            request.method == "thread/read" && request.params?.objectValue?["includeTurns"]?.boolValue == true
+        })
+    }
+
+    func testPagedTurnsRecoverMissedCompletionForCachedActiveSession() async throws {
+        let project = AgentProject(id: "proj_turn_page_recovery", name: "Turn Page Recovery", path: "/tmp/turn-page-recovery")
+        let transport = FakeCodexAppServerTransport()
+        let allowedMethods = [
+            "initialize",
+            "initialized",
+            "thread/list",
+            "thread/start",
+            "thread/read",
+            "thread/turns/list",
+            "turn/start",
+            "turn/interrupt"
+        ]
+        let runtime = CodexAppServerSessionRuntime(
+            endpoint: "http://127.0.0.1:8787",
+            token: "outer-token",
+            transportFactory: { transport },
+            configProvider: { makeDirectAppServerConfig(project: project, allowedMethods: allowedMethods) }
+        )
+        let client = CodexAppServerSessionAPIClient(runtime: runtime)
+
+        let listTask = Task {
+            try await client.sessionsPage(projectID: project.id, cursor: nil, limit: 20)
+        }
+        let initialize = try await waitForFakeAppServerRequest(transport, method: "initialize")
+        transportResponse(transport, id: initialize.id, result: #"{"userAgent":"fake-codex","platformFamily":"macos"}"#)
+        let listRequest = try await waitForFakeAppServerRequest(transport, method: "thread/list", after: 1)
+        transportResponse(
+            transport,
+            id: listRequest.id,
+            result: #"{"data":[{"id":"thr_turn_page_recovery","sessionId":"thr_turn_page_recovery","preview":"分页恢复","ephemeral":false,"modelProvider":"openai","createdAt":1780490300,"updatedAt":1780490301,"status":{"type":"active"},"path":null,"cwd":"/tmp/turn-page-recovery","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"分页恢复","turns":[{"id":"turn_page_recovery","status":"inProgress","items":[]}]}],"nextCursor":null,"backwardsCursor":null}"#
+        )
+        let sessions = try await listTask.value
+        XCTAssertEqual(sessions.sessions.first?.activeTurnID, "turn_page_recovery")
+
+        let events = await runtime.attachEvents(sessionID: "thr_turn_page_recovery")
+        var recoveredMetadata: AgentEventMetadata?
+        let recovered = expectation(description: "分页 turn 终态补回 turn/completed")
+        let eventTask = Task { @MainActor in
+            for await event in events {
+                guard case .turnCompleted(let metadata) = event else {
+                    continue
+                }
+                recoveredMetadata = metadata
+                recovered.fulfill()
+                return
+            }
+        }
+
+        let pageTask = Task {
+            try await client.messagesPage(
+                sessionID: "thr_turn_page_recovery",
+                before: nil,
+                limit: 50,
+                loadMode: .full
+            )
+        }
+        let turnsRequest = try await waitForFakeAppServerRequest(transport, method: "thread/turns/list", after: 3)
+        transportResponse(
+            transport,
+            id: turnsRequest.id,
+            result: #"{"data":[{"id":"turn_page_recovery","status":"completed","startedAt":1780490300,"completedAt":1780490310,"itemsView":"full","items":[{"type":"userMessage","id":"user_page_recovery","content":[{"type":"text","text":"恢复前的问题"}]},{"type":"agentMessage","id":"assistant_page_recovery","text":"恢复后的最终回答","phase":"final_answer"}]}],"nextCursor":null}"#
+        )
+        let page = try await pageTask.value
+        await fulfillment(of: [recovered], timeout: 1)
+        eventTask.cancel()
+
+        XCTAssertEqual(page.messages.map(\.content), ["恢复前的问题", "恢复后的最终回答"])
+        XCTAssertEqual(recoveredMetadata?.sessionID, "thr_turn_page_recovery")
+        XCTAssertEqual(recoveredMetadata?.turnID, "turn_page_recovery")
+        let sent = await transport.sentMessages()
+        let requests = sent.compactMap { try? decodeAppServerRequest($0) }
         XCTAssertFalse(requests.contains { request in
             request.method == "thread/read" && request.params?.objectValue?["includeTurns"]?.boolValue == true
         })

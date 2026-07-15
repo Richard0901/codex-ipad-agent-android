@@ -4189,17 +4189,23 @@ final class SessionStore: ObservableObject {
         let payload = runningDelivery == .queued ? await payloadResolvingRequiredModel(payload) : payload
         let prompt = payload.previewText
 
-        if let session = selectedSession, session.isRunning {
+        let selectedSessionHasQueuedTurns = selectedSession.map {
+            queuedRunningTurnsBySessionID[$0.id]?.isEmpty == false
+        } ?? false
+        if let session = selectedSession,
+           session.isRunning || (runningDelivery == .queued && selectedSessionHasQueuedTurns) {
             guard canControlSession(session) else {
                 setErrorMessage("这个会话正在其他客户端运行。请先接管到 iPad，再继续发送。")
                 return false
             }
-            guard let socket = readyWebSocket(for: session) else {
+            guard let socket = readyWebSocket(for: session, allowNonRunning: selectedSessionHasQueuedTurns) else {
                 return false
             }
             let clientMessageID = UUID().uuidString
             let shouldWaitForCurrentTurn = runningDelivery == .queued && (
-                session.activeTurnID != nil || queuedTurnDispatchInFlightSessionIDs.contains(session.id)
+                selectedSessionHasQueuedTurns ||
+                session.activeTurnID != nil ||
+                queuedTurnDispatchInFlightSessionIDs.contains(session.id)
             )
             conversationStore.appendLocalUser(
                 prompt,
@@ -7006,6 +7012,12 @@ final class SessionStore: ObservableObject {
         if let metadata = metadata(for: event) {
             recordEventWatermark(metadata, fallbackSessionID: sessionID)
         }
+        if case .turnCompleted(let metadata) = event,
+           shouldIgnoreStaleTurnCompletion(metadata, fallbackSessionID: sessionID) {
+            // 历史回放可能晚于新 turn 到达。旧完成事件既不能把新 turn 标成 completed，
+            // 也不能清掉或放行绑定到另一 turn 的本地队列。
+            return
+        }
         recordRuntimeActivity(for: event, fallbackSessionID: sessionID)
         let runtimeNotification = runtimeNotification(for: event, fallbackSessionID: sessionID)
         let output = await eventReducer.reduce(
@@ -7039,6 +7051,25 @@ final class SessionStore: ObservableObject {
             }
         }
         await scheduleRuntimeNotificationIfNeeded(runtimeNotification)
+    }
+
+    private func shouldIgnoreStaleTurnCompletion(
+        _ metadata: AgentEventMetadata,
+        fallbackSessionID: SessionID
+    ) -> Bool {
+        guard let completedTurnID = metadata.turnID else {
+            return false
+        }
+        let sessionID = metadata.sessionID ?? fallbackSessionID
+        if let activeTurnID = sessionsByID[sessionID]?.activeTurnID,
+           activeTurnID != completedTurnID {
+            return true
+        }
+        if let expectedTurnID = queuedTurnExpectedCompletionIDBySessionID[sessionID],
+           expectedTurnID != completedTurnID {
+            return true
+        }
+        return false
     }
 
     private func scheduleSessionListReconciliation(projectID: String) {

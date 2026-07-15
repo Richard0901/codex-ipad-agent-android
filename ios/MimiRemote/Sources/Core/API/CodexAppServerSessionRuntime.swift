@@ -711,7 +711,7 @@ actor CodexAppServerSessionRuntime {
     ) async throws -> HistoryMessagesPage {
         let builder = CodexAppServerRequestBuilder(allowlistedProjects: projects)
         let cursor = Self.decodeThreadTurnsCursor(before)
-        let metadata = try await threadMetadataForHistoryPage(
+        let threadMetadata = try await threadMetadataForHistoryPage(
             sessionID: sessionID,
             builder: builder,
             projects: projects,
@@ -730,7 +730,16 @@ actor CodexAppServerSessionRuntime {
         let object = result?.objectValue ?? [:]
         let turns = object["data"]?.arrayValue?.compactMap(\.objectValue) ?? []
         let chronologicalTurns = Array(turns.reversed())
-        var thread = metadata ?? historyThreadShell(sessionID: sessionID, projects: projects)
+        // iPad 在 turn 结束后才恢复连接时，会错过实时 turn/completed，但分页历史已经能看到
+        // 对应 turn 的终态。这里用最新一页的权威 turn 结果补回完成事件，避免消息已显示完成，
+        // runtime 仍保留陈旧 activeTurnID，进而让后续输入永久卡在本地队列。
+        let recoveredCompletedTurnID = cursor == nil
+            ? recoverCompletedActiveTurnFromLatestTurnsPage(
+                sessionID: sessionID,
+                turns: chronologicalTurns
+            )
+            : nil
+        var thread = threadMetadata ?? historyThreadShell(sessionID: sessionID, projects: projects)
         thread["turns"] = .array(chronologicalTurns.map { .object($0) })
         let messages = historyMessages(
             fromTurns: chronologicalTurns,
@@ -741,6 +750,9 @@ actor CodexAppServerSessionRuntime {
             snapshotReadAt: Date()
         )
         let context = contextForHistoryThread(thread, sessionID: sessionID, projects: projects)
+        if let recoveredCompletedTurnID {
+            emit(.turnCompleted(metadata(threadID: sessionID, turnID: recoveredCompletedTurnID)))
+        }
         let nextCursor = firstString(in: object, keys: ["nextCursor", "next_cursor"])
         return HistoryMessagesPage(
             messages: messages,
@@ -751,6 +763,42 @@ actor CodexAppServerSessionRuntime {
             notice: Self.historyNotice(loadMode: loadMode, hasMoreBefore: nextCursor != nil, turns: chronologicalTurns),
             authoritativeCompletedTurnItems: Self.authoritativeCompletedTurnItems(fromTurns: chronologicalTurns)
         )
+    }
+
+    private func recoverCompletedActiveTurnFromLatestTurnsPage(
+        sessionID: SessionID,
+        turns: [[String: CodexAppServerJSONValue]]
+    ) -> TurnID? {
+        guard var context = contextsBySessionID[sessionID],
+              let activeTurnID = context.activeTurnID,
+              let activeTurnIndex = turns.lastIndex(where: { $0["id"]?.stringValue == activeTurnID })
+        else {
+            return nil
+        }
+        let activeTurn = turns[activeTurnIndex]
+        let hasTerminalStatus = isTerminalHistoryStatus(activeTurn["status"])
+        let hasCompletionTimestamp = firstDate(in: activeTurn, keys: ["completedAt", "completed_at"]) != nil
+        guard hasTerminalStatus || hasCompletionTimestamp else {
+            return nil
+        }
+
+        // 如果分页里已经出现更新但尚未确认终态的 turn，旧 turn 的完成不能把当前执行误判为空闲。
+        let laterTurns = turns.index(after: activeTurnIndex)..<turns.endIndex
+        guard !laterTurns.contains(where: { index in
+            let turn = turns[index]
+            return !isTerminalHistoryStatus(turn["status"])
+                && firstDate(in: turn, keys: ["completedAt", "completed_at"]) == nil
+        }) else {
+            return nil
+        }
+
+        context.activeTurnID = nil
+        context.session.activeTurnID = nil
+        context.session.status = SessionStatus.history.rawValue
+        context.session.pendingApproval = nil
+        context.session.pendingUserInput = nil
+        contextsBySessionID[sessionID] = context
+        return activeTurnID
     }
 
     private func threadMetadataForHistoryPage(
