@@ -60,70 +60,11 @@ struct QRCodeScannerSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                QRCodeScannerView(isScanningEnabled: isScanningEnabled) { value in
-                    submit(value)
-                } onError: { failure in
-                    scannerFailure = failure
-                } onReady: {
-                    isCameraReady = true
-                }
-
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(.white.opacity(0.9), lineWidth: 3)
-                    .frame(width: 240, height: 240)
-                    .allowsHitTesting(false)
-
-                if !isCameraReady {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .controlSize(.large)
-                            .tint(.white)
-                        Text("正在启动相机")
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                        Text("如果系统弹出权限请求，请允许相机访问，用来扫描 Mac 上的配对二维码。")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.78))
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(20)
-                    .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .padding()
-                } else if let completionMessage {
-                    VStack(spacing: 12) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 44, weight: .semibold))
-                            .foregroundStyle(.green)
-                            .accessibilityHidden(true)
-                        Text("连接成功")
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                        Text(completionMessage)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.82))
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(20)
-                    .background(.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .padding()
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("qrScanner.connectionSuccess")
-                } else if isSubmittingCode {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .controlSize(.large)
-                            .tint(.white)
-                        Text("已识别二维码")
-                            .font(.headline)
-                            .foregroundStyle(.white)
-                        Text("正在验证 Mac 连接…")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.78))
-                    }
-                    .padding(20)
-                    .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .padding()
+                if let scannerFailure {
+                    scannerFailureContent(scannerFailure)
+                        .transition(.opacity)
+                } else {
+                    scannerContent
                 }
             }
             .ignoresSafeArea(edges: .bottom)
@@ -137,27 +78,6 @@ struct QRCodeScannerSheet: View {
                     }
                 }
             }
-            .alert(
-                "无法扫码",
-                isPresented: scannerFailureBinding,
-                presenting: scannerFailure
-            ) { failure in
-                if failure.recoveryActions.contains(.openSettings) {
-                    Button("前往系统设置") {
-                        openAppSettings()
-                    }
-                }
-                if failure.recoveryActions.contains(.retryScanning) {
-                    Button("继续扫码") {
-                        scannerFailure = nil
-                    }
-                }
-                Button("改用手动连接") {
-                    chooseManualConnection()
-                }
-            } message: { failure in
-                Text(failure.message)
-            }
         }
         .onDisappear {
             submissionTask?.cancel()
@@ -169,15 +89,128 @@ struct QRCodeScannerSheet: View {
         isCameraReady && !isSubmittingCode && completionMessage == nil && scannerFailure == nil
     }
 
-    private var scannerFailureBinding: Binding<Bool> {
-        Binding(
-            get: { scannerFailure != nil },
-            set: { isPresented in
-                if !isPresented {
-                    scannerFailure = nil
-                }
+    private var scannerContent: some View {
+        ZStack {
+            QRCodeScannerView(isScanningEnabled: isScanningEnabled) { value in
+                submit(value)
+            } onError: { failure in
+                scannerFailure = failure
+            } onReady: {
+                isCameraReady = true
             }
-        )
+
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.white.opacity(0.9), lineWidth: 3)
+                .frame(width: 240, height: 240)
+                .allowsHitTesting(false)
+
+            if !isCameraReady {
+                scannerStatusCard(
+                    title: "正在启动相机",
+                    message: "如果系统弹出权限请求，请允许相机访问，用来扫描 Mac 上的配对二维码。",
+                    showsProgress: true
+                )
+            } else if let completionMessage {
+                scannerStatusCard(
+                    title: "连接成功",
+                    message: completionMessage,
+                    systemImage: "checkmark.circle.fill"
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .accessibilityIdentifier("qrScanner.connectionSuccess")
+            } else if isSubmittingCode {
+                scannerStatusCard(
+                    title: "已识别二维码",
+                    message: "正在验证 Mac 连接…",
+                    showsProgress: true
+                )
+            }
+        }
+    }
+
+    private func scannerStatusCard(
+        title: String,
+        message: String,
+        systemImage: String? = nil,
+        showsProgress: Bool = false
+    ) -> some View {
+        VStack(spacing: 12) {
+            if showsProgress {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+            } else if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 44, weight: .semibold))
+                    .foregroundStyle(.green)
+                    .accessibilityHidden(true)
+            }
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white)
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.82))
+                .multilineTextAlignment(.center)
+        }
+        .padding(20)
+        .frame(maxWidth: 420)
+        .background(.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding()
+        .accessibilityElement(children: .combine)
+    }
+
+    private func scannerFailureContent(_ failure: QRCodeScannerFailure) -> some View {
+        ZStack {
+            Color.black
+
+            VStack(spacing: 18) {
+                Image(systemName: "camera.viewfinder")
+                    .font(.system(size: 42, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .accessibilityHidden(true)
+
+                VStack(spacing: 8) {
+                    Text("无法扫码")
+                        .font(.title2.weight(.semibold))
+                    Text(failure.message)
+                        .font(.body)
+                        .foregroundStyle(.white.opacity(0.76))
+                        .multilineTextAlignment(.center)
+                }
+
+                VStack(spacing: 10) {
+                    if failure.recoveryActions.contains(.openSettings) {
+                        Button("前往系统设置", action: openAppSettings)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                    }
+                    if failure.recoveryActions.contains(.retryScanning) {
+                        Button("继续扫码") {
+                            isCameraReady = false
+                            scannerFailure = nil
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                    }
+                    if failure.recoveryActions.count == 1 {
+                        Button("改用手动连接", action: chooseManualConnection)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                    } else {
+                        Button("改用手动连接", action: chooseManualConnection)
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+                    }
+                }
+                .frame(maxWidth: 320)
+            }
+            .foregroundStyle(.white)
+            .padding(28)
+            .frame(maxWidth: 440)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("qrScanner.failure")
     }
 
     private func chooseManualConnection() {

@@ -1,16 +1,39 @@
 import SwiftUI
 
 struct ThirdPartyNoticesView: View {
-    private let notices = Self.loadNotices()
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var themeStore: ThemeStore
+
+    private let blocks: [MarkdownBlock]
+
+    init() {
+        // 许可文件本身就是 Markdown；直接复用会话中已经验证过的解析与表格渲染，
+        // 避免把 #、反引号和表格分隔符作为源码暴露给用户。
+        blocks = MarkdownParser.shared.parse(Self.loadNotices()).blocks
+    }
 
     var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+        let style = MarkdownStyle.make(
+            role: .assistant,
+            colorScheme: colorScheme,
+            fontScale: themeStore.fontScale,
+            tokens: tokens
+        )
+
         ScrollView {
-            Text(notices)
-                .font(.system(.footnote, design: .monospaced))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-                .textSelection(.enabled)
+            LazyVStack(alignment: .leading, spacing: 14) {
+                ForEach(blocks) { block in
+                    MarkdownBlockView(block: block, style: style)
+                }
+            }
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .textSelection(.enabled)
         }
+        .background(tokens.background.ignoresSafeArea())
         .navigationTitle("开源许可")
         .navigationBarTitleDisplayMode(.inline)
     }

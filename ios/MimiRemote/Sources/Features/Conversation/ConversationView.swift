@@ -37,7 +37,7 @@ struct ConversationView: View {
                 HStack {
                     Spacer(minLength: 0)
                     ComposerView(
-                        availableWidth: layout.composerAvailableWidth,
+                        availableWidth: min(layout.composerAvailableWidth, layout.composerMaxWidth),
                         initialGoalStatusExpanded: initialGoalStatusExpanded
                     )
                         .frame(maxWidth: layout.composerMaxWidth)
@@ -747,6 +747,7 @@ struct ConversationLayout: Equatable {
 
     init(containerWidth: CGFloat, horizontalSizeClass: UserInterfaceSizeClass?) {
         let isCompactWidth = horizontalSizeClass == .compact || containerWidth < 560
+        let isWideCompact = horizontalSizeClass == .compact && containerWidth >= 600
         let isVeryCompactWidth = containerWidth < 360
         let isTightPadWidth = containerWidth < 820
 
@@ -754,7 +755,11 @@ struct ConversationLayout: Equatable {
         horizontalInset = isCompactWidth ? (isVeryCompactWidth ? 12 : 16) : (isTightPadWidth ? 16 : 24)
         messageSideSpacer = isCompactWidth ? 12 : (isTightPadWidth ? 24 : 56)
         composerAvailableWidth = max(240, containerWidth - horizontalInset * 2)
-        composerMaxWidth = isCompactWidth ? .infinity : min(920, max(360, composerAvailableWidth))
+        // iPhone 横屏仍然是 compact size class，但不应该把输入卡拉满整条长边。
+        // 居中的宽度上限同时缩短正文行长，并给系统返回手势留出清晰的边缘空间。
+        composerMaxWidth = isWideCompact
+            ? min(680, composerAvailableWidth)
+            : (isCompactWidth ? .infinity : min(820, max(360, composerAvailableWidth)))
         composerTopPadding = isCompactWidth ? 10 : 12
         // safeAreaInset 已经负责系统手势区；这里只保留卡片与安全区之间的轻量呼吸感，
         // 避免两层底距叠加后让输入卡看起来悬得过高。
@@ -763,7 +768,7 @@ struct ConversationLayout: Equatable {
         // 气泡宽度按实际容器收缩，保留左右身份感，同时避免 iPhone/mini 竖屏横向溢出。
         let rowAvailableWidth = max(240, containerWidth - horizontalInset * 2 - messageSideSpacer)
         userBubbleMaxWidth = min(isCompactWidth ? 420 : 560, rowAvailableWidth)
-        let assistantWidthCap: CGFloat = isCompactWidth ? 520 : (isTightPadWidth ? 760 : 840)
+        let assistantWidthCap: CGFloat = isWideCompact ? 660 : (isCompactWidth ? 520 : (isTightPadWidth ? 700 : 760))
         assistantBubbleMaxWidth = min(assistantWidthCap, rowAvailableWidth)
         systemMaxWidth = min(520, max(240, containerWidth - horizontalInset * 2))
         runtimeCardMaxWidth = min(560, max(260, containerWidth - horizontalInset * 2))

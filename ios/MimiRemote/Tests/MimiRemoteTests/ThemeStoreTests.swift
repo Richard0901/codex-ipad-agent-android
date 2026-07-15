@@ -417,6 +417,15 @@ final class ResponsiveLayoutTests: XCTestCase {
         XCTAssertLessThanOrEqual(layout.runtimeCardMaxWidth, 366)
     }
 
+    func testConversationLayoutCapsPhoneLandscapeComposerWidth() {
+        let layout = ConversationLayout(containerWidth: 844, horizontalSizeClass: .compact)
+
+        XCTAssertEqual(layout.composerAvailableWidth, 812)
+        XCTAssertEqual(layout.composerMaxWidth, 680)
+        XCTAssertEqual(layout.assistantBubbleMaxWidth, 660)
+        XCTAssertLessThan(layout.composerMaxWidth, layout.composerAvailableWidth)
+    }
+
     func testConversationLayoutKeepsPadComposerCloseToBottomSafeArea() {
         let layout = ConversationLayout(containerWidth: 716, horizontalSizeClass: .regular)
 

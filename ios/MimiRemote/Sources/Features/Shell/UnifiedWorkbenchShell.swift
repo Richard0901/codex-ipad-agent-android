@@ -13,6 +13,28 @@ private enum AppSheetDestination: String, Identifiable {
     var id: String { rawValue }
 }
 
+private enum CompactWorkbenchTab: Hashable {
+    case sessions
+    case workspaces
+    case settings
+
+    var title: String {
+        switch self {
+        case .sessions: return "会话"
+        case .workspaces: return "工作区"
+        case .settings: return "设置"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .sessions: return "bubble.left.and.bubble.right"
+        case .workspaces: return "folder"
+        case .settings: return "gearshape"
+        }
+    }
+}
+
 /// iPad 和 iPhone 共用同一套路由；宽屏使用侧栏，窄屏使用真正的 push 导航。
 /// 不能只依赖 NavigationSplitView 自动折叠：折叠后的详情列没有返回栈，也就没有系统左缘返回手势。
 struct UnifiedWorkbenchShell: View {
@@ -25,7 +47,8 @@ struct UnifiedWorkbenchShell: View {
     @Binding var showingInspector: Bool
     @State private var selection: AppDestination? = .sessions
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
-    @State private var compactPath: [AppDestination] = []
+    @State private var compactSessionPath: [AppDestination] = []
+    @State private var compactSelectedTab: CompactWorkbenchTab = .sessions
     @State private var presentedSheet: AppSheetDestination?
 
     var body: some View {
@@ -41,8 +64,7 @@ struct UnifiedWorkbenchShell: View {
                 if layout.usesCompactNavigation {
                     compactLayout(
                         layout: layout,
-                        tokens: tokens,
-                        bottomSafeAreaInset: proxy.safeAreaInsets.bottom
+                        tokens: tokens
                     )
                 } else {
                     splitLayout(
@@ -98,21 +120,57 @@ struct UnifiedWorkbenchShell: View {
 
     private func compactLayout(
         layout: WorkbenchLayout,
-        tokens: ThemeTokens,
-        bottomSafeAreaInset: CGFloat
+        tokens: ThemeTokens
     ) -> some View {
-        NavigationStack(path: $compactPath) {
-            sidebar(tokens: tokens, layout: layout, bottomSafeAreaInset: bottomSafeAreaInset)
-                .navigationDestination(for: AppDestination.self) { destination in
-                    compactDestination(destination, layout: layout, tokens: tokens)
-                }
+        TabView(selection: $compactSelectedTab) {
+            NavigationStack(path: $compactSessionPath) {
+                sessionList(layout: layout)
+                    .navigationDestination(for: AppDestination.self) { destination in
+                        compactDestination(destination, layout: layout, tokens: tokens)
+                    }
+            }
+            .tabItem {
+                Label(CompactWorkbenchTab.sessions.title, systemImage: CompactWorkbenchTab.sessions.systemImage)
+            }
+            .tag(CompactWorkbenchTab.sessions)
+
+            NavigationStack {
+                workspaces(layout: layout)
+            }
+            .tabItem {
+                Label(CompactWorkbenchTab.workspaces.title, systemImage: CompactWorkbenchTab.workspaces.systemImage)
+            }
+            .tag(CompactWorkbenchTab.workspaces)
+
+            NavigationStack {
+                SettingsView(
+                    isInitialSetup: false,
+                    showsDoneButton: false,
+                    embedsNavigationStack: false
+                )
+            }
+            .tabItem {
+                Label(CompactWorkbenchTab.settings.title, systemImage: CompactWorkbenchTab.settings.systemImage)
+            }
+            .tag(CompactWorkbenchTab.settings)
         }
         .themedWorkbenchNavigationChrome(
             tokens: tokens,
             colorScheme: themeStore.resolvedColorScheme(for: colorScheme)
         )
-        .onChange(of: compactPath) { oldPath, newPath in
+        .onChange(of: compactSessionPath) { oldPath, newPath in
             handleCompactPathChange(from: oldPath, to: newPath)
+        }
+        .onChange(of: compactSelectedTab) { _, tab in
+            switch tab {
+            case .sessions:
+                selection = compactSessionPath.last ?? .sessions
+            case .workspaces:
+                selection = .workspaces
+            case .settings:
+                // 设置是全局配置，不改变当前会话或工作区上下文。
+                break
+            }
         }
     }
 
@@ -444,6 +502,7 @@ struct UnifiedWorkbenchShell: View {
             }
         }
         .background(tokens.background.ignoresSafeArea())
+        .toolbar(.hidden, for: .tabBar)
         .themedWorkbenchNavigationChrome(tokens: tokens, colorScheme: themeStore.resolvedColorScheme(for: colorScheme))
         .sessionInspectorPresentation(isPresented: $showingInspector, layout: layout)
     }
@@ -456,41 +515,53 @@ struct UnifiedWorkbenchShell: View {
         }
 
         switch destination {
-        case .sessions, .workspaces:
-            // 固定入口是同级页面；切换时替换路径，避免首次进入工作区还要让 SwiftUI
-            // 同时保留并重算前一个入口的导航列。
-            let nextPath = [destination]
-            if compactPath != nextPath {
-                compactPath = nextPath
+        case .sessions:
+            compactSelectedTab = .sessions
+            if !compactSessionPath.isEmpty {
+                compactSessionPath.removeAll()
             }
+        case .workspaces:
+            compactSelectedTab = .workspaces
         case .session:
-            guard compactPath.last != destination else {
+            compactSelectedTab = .sessions
+            guard compactSessionPath.last != destination else {
                 return
             }
-            if let currentDestination = compactPath.last,
+            if let currentDestination = compactSessionPath.last,
                case .session = currentDestination {
                 // 新建会话会先展示 local:* 占位，接口返回真实 ID 时只替换当前详情。
                 // 如果继续 append，系统会再 push 一层会话，视觉上就是“输入中又弹出新会话”。
-                compactPath[compactPath.index(before: compactPath.endIndex)] = destination
+                compactSessionPath[compactSessionPath.index(before: compactSessionPath.endIndex)] = destination
             } else {
-                // 从会话列表/工作区进入详情时仍然 push，保留系统返回和左缘手势。
-                compactPath.append(destination)
+                // 会话详情属于“会话”Tab；从工作区创建或打开后切回该 Tab 并保留系统返回手势。
+                compactSessionPath.append(destination)
             }
         }
     }
 
     private func synchronizeNavigation(for layout: WorkbenchLayout) {
-        let destination = sessionStore.selectedSessionID.map(AppDestination.session)
-            ?? selection
+        let destination = selection
+            ?? sessionStore.selectedSessionID.map(AppDestination.session)
             ?? .sessions
         selection = destination
 
-        guard layout.usesCompactNavigation,
-              compactPath.last != destination else {
+        guard layout.usesCompactNavigation else {
             return
         }
-        // 首次进入窄屏或从宽屏旋转过来时，以当前可见内容建立一层确定的返回栈。
-        compactPath = [destination]
+
+        switch destination {
+        case .sessions:
+            compactSelectedTab = .sessions
+            compactSessionPath.removeAll()
+        case .workspaces:
+            compactSelectedTab = .workspaces
+        case .session:
+            compactSelectedTab = .sessions
+            if compactSessionPath.last != destination {
+                // 首次进入窄屏或从宽屏旋转过来时，以当前会话建立一层确定的返回栈。
+                compactSessionPath = [destination]
+            }
+        }
     }
 
     private func handleCompactPathChange(
@@ -499,6 +570,7 @@ struct UnifiedWorkbenchShell: View {
     ) {
         let destination = newPath.last ?? .sessions
         selection = destination
+        compactSelectedTab = .sessions
 
         if isSessionDestination(oldPath.last), !isSessionDestination(newPath.last) {
             // 返回列表后停止当前会话订阅，沿用原紧凑导航的资源释放语义。
@@ -514,7 +586,7 @@ struct UnifiedWorkbenchShell: View {
         return false
     }
 
-    /// 工具栏使用单层圆形底；非激活态沿用主题的次级表面，避免浅色模式下纯白按钮压过暖灰导航栏。
+    /// 顶栏交给系统工具栏材质和命中区域处理；这里只表达图标与激活状态，避免自绘圆形再叠一层系统玻璃。
     private func workbenchToolbarIconButton(
         systemImage: String,
         accessibilityLabel: String,
@@ -527,18 +599,7 @@ struct UnifiedWorkbenchShell: View {
             Image(systemName: systemImage)
                 .font(.system(size: 14, weight: .semibold))
                 .symbolRenderingMode(.hierarchical)
-                .frame(width: 34, height: 34)
-                .background(
-                    isActive ? tokens.selectionFill : tokens.elevatedSurface.opacity(0.58),
-                    in: Circle()
-                )
-                .overlay {
-                    Circle()
-                        .stroke(tokens.border.opacity(0.62), lineWidth: 1)
-                }
-                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
         .foregroundStyle(isActive ? tokens.primaryAction : tokens.secondaryText)
         .disabled(isDisabled)
         .accessibilityLabel(accessibilityLabel)
@@ -609,12 +670,12 @@ struct WorkbenchSidebarDestinationButton: View {
             HStack(spacing: 10) {
                 Image(systemName: systemImage)
                     .font(themeStore.uiFont(size: 18, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? tokens.primaryActionForeground : tokens.primaryAction)
+                    .foregroundStyle(tokens.primaryAction)
                     .frame(width: 24)
 
                 Text(title)
                     .font(themeStore.uiFont(.body, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? tokens.primaryActionForeground : tokens.primaryText)
+                    .foregroundStyle(tokens.primaryText)
 
                 Spacer(minLength: 0)
             }
@@ -622,10 +683,18 @@ struct WorkbenchSidebarDestinationButton: View {
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
             .background(
-                isSelected ? tokens.primaryAction : Color.clear,
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                isSelected ? tokens.selectionFill : Color.clear,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
             )
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(alignment: .leading) {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        .fill(tokens.primaryAction)
+                        .frame(width: 3, height: 22)
+                        .padding(.leading, 3)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .listRowInsets(.init(top: 2, leading: 8, bottom: 2, trailing: 8))

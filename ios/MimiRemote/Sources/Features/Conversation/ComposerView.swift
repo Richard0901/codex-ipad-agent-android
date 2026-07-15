@@ -758,13 +758,12 @@ struct ComposerView: View {
     }
 
     private var toolbarMenuRow: some View {
-        // iPad 上模型切换是高频触控，固定为一级入口；宽屏再直接展示权限。
-        // 窄分屏只收起权限，保证模型、语音和发送的位置不因宽度变化而漂移。
+        // iPad 保留模型与权限的快速可见性；紧凑宽度把运行配置收进“选项”，
+        // 让添加、语音和发送成为稳定的一级操作。
         HStack(spacing: 8) {
             addContentButton
-            modelOptionsMenu
-            reasoningEffortMenu
             if !isCompactComposer {
+                modelOptionsMenu
                 permissionMenu
             }
             composerOptionsMenu
@@ -773,10 +772,17 @@ struct ComposerView: View {
 
     private var composerOptionsMenu: some View {
         Menu {
-            runSettingsMenu
+            if isCompactComposer {
+                compactModelOptionsMenu
+            }
+            reasoningEffortOptionsMenu
             if isCompactComposer {
                 permissionMenu
             }
+
+            Divider()
+
+            runSettingsMenu
 
             Divider()
 
@@ -801,7 +807,7 @@ struct ComposerView: View {
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("会话选项")
-        .accessibilityHint("调整生成设置和发送模式")
+        .accessibilityHint("调整推理强度、生成设置和发送模式")
     }
 
     private var voiceMicControl: some View {
@@ -1183,33 +1189,10 @@ struct ComposerView: View {
 
     private var modelOptionsMenu: some View {
         Menu {
-            Button {
-                composerState.turnOptions.runtimeProvider = payloadRuntimeProviderForSelectedSessionLock()
-                composerState.turnOptions.model = nil
-                composerState.turnOptions.modelProvider = nil
-            } label: {
-                Label("默认 · \(defaultModelSummaryTitle)", systemImage: composerState.turnOptions.model == nil ? "checkmark" : "cpu")
-            }
-            ForEach(modelOptionsForMenu) { option in
-                let isSelected = isSelectedModelOption(option)
-                Button {
-                    composerState.turnOptions.runtimeProvider = option.runtimeProvider
-                    composerState.turnOptions.model = option.model
-                    composerState.turnOptions.modelProvider = option.provider
-                } label: {
-                    Label(option.menuTitle, systemImage: isSelected ? "checkmark" : "cpu")
-                }
-            }
-            Divider()
-            Button {
-                Task { await sessionStore.refreshAppServerModelOptions(force: true) }
-            } label: {
-                Label(sessionStore.isRefreshingAppServerModels ? "刷新中" : "刷新模型列表", systemImage: "arrow.clockwise")
-            }
-            .disabled(sessionStore.isRefreshingAppServerModels)
+            modelOptionItems
         } label: {
             composerToolbarControlLabel(
-                title: isCompactComposer ? nil : selectedModelSummaryTitle,
+                title: selectedModelSummaryTitle,
                 systemImage: "cpu",
                 titleMaxWidth: 140,
                 accessibilityLabel: "切换模型"
@@ -1221,35 +1204,75 @@ struct ComposerView: View {
         .accessibilityHint("选择下一轮使用的模型")
     }
 
-    private var reasoningEffortMenu: some View {
+    private var compactModelOptionsMenu: some View {
         Menu {
-            Button {
-                composerState.turnOptions.reasoningEffort = nil
-            } label: {
-                Label("默认", systemImage: composerState.turnOptions.reasoningEffort == nil ? "checkmark" : "brain.head.profile")
-            }
-            ForEach(CodexAppServerReasoningEffort.allCases) { effort in
-                Button {
-                    composerState.turnOptions.reasoningEffort = effort
-                } label: {
-                    Label(
-                        effort.rawValue,
-                        systemImage: composerState.turnOptions.reasoningEffort == effort ? "checkmark" : "brain.head.profile"
-                    )
-                }
-            }
+            modelOptionItems
         } label: {
-            composerToolbarControlLabel(
-                title: composerState.turnOptions.reasoningEffort?.rawValue ?? "默认",
-                systemImage: "brain.head.profile",
-                titleMaxWidth: 72,
-                accessibilityLabel: "推理强度"
-            )
+            Label("模型 · \(selectedModelSummaryTitle)", systemImage: "cpu")
         }
-        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
+        .accessibilityLabel("切换模型")
+        .accessibilityValue(selectedModelSummaryTitle)
+    }
+
+    @ViewBuilder
+    private var modelOptionItems: some View {
+        Button {
+            composerState.turnOptions.runtimeProvider = payloadRuntimeProviderForSelectedSessionLock()
+            composerState.turnOptions.model = nil
+            composerState.turnOptions.modelProvider = nil
+        } label: {
+            Label("默认 · \(defaultModelSummaryTitle)", systemImage: composerState.turnOptions.model == nil ? "checkmark" : "cpu")
+        }
+        ForEach(modelOptionsForMenu) { option in
+            let isSelected = isSelectedModelOption(option)
+            Button {
+                composerState.turnOptions.runtimeProvider = option.runtimeProvider
+                composerState.turnOptions.model = option.model
+                composerState.turnOptions.modelProvider = option.provider
+            } label: {
+                Label(option.menuTitle, systemImage: isSelected ? "checkmark" : "cpu")
+            }
+        }
+        Divider()
+        Button {
+            Task { await sessionStore.refreshAppServerModelOptions(force: true) }
+        } label: {
+            Label(sessionStore.isRefreshingAppServerModels ? "刷新中" : "刷新模型列表", systemImage: "arrow.clockwise")
+        }
+        .disabled(sessionStore.isRefreshingAppServerModels)
+    }
+
+    private var reasoningEffortOptionsMenu: some View {
+        Menu {
+            reasoningEffortOptions
+        } label: {
+            Label("推理强度 · \(reasoningEffortTitle)", systemImage: "brain.head.profile")
+        }
         .accessibilityLabel("推理强度")
-        .accessibilityValue(composerState.turnOptions.reasoningEffort?.rawValue ?? "默认")
-        .accessibilityHint("选择下一轮使用的模型推理强度")
+        .accessibilityValue(reasoningEffortTitle)
+    }
+
+    @ViewBuilder
+    private var reasoningEffortOptions: some View {
+        Button {
+            composerState.turnOptions.reasoningEffort = nil
+        } label: {
+            Label("默认", systemImage: composerState.turnOptions.reasoningEffort == nil ? "checkmark" : "brain.head.profile")
+        }
+        ForEach(CodexAppServerReasoningEffort.allCases) { effort in
+            Button {
+                composerState.turnOptions.reasoningEffort = effort
+            } label: {
+                Label(
+                    effort.rawValue,
+                    systemImage: composerState.turnOptions.reasoningEffort == effort ? "checkmark" : "brain.head.profile"
+                )
+            }
+        }
+    }
+
+    private var reasoningEffortTitle: String {
+        composerState.turnOptions.reasoningEffort?.rawValue ?? "默认"
     }
 
     private var serviceTierOptionsMenu: some View {

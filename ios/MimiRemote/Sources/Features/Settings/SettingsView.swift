@@ -4,6 +4,7 @@ import UIKit
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.themeSystemColorScheme) private var themeSystemColorScheme
     @EnvironmentObject private var appStore: AppStore
     @EnvironmentObject private var sessionStore: SessionStore
@@ -11,6 +12,7 @@ struct SettingsView: View {
 
     let isInitialSetup: Bool
     var showsDoneButton = true
+    var embedsNavigationStack = true
 
     @AppStorage("agentd.developerMode") private var developerModeEnabled = false
     @AppStorage("runtime.keepAwakeWhileRunning") private var keepAwakeWhileRunning = false
@@ -20,35 +22,51 @@ struct SettingsView: View {
         let resolvedColorScheme = themeStore.resolvedColorScheme(for: systemColorScheme)
         let tokens = themeStore.tokens(for: systemColorScheme)
 
-        NavigationStack {
-            Group {
-                if isInitialSetup {
-                    InitialPairingView()
-                } else {
-                    settingsForm(tokens: tokens)
+        Group {
+            if embedsNavigationStack {
+                NavigationStack {
+                    settingsContent(tokens: tokens, resolvedColorScheme: resolvedColorScheme)
                 }
+            } else {
+                settingsContent(tokens: tokens, resolvedColorScheme: resolvedColorScheme)
             }
-            .navigationTitle(isInitialSetup ? "连接你的 Mac" : "设置")
-            .navigationBarTitleDisplayMode(isInitialSetup ? .automatic : .inline)
-            .toolbar {
-                if !isInitialSetup && showsDoneButton {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            dismiss()
-                        } label: {
-                            Image(systemName: "xmark")
-                        }
-                        .buttonBorderShape(.circle)
-                        .accessibilityLabel("关闭设置")
-                        .accessibilityIdentifier("settings.close")
-                    }
-                }
-            }
-            .tint(tokens.accent)
-            // 设置页是 sheet 内的独立 presentation；系统模式下也显式解析成当前系统深/浅色，避免从浅色切回默认时停在旧环境。
-            .preferredColorScheme(resolvedColorScheme)
-            .environment(\.colorScheme, resolvedColorScheme)
         }
+    }
+
+    @ViewBuilder
+    private func settingsContent(tokens: ThemeTokens, resolvedColorScheme: ColorScheme) -> some View {
+        Group {
+            if isInitialSetup {
+                InitialPairingView()
+            } else {
+                settingsForm(tokens: tokens)
+                    .frame(maxWidth: 720)
+                    .frame(maxWidth: .infinity)
+                    .background(tokens.background.ignoresSafeArea())
+            }
+        }
+        .navigationTitle(isInitialSetup ? "连接你的 Mac" : "设置")
+        .navigationBarTitleDisplayMode(initialNavigationTitleDisplayMode)
+        .toolbar {
+            if !isInitialSetup && showsDoneButton {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        dismiss()
+                    }
+                    .accessibilityLabel("关闭设置")
+                    .accessibilityIdentifier("settings.close")
+                }
+            }
+        }
+        .tint(tokens.accent)
+        // 设置页既可作为 sheet 自持 NavigationStack，也可嵌入紧凑 Tab 的 NavigationStack。
+        .preferredColorScheme(resolvedColorScheme)
+        .environment(\.colorScheme, resolvedColorScheme)
+    }
+
+    private var initialNavigationTitleDisplayMode: NavigationBarItem.TitleDisplayMode {
+        // 手机保留醒目的首配大标题；iPad 宽屏改用居中标题，避免标题贴左而表单居中造成断裂。
+        isInitialSetup && horizontalSizeClass == .compact ? .large : .inline
     }
 
     private func settingsForm(tokens: ThemeTokens) -> some View {
@@ -156,6 +174,9 @@ private struct ConnectionManagementView: View {
             InitialConnectionSettingsSections()
         }
         .themedSettingsForm(tokens: themeStore.tokens(for: colorScheme))
+        .frame(maxWidth: 720)
+        .frame(maxWidth: .infinity)
+        .background(themeStore.tokens(for: colorScheme).background.ignoresSafeArea())
         .navigationTitle("Mac 连接")
     }
 }
@@ -199,6 +220,10 @@ private struct InitialPairingView: View {
             InitialConnectionSettingsSections()
         }
         .themedSettingsForm(tokens: tokens)
+        // 连接是短表单而不是数据表；宽窗口里限制行长，按钮和输入框不会被拉成整屏。
+        .frame(maxWidth: 720)
+        .frame(maxWidth: .infinity)
+        .background(tokens.background.ignoresSafeArea())
     }
 }
 
@@ -509,6 +534,7 @@ private struct InitialConnectionSettingsSections: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(tokens.primaryAction)
                 .controlSize(.large)
                 .disabled(isSavingConnection)
 
@@ -536,15 +562,21 @@ private struct InitialConnectionSettingsSections: View {
                 DisclosureGroup(isExpanded: manualConnectionExpandedBinding) {
                     VStack(alignment: .leading, spacing: 12) {
                         if isAddingConnectionProfile {
-                            TextField("显示名称，例如：工作室 Mac", text: $profileDisplayName)
-                                .textInputAutocapitalization(.words)
-                                .accessibilityIdentifier("settings.profileDisplayName")
+                            connectionFieldLabel("显示名称") {
+                                TextField("例如：工作室 Mac", text: $profileDisplayName)
+                                    .textInputAutocapitalization(.words)
+                                    .accessibilityIdentifier("settings.profileDisplayName")
+                            }
                         }
-                        StableEndpointTextField(placeholder: "Tailscale 地址", text: $endpoint)
-                            .frame(minHeight: 28)
-                        SecureField("访问码", text: $token)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
+                        connectionFieldLabel("连接地址") {
+                            StableEndpointTextField(placeholder: endpointPlaceholder, text: $endpoint)
+                                .frame(minHeight: 28)
+                        }
+                        connectionFieldLabel("访问码") {
+                            SecureField("输入访问码", text: $token)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
                         EndpointTransportNotice(assessment: endpointTransportAssessment)
                         Button {
                             Task { await save() }
@@ -559,6 +591,7 @@ private struct InitialConnectionSettingsSections: View {
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
+                        .tint(tokens.primaryAction)
                         .disabled(!canSubmit)
                     }
                     .padding(.vertical, 6)
@@ -704,6 +737,14 @@ private struct InitialConnectionSettingsSections: View {
         appStore.isConfigured ? "扫描二维码添加 Mac" : "扫描二维码连接"
     }
 
+    private var endpointPlaceholder: String {
+#if targetEnvironment(macCatalyst)
+        "本机或 Tailscale 地址"
+#else
+        "Tailscale 地址"
+#endif
+    }
+
     private var manualConnectionTitle: String {
         guard appStore.activeConnectionProfile != nil else {
             return "手动连接"
@@ -719,6 +760,19 @@ private struct InitialConnectionSettingsSections: View {
             return "添加并连接"
         }
         return appStore.isConfigured ? "更新连接" : "连接"
+    }
+
+    private func connectionFieldLabel<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(themeStore.uiFont(.caption, weight: .semibold))
+                .foregroundStyle(themeStore.tokens(for: colorScheme).secondaryText)
+            content()
+        }
+        .accessibilityElement(children: .contain)
     }
 
     private var connectionStatusSystemImage: String {
@@ -1732,16 +1786,6 @@ struct AppearanceView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-
-                ForEach(ThemeMode.allCases) { mode in
-                    ThemeModeRow(
-                        mode: mode,
-                        isSelected: themeStore.mode == mode,
-                        tokens: tokens
-                    ) {
-                        themeStore.mode = mode
-                    }
-                }
             } header: {
                 Text("深浅色")
             } footer: {
@@ -1828,6 +1872,9 @@ struct AppearanceView: View {
             .listRowBackground(tokens.elevatedSurface)
         }
         .themedSettingsForm(tokens: tokens)
+        .frame(maxWidth: 720)
+        .frame(maxWidth: .infinity)
+        .background(tokens.background.ignoresSafeArea())
         .navigationTitle("外观")
         .preferredColorScheme(resolvedColorScheme)
         .environment(\.colorScheme, resolvedColorScheme)
@@ -1839,58 +1886,6 @@ struct AppearanceView: View {
     }
 
     private func iconName(for mode: ThemeMode) -> String {
-        switch mode {
-        case .system:
-            return "circle.lefthalf.filled"
-        case .light:
-            return "sun.max"
-        case .dark:
-            return "moon"
-        }
-    }
-}
-
-private struct ThemeModeRow: View {
-    @EnvironmentObject private var themeStore: ThemeStore
-    let mode: ThemeMode
-    let isSelected: Bool
-    let tokens: ThemeTokens
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(isSelected ? tokens.selectionFill : tokens.elevatedSurface)
-                    Image(systemName: iconName)
-                        .foregroundStyle(isSelected ? tokens.accent : tokens.secondaryText)
-                }
-                .frame(width: 42, height: 42)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(mode.title)
-                        .font(themeStore.uiFont(.headline, weight: .semibold))
-                        .foregroundStyle(tokens.primaryText)
-                    Text(mode.subtitle)
-                        .font(themeStore.uiFont(.footnote))
-                        .foregroundStyle(tokens.secondaryText)
-                }
-
-                Spacer()
-
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(tokens.accent)
-                }
-            }
-            .contentShape(Rectangle())
-            .padding(.vertical, 4)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var iconName: String {
         switch mode {
         case .system:
             return "circle.lefthalf.filled"

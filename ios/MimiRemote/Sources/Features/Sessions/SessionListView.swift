@@ -162,7 +162,7 @@ struct SessionListView: View {
         }
     }
 
-    /// 列表右上角保留新建入口，所有工具按钮共用单层圆形样式，避免 glass 自动样式产生双圆环。
+    /// 使用系统工具栏按钮，让不同系统版本自行处理材质、按下反馈和命中区域。
     private func sessionListToolbarButton(
         systemImage: String,
         accessibilityLabel: String,
@@ -173,19 +173,9 @@ struct SessionListView: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(themeStore.uiFont(size: 15, weight: .semibold))
-                .frame(width: 34, height: 34)
-                .background(
-                    isPrimary ? tokens.primaryAction : tokens.surface.opacity(0.72),
-                    in: Circle()
-                )
-                .overlay {
-                    Circle()
-                        .stroke(isPrimary ? tokens.primaryAction.opacity(0.72) : tokens.border.opacity(0.62), lineWidth: 1)
-                }
-                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(isPrimary ? Color.white : tokens.secondaryText)
+        .foregroundStyle(isPrimary ? tokens.primaryAction : tokens.secondaryText)
+        .tint(isPrimary ? tokens.primaryAction : tokens.accent)
         .accessibilityLabel(accessibilityLabel)
     }
 

@@ -203,7 +203,7 @@ struct DoctorView: View {
                 }
             }
             .padding()
-            .frame(maxWidth: 900, alignment: .topLeading)
+            .frame(maxWidth: 760, alignment: .topLeading)
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(tokens.background.ignoresSafeArea())
@@ -242,6 +242,8 @@ struct DoctorView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+            .tint(tokens.primaryAction)
+            .foregroundStyle(tokens.primaryActionForeground)
             .disabled(activeOperation != nil)
             .accessibilityHint("重新请求 Mac 助手的 Doctor 诊断结果")
 
@@ -256,12 +258,12 @@ struct DoctorView: View {
                     }
                 }
                 .buttonStyle(.bordered)
+                .tint(tokens.accent)
                 .disabled(activeOperation != nil)
             }
 
             Spacer(minLength: 0)
         }
-        .foregroundStyle(tokens.primaryText)
     }
 
     @ViewBuilder
@@ -549,7 +551,7 @@ struct DoctorView: View {
         } catch is CancellationError {
             doctorState = .idle
         } catch {
-            doctorState = .failed(error.localizedDescription)
+            doctorState = .failed(displayMessage(for: error))
         }
     }
 
@@ -589,7 +591,27 @@ struct DoctorView: View {
         } catch is CancellationError {
             historyState = .idle
         } catch {
-            historyState = .failed(error.localizedDescription)
+            historyState = .failed(displayMessage(for: error))
+        }
+    }
+
+    private func displayMessage(for error: Error) -> String {
+        guard let urlError = error as? URLError else {
+            return error.localizedDescription
+        }
+
+        switch urlError.code {
+        case .notConnectedToInternet:
+            return "当前设备没有网络连接。恢复网络后再重新检查。"
+        case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost:
+            return "无法连接到 Mac 助手。请确认助手正在运行，并检查连接地址和网络。"
+        case .timedOut:
+            return "连接 Mac 助手超时。请确认助手正在运行，然后重试。"
+        case .userAuthenticationRequired, .userCancelledAuthentication:
+            return "访问码验证失败，请在 Mac 连接设置中重新配对。"
+        default:
+            // 未知 URL 错误保留稳定的中文说明和错误码，便于支持人员定位且不泄露底层英文文案。
+            return "网络请求失败（错误码 \(urlError.errorCode)），请稍后重试。"
         }
     }
 }
