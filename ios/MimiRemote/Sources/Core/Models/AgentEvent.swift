@@ -300,6 +300,7 @@ extension AgentEventMetadata {
 struct CodexAppServerEventProjector {
     private var nextSeqBySessionID: [SessionID: EventSequence] = [:]
     private var streamedTextByKey: [String: String] = [:]
+    private var agentMessageKindByItemID: [AgentItemID: MessageKind] = [:]
 
     mutating func project(_ notification: CodexAppServerNotification) -> AgentEvent? {
         let params = notification.params?.objectValue ?? [:]
@@ -319,7 +320,10 @@ struct CodexAppServerEventProjector {
             guard let text = firstString(in: params, keys: ["delta", "text"]), !text.isEmpty else {
                 return nil
             }
-            return .assistantDelta(AgentDelta(text: text, role: .assistant, kind: .message), metadata)
+            return .assistantDelta(
+                AgentDelta(text: text, role: .assistant, kind: agentMessageKind(from: params, metadata: metadata)),
+                metadata
+            )
         case "turn/plan/updated":
             return completedPlanEvent(params: params, metadata: metadata)
         case "item/plan/delta":
@@ -337,7 +341,8 @@ struct CodexAppServerEventProjector {
                 metadata: metadata,
                 deltaKeys: ["delta", "text"],
                 bufferSuffix: "reasoning-summary-\(summaryIndex)",
-                kind: .reasoningSummary
+                kind: .reasoningSummary,
+                activityCategory: .thinking
             )
         case "item/reasoning/summaryPartAdded":
             // 这是新分段边界，本身没有可展示文本；后续 summaryTextDelta 会带 index。
@@ -375,6 +380,7 @@ struct CodexAppServerEventProjector {
                 metadata
             )
         case "item/started":
+            rememberAgentMessageKind(from: params, metadata: metadata)
             return itemContextEvent(params: params, metadata: metadata)
         case "item/completed":
             return completedAgentMessageEvent(params: params, metadata: metadata)
@@ -473,7 +479,7 @@ struct CodexAppServerEventProjector {
         return next
     }
 
-    private func completedAgentMessageEvent(
+    private mutating func completedAgentMessageEvent(
         params: [String: CodexAppServerJSONValue],
         metadata: AgentEventMetadata
     ) -> AgentEvent? {
@@ -481,22 +487,35 @@ struct CodexAppServerEventProjector {
               item["type"]?.stringValue == "agentMessage" else {
             return nil
         }
+        let itemID = metadata.itemID ?? item["id"]?.stringValue
+        defer {
+            if let itemID {
+                agentMessageKindByItemID.removeValue(forKey: itemID)
+            }
+        }
         let text = firstString(in: item, keys: ["text", "content"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !text.isEmpty else {
             return nil
         }
         // completed item 是 app-server 的权威最终内容，用稳定 message id 覆盖同一条 streaming 气泡。
-        let itemID = metadata.itemID ?? item["id"]?.stringValue
         let messageID = metadata.messageID ?? appServerMessageID(turnID: metadata.turnID, itemID: itemID) ?? itemID ?? UUID().uuidString
         let sessionID = metadata.sessionID ?? ""
-        let isCommentary = firstString(in: item, keys: ["phase"]) == "commentary"
+        let kind: MessageKind
+        if let phase = firstString(in: item, keys: ["phase"]) {
+            kind = phase == "commentary" ? .commentary : .message
+        } else if let itemID {
+            // 少数 app-server 版本 completed 不重复 phase，沿用 started 时记录的语义。
+            kind = agentMessageKindByItemID[itemID] ?? .message
+        } else {
+            kind = .message
+        }
         let message = AgentMessage(
             id: messageID,
             sessionID: sessionID,
             turnID: metadata.turnID,
             itemID: itemID,
-            role: isCommentary ? .system : .assistant,
-            kind: isCommentary ? .reasoningSummary : .message,
+            role: .assistant,
+            kind: kind,
             content: text,
             createdAt: Date(),
             seq: metadata.seq,
@@ -504,6 +523,33 @@ struct CodexAppServerEventProjector {
             sendStatus: .confirmed
         )
         return .messageCompleted(message, metadata)
+    }
+
+    private mutating func rememberAgentMessageKind(
+        from params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata
+    ) {
+        guard let item = params["item"]?.objectValue,
+              item["type"]?.stringValue == "agentMessage",
+              let itemID = metadata.itemID ?? item["id"]?.stringValue
+        else {
+            return
+        }
+        agentMessageKindByItemID[itemID] = item["phase"]?.stringValue == "commentary" ? .commentary : .message
+    }
+
+    private func agentMessageKind(
+        from params: [String: CodexAppServerJSONValue],
+        metadata: AgentEventMetadata
+    ) -> MessageKind {
+        if firstString(in: params, keys: ["phase"]) == "commentary" ||
+            params["item"]?.objectValue?["phase"]?.stringValue == "commentary" {
+            return .commentary
+        }
+        guard let itemID = metadata.itemID else {
+            return .message
+        }
+        return agentMessageKindByItemID[itemID] ?? .message
     }
 
     private func completedImageItemEvent(
@@ -566,7 +612,8 @@ struct CodexAppServerEventProjector {
         metadata: AgentEventMetadata,
         deltaKeys: [String],
         bufferSuffix: String,
-        kind: MessageKind
+        kind: MessageKind,
+        activityCategory: ConversationActivityCategory? = nil
     ) -> AgentEvent? {
         guard let delta = firstString(in: params, keys: deltaKeys), !delta.isEmpty else {
             return nil
@@ -576,14 +623,29 @@ struct CodexAppServerEventProjector {
             .joined(separator: "#")
         let next = (streamedTextByKey[key] ?? "") + delta
         streamedTextByKey[key] = next
-        return systemNoticeEvent(text: next, itemID: metadata.itemID ?? bufferSuffix, kind: kind, metadata: metadata)
+        let payload = activityCategory.map { category in
+            ConversationActivityPayload(
+                category: category,
+                displayTitle: category == .thinking ? "推理摘要" : "过程更新",
+                subtitle: next,
+                status: "inProgress"
+            )
+        }
+        return systemNoticeEvent(
+            text: next,
+            itemID: metadata.itemID ?? bufferSuffix,
+            kind: kind,
+            metadata: metadata,
+            activityPayload: payload
+        )
     }
 
     private func systemNoticeEvent(
         text: String,
         itemID: String,
         kind: MessageKind,
-        metadata: AgentEventMetadata
+        metadata: AgentEventMetadata,
+        activityPayload: ConversationActivityPayload? = nil
     ) -> AgentEvent {
         let projectedMetadata = metadataWithItemID(itemID, metadata: metadata)
         let messageID = projectedMetadata.messageID ?? itemID
@@ -595,6 +657,7 @@ struct CodexAppServerEventProjector {
             role: .system,
             kind: kind,
             content: text,
+            activityPayload: activityPayload,
             createdAt: Date(),
             seq: projectedMetadata.seq,
             revision: projectedMetadata.revision ?? 0,

@@ -15,6 +15,7 @@
 | HTTP 路由 | `cmd/agentd/main.go` 的 `httpapi.NewRouterWithRuntime(..., nil)` | 生产路由没有注入旧 `SessionRuntime`。 |
 | app-server gateway | `internal/httpapi/appserver_gateway.go` | iPad 的 `/api/app-server/ws` 主链路，负责方法白名单、cwd allowlist、thread 授权和策略校验。 |
 | managed app-server | `internal/appserver/managed.go` 的 `StartManagedWebSocket` | 当前只启动 WebSocket transport 的 Codex app-server。 |
+| 本机自动配对 | `/api/pair/local` + Catalyst `AppStore.preflightConnection` | 仅接受 TCP 来源和 Host 均为 loopback、带原生客户端请求头且无浏览器 `Origin` 的 POST；领取凭据后仍须通过真实 gateway 握手才提交 Keychain。按单用户开发机建模。 |
 | 工作区授权 | `internal/projects` + `/api/projects` + `/api/workspaces/resolve` | iPad 可使用配置项目、`browse_roots` 内明确打开的具体目录和 agentd 管理的 Worktree；所有请求都绑定 canonical cwd。 |
 | iOS 直连 runtime | `CodexAppServerSessionRuntime.swift` | iOS 端直接构造 app-server JSON-RPC 请求并处理 notification/server request。 |
 
@@ -41,6 +42,7 @@
 2. 审批 UI 状态：只改 `SessionStore` 与 Composer 审批卡，不改旧 REST runtime。
 3. Gateway 安全默认值、WebSocket 限制、server request response 校验：只改 `internal/httpapi/appserver_gateway.go`。
 4. agentd 误配防护：改 `internal/config` 与 HTTP 日志。
+5. Catalyst 同机自动配对：只改 `/api/pair/local`、AppStore 冷启动选路和 Keychain 提交，不向 Tailscale/LAN 放宽未鉴权入口。
 
 ## 风险与优化
 

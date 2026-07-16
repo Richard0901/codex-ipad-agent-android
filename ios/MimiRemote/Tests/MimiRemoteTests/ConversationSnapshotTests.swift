@@ -261,6 +261,202 @@ final class ConversationSnapshotTests: XCTestCase {
             .frame(width: 1024, height: 900)
     }
 
+    private func makeExpandedProcessGroup() -> some View {
+        let themeStore = makeThemeStore()
+        let turnID = "snapshot-process-group"
+        let reasoning = ConversationMessage(
+            stableID: "snapshot-process-reasoning",
+            turnID: turnID,
+            role: .system,
+            kind: .reasoningSummary,
+            content: "Planning backend migration testing with Docker",
+            createdAt: snapshotMessageDate,
+            sendStatus: .confirmed,
+            activityPayload: ConversationActivityPayload(
+                category: .thinking,
+                displayTitle: "推理摘要",
+                subtitle: "Planning backend migration testing with Docker"
+            )
+        )
+        let command = ConversationMessage(
+            stableID: "snapshot-process-command",
+            turnID: turnID,
+            role: .system,
+            kind: .commandSummary,
+            content: "命令：docker compose run --rm api go test ./...",
+            createdAt: snapshotMessageDate.addingTimeInterval(1),
+            sendStatus: .confirmed,
+            activityPayload: ConversationActivityPayload(
+                category: .runCommand,
+                displayTitle: "运行后端迁移测试",
+                status: "completed",
+                command: "docker compose run --rm api go test ./...",
+                cwd: "/Users/me/code/chat-archive",
+                exitCode: 0
+            )
+        )
+        let file = ConversationMessage(
+            stableID: "snapshot-process-file",
+            turnID: turnID,
+            role: .system,
+            kind: .fileChangeSummary,
+            content: "文件变更：internal/config/config_test.go modified",
+            createdAt: snapshotMessageDate.addingTimeInterval(2),
+            sendStatus: .confirmed,
+            activityPayload: ConversationActivityPayload(
+                category: .editFile,
+                displayTitle: "修改 config_test.go",
+                status: "completed",
+                filePaths: ["internal/config/config_test.go"]
+            )
+        )
+        let group = ConversationProcessGroup(
+            id: "snapshot-process-group",
+            turnID: turnID,
+            header: reasoning,
+            activities: [command, file],
+            status: .completed
+        )
+        let layout = ConversationLayout(containerWidth: 820, horizontalSizeClass: .regular)
+
+        return VStack {
+            ConversationProcessGroupRow(
+                group: group,
+                layout: layout,
+                isExpanded: true,
+                expandedActivityIDs: [],
+                toggleGroup: {},
+                toggleActivity: { _ in }
+            )
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 24)
+        .environmentObject(themeStore)
+            .environment(\.colorScheme, .light)
+        .background(themeStore.tokens(for: .light).background)
+        .frame(width: 820, height: 260)
+    }
+
+    private func makeCommentaryAndTrailingProcessConversation() -> some View {
+        let sessionID = "snapshot-commentary"
+        let turnID = "turn-commentary"
+        let conversationStore = ConversationStore()
+        let themeStore = makeThemeStore()
+        conversationStore.setHistory([
+            CodexHistoryMessage(
+                id: "commentary-user",
+                role: "user",
+                content: "继续排查企微原文查看失败。",
+                createdAt: snapshotMessageDate,
+                turnID: turnID,
+                sendStatus: .confirmed
+            ),
+            CodexHistoryMessage(
+                id: "commentary-old-reasoning",
+                role: "system",
+                kind: .reasoningSummary,
+                content: "Inspecting login chain",
+                activityPayload: ConversationActivityPayload(
+                    category: .thinking,
+                    displayTitle: "推理摘要",
+                    subtitle: "Inspecting login chain"
+                ),
+                createdAt: snapshotMessageDate.addingTimeInterval(1),
+                turnID: turnID,
+                sendStatus: .confirmed
+            ),
+            CodexHistoryMessage(
+                id: "commentary-old-command",
+                role: "system",
+                kind: .commandSummary,
+                content: "命令：检查线上请求",
+                activityPayload: ConversationActivityPayload(
+                    category: .runCommand,
+                    displayTitle: "检查线上请求",
+                    status: "completed"
+                ),
+                createdAt: snapshotMessageDate.addingTimeInterval(2),
+                turnID: turnID,
+                sendStatus: .confirmed
+            ),
+            CodexHistoryMessage(
+                id: "commentary-visible",
+                role: "assistant",
+                kind: .commentary,
+                content: """
+                链路已经进一步确认：主站扫码登录和原文 ticket 都是 `200`，真正失败发生在凭证解密阶段。
+
+                - 统一登录 Cookie 已生效
+                - 生产 RSA 私钥文件不存在
+
+                我会继续只读检查备份位置，不修改线上配置。
+                """,
+                createdAt: snapshotMessageDate.addingTimeInterval(3),
+                turnID: turnID,
+                sendStatus: .confirmed
+            ),
+            CodexHistoryMessage(
+                id: "commentary-trailing-reasoning-old",
+                role: "system",
+                kind: .reasoningSummary,
+                content: "Searching workspace for private keys",
+                activityPayload: ConversationActivityPayload(
+                    category: .thinking,
+                    displayTitle: "推理摘要",
+                    subtitle: "Searching workspace for private keys",
+                    status: "inProgress"
+                ),
+                createdAt: snapshotMessageDate.addingTimeInterval(4),
+                turnID: turnID,
+                sendStatus: .confirmed
+            ),
+            CodexHistoryMessage(
+                id: "commentary-trailing-command",
+                role: "system",
+                kind: .commandSummary,
+                content: "命令：find /opt/chat-archive -name '*.pem'",
+                activityPayload: ConversationActivityPayload(
+                    category: .runCommand,
+                    displayTitle: "搜索私钥备份",
+                    status: "running"
+                ),
+                createdAt: snapshotMessageDate.addingTimeInterval(5),
+                turnID: turnID,
+                sendStatus: .confirmed
+            ),
+            CodexHistoryMessage(
+                id: "commentary-trailing-reasoning-latest",
+                role: "system",
+                kind: .reasoningSummary,
+                content: "Planning credential recovery checks",
+                activityPayload: ConversationActivityPayload(
+                    category: .thinking,
+                    displayTitle: "推理摘要",
+                    subtitle: "Planning credential recovery checks",
+                    status: "inProgress"
+                ),
+                createdAt: snapshotMessageDate.addingTimeInterval(6),
+                turnID: turnID,
+                sendStatus: .confirmed
+            )
+        ], sessionID: sessionID)
+
+        let sessionStore = SessionStore(
+            appStore: makeSnapshotAppStore(),
+            conversationStore: conversationStore,
+            logStore: LogStore()
+        )
+        sessionStore.selectedSessionID = sessionID
+
+        return ConversationView()
+            .environmentObject(sessionStore)
+            .environmentObject(conversationStore)
+            .environmentObject(themeStore)
+            .environment(\.colorScheme, .light)
+            .frame(width: 430, height: 900)
+    }
+
     func testConversationBubbleAlignment() {
         assertSnapshot(
             of: makeSeededConversation(),
@@ -286,6 +482,20 @@ final class ConversationSnapshotTests: XCTestCase {
         assertSnapshot(
             of: makeMixedActivityConversation(),
             as: .image(precision: 0.98, layout: .fixed(width: 1024, height: 900))
+        )
+    }
+
+    func testExpandedProcessGroupRendering() {
+        assertSnapshot(
+            of: makeExpandedProcessGroup(),
+            as: .image(precision: 0.98, layout: .fixed(width: 820, height: 260))
+        )
+    }
+
+    func testCommentaryAndTrailingProcessRendering() {
+        assertSnapshot(
+            of: makeCommentaryAndTrailingProcessConversation(),
+            as: .image(precision: 0.98, layout: .fixed(width: 430, height: 900))
         )
     }
 

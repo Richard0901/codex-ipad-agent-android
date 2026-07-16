@@ -1012,20 +1012,27 @@ final class PairingLinkTests: XCTestCase {
         )
     }
 
-    func testMacCatalystPreflightDetectsLocalAgentBeforeFirstPairing() async throws {
-        let suiteName = "PairingLinkTests.LocalAgentDetection.\(UUID().uuidString)"
+    func testMacCatalystPreflightAutomaticallyPairsDetectedLocalAgent() async throws {
+        let suiteName = "PairingLinkTests.LocalAgentAutoPairing.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let recorder = ConnectionRouteProbeRecorder()
+        let keychain = TestKeychainOperations()
         let store = AppStore(
             defaults: defaults,
+            tokenStore: TokenStore(keychain: keychain),
             routeProbeTimeout: 0.1,
             prefersLocalConnection: true,
             localAgentProbe: { endpoint, _ in
                 await recorder.record(endpoint)
             },
-            routeProbe: { _, _, _ in
-                XCTFail("首次配对前没有 Token，不应执行鉴权选路")
+            localAgentPairingClaim: { endpoint, _ in
+                XCTAssertEqual(endpoint, "http://127.0.0.1:8787")
+                return "local-auto-token"
+            },
+            routeProbe: { endpoint, token, _ in
+                XCTAssertEqual(token, "local-auto-token")
+                await recorder.record(endpoint)
             }
         )
         store.token = ""
@@ -1033,10 +1040,110 @@ final class PairingLinkTests: XCTestCase {
         let connected = await store.preflightConnection()
         let probedEndpoints = await recorder.endpoints()
 
+        XCTAssertTrue(connected)
+        XCTAssertTrue(store.localAgentDetected)
+        XCTAssertTrue(store.isConfigured)
+        XCTAssertTrue(store.isUsingLocalConnection)
+        XCTAssertEqual(store.endpoint, "http://127.0.0.1:8787")
+        XCTAssertEqual(store.token, "local-auto-token")
+        XCTAssertEqual(store.connectionProfiles.first?.displayName, "这台 Mac")
+        XCTAssertEqual(store.connectionStatus, .connected("本机直连"))
+        XCTAssertEqual(
+            probedEndpoints,
+            ["http://127.0.0.1:8787", "http://127.0.0.1:8787"]
+        )
+    }
+
+    func testMacCatalystPreflightKeepsManualPairingFallbackForOldLocalAgent() async throws {
+        let suiteName = "PairingLinkTests.LocalAgentOldVersion.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AppStore(
+            defaults: defaults,
+            routeProbeTimeout: 0.1,
+            prefersLocalConnection: true,
+            localAgentProbe: { _, _ in },
+            localAgentPairingClaim: { _, _ in
+                throw AgentAPIError.server(status: 404, message: "not found")
+            },
+            routeProbe: { _, _, _ in
+                XCTFail("旧助手无法领取 Token 时不应执行鉴权选路")
+            }
+        )
+
+        let connected = await store.preflightConnection()
+
         XCTAssertFalse(connected)
         XCTAssertTrue(store.localAgentDetected)
-        XCTAssertEqual(store.connectionStatus, .idle)
-        XCTAssertEqual(probedEndpoints, ["http://127.0.0.1:8787"])
+        XCTAssertFalse(store.isConfigured)
+        guard case .failed(let message) = store.connectionStatus else {
+            return XCTFail("旧助手应保留可扫码修复的失败状态")
+        }
+        XCTAssertTrue(message.contains("升级并重启 agentd"))
+    }
+
+    func testMacCatalystPreflightRepairsInvalidSavedLoopbackTokenAutomatically() async throws {
+        let suiteName = "PairingLinkTests.LocalAgentTokenRepair.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("http://127.0.0.1:8787", forKey: "agentd.endpoint")
+        let recorder = ConnectionRouteCredentialRecorder()
+        let store = AppStore(
+            defaults: defaults,
+            tokenStore: TokenStore(keychain: TestKeychainOperations()),
+            routeProbeTimeout: 0.1,
+            prefersLocalConnection: true,
+            localAgentProbe: { _, _ in },
+            localAgentPairingClaim: { _, _ in "fresh-local-token" },
+            routeProbe: { endpoint, token, _ in
+                await recorder.record(endpoint: endpoint, token: token)
+                if token == "stale-local-token" {
+                    throw AgentAPIError.credentialsInvalid(status: 401)
+                }
+            }
+        )
+        store.token = "stale-local-token"
+
+        let connected = await store.preflightConnection()
+        let calls = await recorder.calls()
+
+        XCTAssertTrue(connected)
+        XCTAssertEqual(store.token, "fresh-local-token")
+        XCTAssertTrue(store.isUsingLocalConnection)
+        XCTAssertFalse(store.requiresRePairing)
+        XCTAssertEqual(store.connectionStatus, .connected("本机直连"))
+        XCTAssertEqual(calls.map(\.token), ["stale-local-token", "fresh-local-token"])
+        XCTAssertEqual(Set(calls.map(\.endpoint)), ["http://127.0.0.1:8787"])
+    }
+
+    func testMacCatalystConcurrentLocalDetectionSharesSingleProbe() async throws {
+        let suiteName = "PairingLinkTests.LocalAgentProbeCoalescing.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let recorder = LocalAgentProbeRecorder()
+        let store = AppStore(
+            defaults: defaults,
+            routeProbeTimeout: 0.2,
+            prefersLocalConnection: true,
+            localAgentProbe: { _, _ in
+                await recorder.record()
+                try await Task.sleep(nanoseconds: 30_000_000)
+            },
+            localAgentPairingClaim: { _, _ in
+                XCTFail("单独探测不应触发自动配对")
+                return ""
+            },
+            routeProbe: { _, _, _ in }
+        )
+
+        async let first = store.detectLocalAgent()
+        async let second = store.detectLocalAgent()
+        let results = await [first, second]
+        let probeCount = await recorder.count()
+
+        XCTAssertEqual(results, [true, true])
+        XCTAssertEqual(probeCount, 1)
+        XCTAssertTrue(store.localAgentDetected)
     }
 
     func testFormatsConnectionTestDuration() {
@@ -1242,6 +1349,35 @@ private actor ConnectionRouteProbeRecorder {
 
     func endpoints() -> [String] {
         recordedEndpoints
+    }
+}
+
+private struct ConnectionRouteCredentialCall: Equatable {
+    let endpoint: String
+    let token: String
+}
+
+private actor ConnectionRouteCredentialRecorder {
+    private var recordedCalls: [ConnectionRouteCredentialCall] = []
+
+    func record(endpoint: String, token: String) {
+        recordedCalls.append(ConnectionRouteCredentialCall(endpoint: endpoint, token: token))
+    }
+
+    func calls() -> [ConnectionRouteCredentialCall] {
+        recordedCalls
+    }
+}
+
+private actor LocalAgentProbeRecorder {
+    private var probeCount = 0
+
+    func record() {
+        probeCount += 1
+    }
+
+    func count() -> Int {
+        probeCount
     }
 }
 

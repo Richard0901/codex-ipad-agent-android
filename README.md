@@ -330,7 +330,9 @@ App 首次启动会进入设置页：
 - Endpoint：例如 `http://127.0.0.1:8787` 或 `http://100.x.y.z:8787`
 - Token：`AGENTD_TOKEN`
 
-Mac Catalyst 会在冷启动时检测同机 `127.0.0.1:8787`，并用当前档案已有 Token 验证后优先本机直连；首次配对仍需二维码或访问码。手动输入本机、局域网或 Tailscale HTTP 地址时，省略端口会按 `agentd` 默认值补为 `8787`。
+Mac Catalyst 会在冷启动时检测同机 `127.0.0.1:8787`：先尝试当前档案已有 Token；未配置或 Token 与本机助手不匹配时，通过仅接受 loopback 原生请求的 `/api/pair/local` 自动领取本机凭据，再完成真实 app-server WebSocket 握手，验证成功后才写入 Keychain 并进入工作台。旧版 `agentd` 不支持本机自动配对时仍保留二维码和访问码 fallback。手动输入本机、局域网或 Tailscale HTTP 地址时，省略端口会按 `agentd` 默认值补为 `8787`。
+
+本机自动配对按“同一登录用户的单用户开发机”建模：接口同时校验 TCP 来源和 Host 都是 loopback，要求原生客户端自定义请求头，并拒绝带 `Origin` 的浏览器请求；局域网、Tailscale 和公网请求无法调用。它不尝试隔离同一 Mac 登录环境中的恶意本地进程——这类进程本来就处在当前用户代码、Codex CLI 和 `agentd` 配置的本机信任域内。共享或不受信的多用户 Mac 不属于这个 MVP 的部署范围。
 
 App 可以保存多台 Mac，但同一时间只连接一台。每台 Mac 的 Token 使用独立 iOS Keychain account 保存，UserDefaults 只保存显示名、Endpoint、最近成功时间和当前档案 ID，不保存 Token；已有档案可在设置中重命名，这个操作只更新本地显示名称，不读取 Token，也不重建当前连接。“忘记当前 Mac”或删除其它档案会先展示目标和重新配对影响，只有二次确认后才删除 Keychain 访问码。iPad App 固定走 `/api/app-server/ws` + app-server JSON-RPC 直连链路。为了支持本机/Tailscale 裸 IP HTTP，App 在系统层声明 `NSAllowsArbitraryLoads`；iOS 27 实测中只声明 `NSAllowsLocalNetworking` 仍会触发 ATS `-1022`。安全边界由应用层在设置提交、REST 请求和 WebSocket 握手前统一校验 Endpoint，只允许本机、局域网、Tailscale、`.ts.net` 或 HTTPS。CI 会防止 ATS 配置再次拦截 Tailscale HTTP，并保留应用层公网 HTTP 拒绝测试。不要把 agentd 暴露到公网。
 

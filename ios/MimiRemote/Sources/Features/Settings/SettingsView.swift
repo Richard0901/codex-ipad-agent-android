@@ -528,7 +528,7 @@ private struct InitialConnectionSettingsSections: View {
                         .font(themeStore.uiFont(.body, weight: .semibold))
                         .foregroundStyle(tokens.success)
                         if !appStore.isConfigured {
-                            Text("首次连接仍需访问码完成配对；验证后会优先使用本机直连。")
+                            Text(localAgentPairingHint)
                                 .font(themeStore.uiFont(.footnote))
                                 .foregroundStyle(.secondary)
                         }
@@ -536,7 +536,7 @@ private struct InitialConnectionSettingsSections: View {
                     .padding(.vertical, 2)
                 }
 #endif
-                if !appStore.isConfigured {
+                if !appStore.isConfigured && !appStore.localAgentDetected {
                     VStack(alignment: .leading, spacing: 5) {
                         Label("先在 Mac 启动 Mimi 助手", systemImage: "desktopcomputer")
                             .font(themeStore.uiFont(.body, weight: .semibold))
@@ -723,7 +723,8 @@ private struct InitialConnectionSettingsSections: View {
         // 连接地址/Token 是高频编辑状态，放在这个小子树里，避免每次删字都重绘整个设置页。
         .onAppear(perform: loadInitialConnectionIfNeeded)
         .task {
-            // AppStore 负责探测和状态发布；View 生命周期只触发一次可取消任务，不直接发网络请求。
+            // 根启动任务负责自动配对和提交；这里与它复用同一个探测 Task，只更新设置页提示，
+            // 避免两个连接事务争抢后导致 bootstrap 提前返回。
             _ = await appStore.detectLocalAgent()
         }
     }
@@ -760,6 +761,17 @@ private struct InitialConnectionSettingsSections: View {
 
     private var primaryScanButtonTitle: String {
         appStore.isConfigured ? "扫描二维码添加 Mac" : "扫描二维码连接"
+    }
+
+    private var localAgentPairingHint: String {
+        switch appStore.connectionStatus {
+        case .testing:
+            return "正在自动领取本机凭据并验证 Codex 连接…"
+        case .failed:
+            return "自动连接未完成；请升级并重启 agentd，或通过扫码连接。"
+        case .idle, .connected:
+            return "将自动连接本机助手；旧版助手仍可通过扫码完成配对。"
+        }
     }
 
     private var endpointPlaceholder: String {

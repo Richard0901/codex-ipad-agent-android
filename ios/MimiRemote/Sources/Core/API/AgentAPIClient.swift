@@ -272,6 +272,17 @@ struct AgentAPIClient {
         return try await request(path: "/api/pair/claim", method: "POST", requiresAuth: false, body: body)
     }
 
+    func claimLocalPairing(timeout: TimeInterval = 2) async throws -> PairingClaimResponse {
+        try await request(
+            path: "/api/pair/local",
+            method: "POST",
+            requiresAuth: false,
+            headers: ["X-Mimi-Local-Pairing": "1"],
+            body: Optional<Data>.none,
+            timeout: timeout
+        )
+    }
+
     func version() async throws -> VersionResponse {
         try await request(path: "/api/version", method: "GET", body: Optional<Data>.none)
     }
@@ -422,6 +433,7 @@ struct AgentAPIClient {
         path: String,
         method: String,
         requiresAuth: Bool = true,
+        headers: [String: String] = [:],
         body: Data?,
         timeout: TimeInterval = 20
     ) async throws -> T {
@@ -435,6 +447,9 @@ struct AgentAPIClient {
         request.timeoutInterval = timeout
         if requiresAuth {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
         }
         if let body {
             request.httpBody = body

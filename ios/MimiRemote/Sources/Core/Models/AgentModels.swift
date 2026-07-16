@@ -1411,6 +1411,7 @@ enum MessageRole: String, Codable, Hashable {
 
 enum MessageKind: String, Codable, Hashable {
     case message
+    case commentary
     case plan
     case reasoningSummary = "reasoning_summary"
     case commandSummary = "command_summary"
@@ -1742,11 +1743,18 @@ struct ConversationActivityPayload: Codable, Hashable {
     private static let outputPreviewLimit = 1_000
 
     private static func reasoningText(from item: [String: CodexAppServerJSONValue]) -> String {
-        let summary = item["summary"]?.arrayValue?.compactMap(\.stringValue) ?? []
-        let content = item["content"]?.arrayValue?.compactMap(\.stringValue) ?? []
-        return (summary + content)
-            .compactMap(\.trimmedNonEmpty)
-            .joined(separator: "\n\n")
+        let summary = item["summary"]?.arrayValue?
+            .compactMap(\.stringValue)
+            .compactMap(\.trimmedNonEmpty) ?? []
+        if let latestSummary = summary.last {
+            // app-server 会持续把新的 summary part 追加到同一个 reasoning item；
+            // 原生客户端用最新 part 作为当前阶段标题，而不是把历史标题全部铺开。
+            return latestSummary
+        }
+        let content = item["content"]?.arrayValue?
+            .compactMap(\.stringValue)
+            .compactMap(\.trimmedNonEmpty) ?? []
+        return content.last ?? ""
     }
 
     private static func commandActionTitle(from actions: [CodexAppServerJSONValue]?) -> String? {

@@ -30,6 +30,7 @@ final class ConversationStore: ObservableObject {
         let clientMessageID: ClientMessageID?
         let turnID: TurnID?
         let itemID: AgentItemID?
+        var kind: MessageKind
         let createdAt: Date?
         var updatedAt: Date?
         var text: String
@@ -494,6 +495,7 @@ final class ConversationStore: ObservableObject {
             clientMessageID: metadata.clientMessageID,
             turnID: metadata.turnID,
             itemID: metadata.itemID,
+            kind: delta.kind ?? .message,
             createdAt: metadata.createdAt,
             revision: metadata.revision,
             sessionID: sessionID
@@ -507,6 +509,7 @@ final class ConversationStore: ObservableObject {
         clientMessageID: ClientMessageID?,
         turnID: TurnID?,
         itemID: AgentItemID?,
+        kind: MessageKind,
         createdAt: Date?,
         revision: ModelRevision?,
         sessionID: String
@@ -525,6 +528,7 @@ final class ConversationStore: ObservableObject {
                 clientMessageID: clientMessageID,
                 turnID: turnID,
                 itemID: itemID,
+                kind: kind,
                 createdAt: createdAt,
                 revision: revision,
                 sessionID: sessionID
@@ -541,6 +545,7 @@ final class ConversationStore: ObservableObject {
         // 以固定节奏批量发布，避免每个 token/分片都触发 SwiftUI 列表重绘。
         if var pending = pendingAssistantDeltasBySessionID[sessionID] {
             pending.text += text
+            pending.kind = kind
             pending.revision = revision ?? pending.revision
             pending.updatedAt = latestDate(pending.updatedAt, activityAt)
             pendingAssistantDeltasBySessionID[sessionID] = pending
@@ -551,6 +556,7 @@ final class ConversationStore: ObservableObject {
                 clientMessageID: clientMessageID,
                 turnID: turnID,
                 itemID: itemID,
+                kind: kind,
                 createdAt: createdAt ?? activityAt,
                 updatedAt: activityAt,
                 text: text,
@@ -802,6 +808,7 @@ final class ConversationStore: ObservableObject {
         clientMessageID: ClientMessageID?,
         turnID: TurnID?,
         itemID: AgentItemID?,
+        kind: MessageKind,
         createdAt: Date?,
         revision: ModelRevision?,
         sessionID: String
@@ -814,6 +821,7 @@ final class ConversationStore: ObservableObject {
             turnID: turnID,
             itemID: itemID,
             role: .assistant,
+            kind: kind,
             content: text,
             createdAt: createdAt ?? Date(),
             sendStatus: .sending,
@@ -850,6 +858,7 @@ final class ConversationStore: ObservableObject {
         var list = messagesBySessionID[sessionID] ?? []
         if let index = messageIndex(stableID: pending.stableID, sessionID: sessionID) ?? messageIndex(uuid: pending.uuid, sessionID: sessionID) {
             list[index].content += pending.text
+            list[index].kind = pending.kind
             list[index].sendStatus = .sending
             list[index].revision = pending.revision ?? list[index].revision
             // 流式 delta 没有 completed 事件时，右下角时间也要表达“最近收到内容”的时间；
@@ -866,6 +875,7 @@ final class ConversationStore: ObservableObject {
             turnID: pending.turnID,
             itemID: pending.itemID,
             role: .assistant,
+            kind: pending.kind,
             content: pending.text,
             createdAt: pending.createdAt ?? Date(),
             updatedAt: pending.updatedAt,
@@ -1684,7 +1694,7 @@ final class ConversationStore: ObservableObject {
         switch kind {
         case .reasoningSummary, .plan, .commandSummary, .fileChangeSummary:
             return kind.rawValue
-        case .message, .approval, .userInput, .error:
+        case .message, .commentary, .approval, .userInput, .error:
             return nil
         }
     }

@@ -3068,7 +3068,8 @@ actor CodexAppServerSessionRuntime {
                 return nil
             }
             if item["phase"]?.stringValue == "commentary" {
-                return CodexHistoryMessage(id: messageID, role: "system", kind: .reasoningSummary, content: text, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
+                // commentary 是面向用户的阶段性正文，不是内部 reasoning。
+                return CodexHistoryMessage(id: messageID, role: "assistant", kind: .commentary, content: text, createdAt: processCreatedAt, updatedAt: liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: processTimestampIsFallback)
             }
             let completed = itemCompletedAt ?? completedAt
             return CodexHistoryMessage(id: messageID, role: "assistant", content: text, createdAt: completed ?? itemCreatedAt ?? estimatedAt ?? startedAt, updatedAt: completed ?? liveSnapshotUpdatedAt, turnID: turnID, itemID: itemID, timelineOrdinal: timelineOrdinal, isTimestampFallback: completed == nil && itemCreatedAt == nil && estimatedAt != nil)

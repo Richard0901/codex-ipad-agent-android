@@ -3142,8 +3142,8 @@ final class ConversationDataFlowTests: XCTestCase {
             ),
             CodexHistoryMessage(
                 id: "commentary_history_processed",
-                role: "system",
-                kind: .reasoningSummary,
+                role: "assistant",
+                kind: .commentary,
                 content: "我先调用一个子 agent。",
                 createdAt: Date(timeIntervalSince1970: 10),
                 turnID: turnID,
@@ -3171,10 +3171,11 @@ final class ConversationDataFlowTests: XCTestCase {
         let items = ConversationTimelineItemBuilder.items(from: store.messages(for: sessionID))
 
         XCTAssertEqual(items.count, 4)
-        guard case .activity(let reasoning) = items[1] else {
-            return XCTFail("history 推理摘要应作为独立进度行放在最终 assistant 前")
+        guard case .message(let commentary) = items[1] else {
+            return XCTFail("history commentary 应作为完整正文放在最终 assistant 前")
         }
-        XCTAssertEqual(reasoning.content, "我先调用一个子 agent。")
+        XCTAssertEqual(commentary.kind, .commentary)
+        XCTAssertEqual(commentary.content, "我先调用一个子 agent。")
         guard case .message(let final) = items[2] else {
             return XCTFail("最终 assistant 应保持独立展开")
         }
@@ -17263,12 +17264,13 @@ extension ConversationDataFlowTests {
         let readMessages = try await waitForFakeAppServerMessages(transport, count: 3)
         let read = try decodeAppServerRequest(readMessages[2])
         XCTAssertEqual(read.method, "thread/read")
-        transport.enqueue(#"{"id":\#(try jsonFragment(for: read.id)),"result":{"thread":{"id":"thr_processed","sessionId":"thr_processed","preview":"调用子 agent 讲个笑话","ephemeral":false,"modelProvider":"openai","createdAt":1780490100,"updatedAt":1780490134,"status":{"type":"idle"},"path":null,"cwd":"/tmp/processed","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"processed","turns":[{"id":"turn_processed","startedAt":1780490100,"completedAt":1780490134,"itemsView":"full","status":"completed","error":null,"items":[{"type":"userMessage","id":"user_processed","clientId":"client_processed","content":[{"type":"text","text":"调用子 agent 讲个笑话"}]},{"type":"agentMessage","id":"commentary_processed","text":"我先调用一个子 agent。","phase":"commentary","memoryCitation":null},{"type":"plan","id":"plan_processed","text":"让子 agent 生成一个短笑话。"},{"type":"reasoning","id":"reasoning_processed","summary":["确认请求要讲笑话"],"content":[]},{"type":"commandExecution","id":"cmd_processed","command":"echo joke","cwd":"/tmp/processed","processId":null,"source":"exec","status":"completed","commandActions":[],"aggregatedOutput":"ok","exitCode":0,"durationMs":1000},{"type":"agentMessage","id":"assistant_processed","text":"程序员相亲，对方问：你会浪漫吗？","phase":"final_answer","memoryCitation":null}]}]}}}"#)
+        transport.enqueue(#"{"id":\#(try jsonFragment(for: read.id)),"result":{"thread":{"id":"thr_processed","sessionId":"thr_processed","preview":"调用子 agent 讲个笑话","ephemeral":false,"modelProvider":"openai","createdAt":1780490100,"updatedAt":1780490134,"status":{"type":"idle"},"path":null,"cwd":"/tmp/processed","cliVersion":"0.0.0","source":"appServer","threadSource":"user","name":"processed","turns":[{"id":"turn_processed","startedAt":1780490100,"completedAt":1780490134,"itemsView":"full","status":"completed","error":null,"items":[{"type":"userMessage","id":"user_processed","clientId":"client_processed","content":[{"type":"text","text":"调用子 agent 讲个笑话"}]},{"type":"agentMessage","id":"commentary_processed","text":"我先调用一个子 agent。","phase":"commentary","memoryCitation":null},{"type":"plan","id":"plan_processed","text":"让子 agent 生成一个短笑话。"},{"type":"reasoning","id":"reasoning_processed","summary":["确认请求要讲笑话","准备生成最终笑话"],"content":[]},{"type":"commandExecution","id":"cmd_processed","command":"echo joke","cwd":"/tmp/processed","processId":null,"source":"exec","status":"completed","commandActions":[],"aggregatedOutput":"ok","exitCode":0,"durationMs":1000},{"type":"agentMessage","id":"assistant_processed","text":"程序员相亲，对方问：你会浪漫吗？","phase":"final_answer","memoryCitation":null}]}]}}}"#)
 
         let page = try await pageTask.value
-        XCTAssertEqual(page.messages.map(\.role), ["user", "system", "system", "system", "system", "assistant"])
-        XCTAssertEqual(page.messages.map(\.kind), [.message, .reasoningSummary, .plan, .reasoningSummary, .commandSummary, .message])
+        XCTAssertEqual(page.messages.map(\.role), ["user", "assistant", "system", "system", "system", "assistant"])
+        XCTAssertEqual(page.messages.map(\.kind), [.message, .commentary, .plan, .reasoningSummary, .commandSummary, .message])
         XCTAssertEqual(page.messages.last?.createdAt, Date(timeIntervalSince1970: 1780490134))
+        XCTAssertEqual(page.messages.first { $0.itemID == "reasoning_processed" }?.activityPayload?.subtitle, "准备生成最终笑话")
         let historyCommand = try XCTUnwrap(page.messages.first { $0.itemID == "cmd_processed" })
         XCTAssertEqual(historyCommand.activityPayload?.category, .runCommand)
         XCTAssertEqual(historyCommand.activityPayload?.displayTitle, "运行 echo joke")
@@ -17286,20 +17288,23 @@ extension ConversationDataFlowTests {
         conversationStore.setHistory(page.messages, sessionID: "thr_processed")
         let items = ConversationTimelineItemBuilder.items(from: conversationStore.messages(for: "thr_processed"))
 
-        XCTAssertEqual(items.count, 6)
-        let processKinds = items[1...3].compactMap { item -> MessageKind? in
-            guard case .activity(let message) = item else {
-                return nil
-            }
-            return message.kind
+        XCTAssertEqual(items.count, 5)
+        guard case .message(let commentary) = items[1] else {
+            return XCTFail("commentary 应保持完整正文")
         }
-        XCTAssertEqual(processKinds, [.reasoningSummary, .reasoningSummary, .commandSummary])
-        guard case .message(let final) = items[4] else {
+        XCTAssertEqual(commentary.itemID, "commentary_processed")
+        XCTAssertEqual(commentary.kind, .commentary)
+        guard case .processGroup(let processGroup) = items[2] else {
+            return XCTFail("真实 reasoning 与后续命令应合并为可折叠阶段")
+        }
+        XCTAssertEqual(processGroup.header.itemID, "reasoning_processed")
+        XCTAssertEqual(processGroup.activities.map(\.itemID), ["cmd_processed"])
+        guard case .message(let final) = items[3] else {
             return XCTFail("最终 assistant 应保持独立展开")
         }
         XCTAssertEqual(final.role, .assistant)
         XCTAssertEqual(final.content, "程序员相亲，对方问：你会浪漫吗？")
-        guard case .message(let plan) = items[5] else {
+        guard case .message(let plan) = items[4] else {
             return XCTFail("plan 应固定在最终 assistant 后")
         }
         XCTAssertEqual(plan.kind, .plan)
@@ -18326,8 +18331,8 @@ extension ConversationDataFlowTests {
 
         let commentary = try decodeAppServerNotification(#"{"method":"item/completed","params":{"threadId":"thr_demo","turnId":"turn_demo","item":{"type":"agentMessage","id":"commentary_1","text":"我先检查上下文。","phase":"commentary"}}}"#)
         if case .messageCompleted(let message, _) = try XCTUnwrap(projector.project(commentary)) {
-            XCTAssertEqual(message.role, .system)
-            XCTAssertEqual(message.kind, .reasoningSummary)
+            XCTAssertEqual(message.role, .assistant)
+            XCTAssertEqual(message.kind, .commentary)
             XCTAssertEqual(message.content, "我先检查上下文。")
         } else {
             XCTFail("Expected commentary messageCompleted")

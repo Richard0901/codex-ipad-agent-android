@@ -357,6 +357,7 @@ struct PreparedConnectionSettings: Equatable {
 
 typealias ConnectionRouteProbe = (_ endpoint: String, _ token: String, _ timeout: TimeInterval) async throws -> Void
 typealias LocalAgentProbe = (_ endpoint: String, _ timeout: TimeInterval) async throws -> Void
+typealias LocalAgentPairingClaim = (_ endpoint: String, _ timeout: TimeInterval) async throws -> String
 
 enum ActiveConnectionRoute: Equatable {
     case configured
@@ -403,9 +404,10 @@ final class AppStore: ObservableObject {
     private let routeProbeTimeout: TimeInterval
     private let prefersLocalConnection: Bool
     private let localAgentProbe: LocalAgentProbe
+    private let localAgentPairingClaim: LocalAgentPairingClaim
     private let routeProbe: ConnectionRouteProbe
     private var isConnectionPreflightRunning = false
-    private var isLocalAgentProbeRunning = false
+    private var localAgentProbeTask: Task<Bool, Never>?
     private var activeRouteEndpoint: String?
     private var activeRuntimeBundle: AppServerRuntimeBundle?
     private var activeRuntimeIdentity: String?
@@ -420,6 +422,7 @@ final class AppStore: ObservableObject {
         routeProbeTimeout: TimeInterval = 5,
         prefersLocalConnection: Bool? = nil,
         localAgentProbe: LocalAgentProbe? = nil,
+        localAgentPairingClaim: LocalAgentPairingClaim? = nil,
         routeProbe: ConnectionRouteProbe? = nil
     ) {
         self.defaults = defaults
@@ -427,6 +430,7 @@ final class AppStore: ObservableObject {
         self.routeProbeTimeout = routeProbeTimeout
         self.prefersLocalConnection = prefersLocalConnection ?? Self.isRunningOnMacCatalyst
         self.localAgentProbe = localAgentProbe ?? Self.defaultLocalAgentProbe
+        self.localAgentPairingClaim = localAgentPairingClaim ?? Self.defaultLocalAgentPairingClaim
         self.routeProbe = routeProbe ?? Self.defaultConnectionRouteProbe
 
         var initialProfiles = Self.loadConnectionProfiles(from: defaults)
@@ -973,10 +977,6 @@ final class AppStore: ObservableObject {
     @discardableResult
     func preflightConnection(force: Bool = false) async -> Bool {
         let localAvailable = await detectLocalAgent(force: force)
-        guard isConfigured else {
-            connectionStatus = .idle
-            return false
-        }
         if !force, case .connected = connectionStatus {
             return true
         }
@@ -986,6 +986,28 @@ final class AppStore: ObservableObject {
         }
         isConnectionPreflightRunning = true
         defer { isConnectionPreflightRunning = false }
+
+        guard isConfigured else {
+            guard localAvailable else {
+                connectionStatus = .idle
+                return false
+            }
+            connectionStatus = .testing
+            lastError = nil
+            do {
+                try await connectToLocalAgentWithAutomaticPairing()
+                return true
+            } catch {
+                if Task.isCancelled || error is CancellationError {
+                    connectionStatus = .idle
+                    return false
+                }
+                let message = "已检测到本机助手，但自动连接失败。请升级并重启 agentd，或扫描二维码连接。"
+                connectionStatus = .failed(message)
+                lastError = message
+                return false
+            }
+        }
 
         connectionStatus = .testing
         lastError = nil
@@ -1033,6 +1055,20 @@ final class AppStore: ObservableObject {
             }
         }
 
+        if localAvailable {
+            do {
+                try await connectToLocalAgentWithAutomaticPairing()
+                return true
+            } catch {
+                if Task.isCancelled || error is CancellationError {
+                    connectionStatus = .idle
+                    return false
+                }
+                // 兼容尚未实现同机配对接口的旧 agentd；保留已配置路由的真实错误，
+                // 让用户仍可扫码修复，而不是把 404 之类的升级细节当作凭据终态。
+            }
+        }
+
         resetConnectionRoute()
         let finalError = configuredRouteError ?? URLError(.cannotConnectToHost)
         if isCredentialInvalidatingError(finalError) {
@@ -1045,7 +1081,7 @@ final class AppStore: ObservableObject {
     }
 
     /// Catalyst 只探测固定 loopback 健康端点，不扫描局域网，也不读取服务端配置文件。
-    /// 这一步不携带 Token；真正选路仍需用当前档案凭据完成控制面和 WebSocket 验证。
+    /// 这一步不携带 Token；后续必须用已保存或同机自动领取的凭据完成真实 WebSocket 验证。
     @discardableResult
     func detectLocalAgent(force: Bool = false) async -> Bool {
         guard prefersLocalConnection else {
@@ -1055,25 +1091,27 @@ final class AppStore: ObservableObject {
         if !force, localAgentDetected {
             return true
         }
-        guard !isLocalAgentProbeRunning else {
-            return localAgentDetected
+        if let localAgentProbeTask {
+            return await localAgentProbeTask.value
         }
-        isLocalAgentProbeRunning = true
-        defer { isLocalAgentProbeRunning = false }
-        do {
-            try await localAgentProbe(localAgentEndpoint, min(routeProbeTimeout, 1))
-            guard !Task.isCancelled else {
-                return localAgentDetected
+        let probe = localAgentProbe
+        let endpoint = localAgentEndpoint
+        let timeout = min(routeProbeTimeout, 1)
+        let probeTask = Task { @MainActor in
+            do {
+                try await probe(endpoint, timeout)
+                return true
+            } catch {
+                return false
             }
-            localAgentDetected = true
-            return true
-        } catch {
-            if Task.isCancelled || error is CancellationError {
-                return localAgentDetected
-            }
-            localAgentDetected = false
-            return false
         }
+        localAgentProbeTask = probeTask
+        let detected = await probeTask.value
+        localAgentProbeTask = nil
+        // 探测任务由 AppStore 共享；即使某个触发它的 View 已消失，也发布这次有界结果，
+        // 避免仍在等待的根启动任务拿到 true，而设置页状态仍停留在未检测。
+        localAgentDetected = detected
+        return detected
     }
 
     static func connectionTestStageStabilities(reports: [ConnectionTestReport]) -> [ConnectionTestStageStability] {
@@ -1279,6 +1317,40 @@ final class AppStore: ObservableObject {
 
     private static func defaultLocalAgentProbe(endpoint: String, timeout: TimeInterval) async throws {
         _ = try await AgentAPIClient(endpoint: endpoint, token: "").health(timeout: timeout)
+    }
+
+    private static func defaultLocalAgentPairingClaim(endpoint: String, timeout: TimeInterval) async throws -> String {
+        let response = try await AgentAPIClient(endpoint: endpoint, token: "").claimLocalPairing(timeout: timeout)
+        let claimedToken = response.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !claimedToken.isEmpty else {
+            throw PairingLinkError.missingToken
+        }
+        return claimedToken
+    }
+
+    private func connectToLocalAgentWithAutomaticPairing() async throws {
+        let timeout = min(routeProbeTimeout, 2)
+        let rawClaimedToken = try await localAgentPairingClaim(localAgentEndpoint, timeout)
+        let claimedToken = rawClaimedToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !claimedToken.isEmpty else {
+            throw PairingLinkError.missingToken
+        }
+        // 不信任免鉴权响应中的 endpoint；网络目标始终锁定已探测成功的固定 loopback。
+        // 用真实 gateway 握手验证新 Token 后才写入 Keychain，避免发布半可用连接。
+        try await routeProbe(localAgentEndpoint, claimedToken, routeProbeTimeout)
+        try Task.checkCancellation()
+        let prepared = PreparedConnectionSettings(
+            endpoint: localAgentEndpoint,
+            token: claimedToken,
+            profileTarget: .currentOrNew(
+                displayName: activeConnectionProfile == nil ? "这台 Mac" : nil
+            )
+        )
+        _ = try commitConnectionSettings(prepared)
+        activateConnectionRoute(.local, endpoint: localAgentEndpoint)
+        connectionTermination = nil
+        connectionStatus = .connected(ActiveConnectionRoute.local.statusTitle)
+        lastError = nil
     }
 
     private static var isRunningOnMacCatalyst: Bool {

@@ -94,6 +94,7 @@ func NewRouterWithRuntime(cfg config.Config, registry *projects.Registry, manage
 	mux.HandleFunc("/healthz", r.healthz)
 	mux.HandleFunc("/api/health", r.healthz)
 	mux.HandleFunc("/api/pair/claim", r.pairingClaimHandler)
+	mux.HandleFunc("/api/pair/local", r.localPairingClaimHandler)
 	mux.Handle("/api/readyz", r.auth.Middleware(http.HandlerFunc(r.readyz)))
 	mux.Handle("/api/version", r.auth.Middleware(http.HandlerFunc(r.versionHandler)))
 	mux.Handle("/api/doctor", r.auth.Middleware(http.HandlerFunc(r.doctorHandler)))

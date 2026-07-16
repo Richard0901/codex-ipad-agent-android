@@ -246,6 +246,8 @@ private struct RuntimeActivityPanelView: View {
 
     private func title(for kind: MessageKind) -> String {
         switch kind {
+        case .commentary:
+            return "过程说明"
         case .plan:
             return "计划"
         case .reasoningSummary:
@@ -267,6 +269,8 @@ private struct RuntimeActivityPanelView: View {
 
     private func symbolName(for kind: MessageKind) -> String {
         switch kind {
+        case .commentary:
+            return "text.bubble"
         case .plan:
             return "list.clipboard"
         case .reasoningSummary:
