@@ -50,6 +50,8 @@ struct ComposerView: View {
     @AppStorage("agentd.developerMode") private var developerModeEnabled = false
     @AppStorage(ComposerPermissionMode.defaultStorageKey) private var defaultPermissionModeID = ComposerPermissionMode.defaultMode.rawValue
     @State private var guidedFollowUpEnabled = false
+    @State private var editingQueuedTurn: QueuedTurnEditorDraft?
+    @State private var showsQueuedTurnManager = false
 
     var availableWidth: CGFloat?
 
@@ -74,6 +76,7 @@ struct ComposerView: View {
         // 外层保持透明，由输入卡片承担唯一主表面；这样和首页“暖色底 + 白色浮层”的
         // 层级一致，也避免状态提示、输入框和底部 dock 形成三层嵌套。
         VStack(alignment: .leading, spacing: 10) {
+            queuedTurnTray
             composerStatusTray
             pendingApprovalAction
             pendingUserInputAction
@@ -112,6 +115,31 @@ struct ComposerView: View {
             ThreadGoalEditorSheet(draft: draft)
                 .environmentObject(sessionStore)
                 .environmentObject(themeStore)
+        }
+        .sheet(item: $editingQueuedTurn) { draft in
+            QueuedTurnEditorSheet(draft: draft) { payload in
+                _ = sessionStore.updateQueuedTurn(
+                    clientMessageID: draft.id,
+                    payload: payload
+                )
+            }
+            .environmentObject(themeStore)
+        }
+        .sheet(isPresented: $showsQueuedTurnManager) {
+            QueuedTurnManagerSheet(
+                turns: sessionStore.selectedQueuedTurns,
+                canGuideCurrentTurn: canUseGuidedFollowUp,
+                onUpdate: { turn, payload in
+                    _ = sessionStore.updateQueuedTurn(clientMessageID: turn.id, payload: payload)
+                },
+                onDelete: { _ = sessionStore.deleteQueuedTurn(clientMessageID: $0.id) },
+                onRetry: { _ = sessionStore.retryQueuedTurn(clientMessageID: $0.id) },
+                onGuideNow: { _ = sessionStore.guideQueuedTurnNow(clientMessageID: $0.id) },
+                onMove: { source, destination in
+                    _ = sessionStore.moveSelectedQueuedTurns(fromOffsets: source, toOffset: destination)
+                }
+            )
+            .environmentObject(themeStore)
         }
         .sheet(item: $photoLibraryPickerRequest) { request in
             PhotoLibraryPicker(selectionLimit: request.selectionLimit) { results in
@@ -160,6 +188,11 @@ struct ComposerView: View {
             if !canGuide {
                 guidedFollowUpEnabled = false
             }
+        }
+        .onChange(of: sessionStore.selectedSessionID) { _, _ in
+            // 引导是只对当前正在生成的回复生效的一次性选择。切换会话后恢复安全的
+            // 默认排队，避免把上一条会话的发送意图意外带到另一条运行中会话。
+            guidedFollowUpEnabled = false
         }
         .onChange(of: sessionStore.selectedThreadGoal) { previousGoal, goal in
             syncGoalStatusBarVisibility(from: previousGoal, to: goal)
@@ -422,6 +455,155 @@ struct ComposerView: View {
 
     private var isCompactComposer: Bool {
         horizontalSizeClass == .compact || (availableWidth.map { $0 < 560 } ?? false)
+    }
+
+    @ViewBuilder
+    private var queuedTurnTray: some View {
+        let turns = sessionStore.selectedQueuedTurns
+        if !turns.isEmpty || sessionStore.queuedTurnStorageErrorMessage != nil {
+            let tokens = themeStore.tokens(for: colorScheme)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "tray.full")
+                        .foregroundStyle(tokens.accent)
+                    Text("待发送 \(turns.count) 条")
+                        .font(themeStore.uiFont(.caption, weight: .semibold))
+                        .foregroundStyle(tokens.primaryText)
+                    Text("保存在此设备")
+                        .font(themeStore.uiFont(.caption2, weight: .medium))
+                        .foregroundStyle(tokens.tertiaryText)
+                    Spacer(minLength: 4)
+                    if turns.count > 1 {
+                        Button("管理") {
+                            showsQueuedTurnManager = true
+                        }
+                        .buttonStyle(.borderless)
+                        .font(themeStore.uiFont(.caption, weight: .semibold))
+                    }
+                }
+
+                ForEach(Array(turns.prefix(queuedTurnPreviewLimit))) { turn in
+                    queuedTurnRow(turn, tokens: tokens)
+                }
+
+                if let message = sessionStore.queuedTurnStorageErrorMessage {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(themeStore.uiFont(.caption2, weight: .medium))
+                        .foregroundStyle(tokens.warning)
+                        .lineLimit(2)
+                }
+            }
+            .padding(10)
+            .background(tokens.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(tokens.accent.opacity(0.22))
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .accessibilityElement(children: .contain)
+        }
+    }
+
+    private var queuedTurnPreviewLimit: Int {
+        isCompactComposer ? 2 : 3
+    }
+
+    private func queuedTurnRow(_ turn: QueuedTurnEntry, tokens: ThemeTokens) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: queuedTurnIcon(turn))
+                .font(themeStore.uiFont(.caption, weight: .semibold))
+                .foregroundStyle(queuedTurnTint(turn, tokens: tokens))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(turn.previewText.isEmpty ? "（仅附件）" : turn.previewText)
+                    .font(themeStore.uiFont(.caption, weight: .medium))
+                    .foregroundStyle(tokens.primaryText)
+                    .lineLimit(1)
+                Text(queuedTurnStatusText(turn))
+                    .font(themeStore.uiFont(.caption2, weight: .medium))
+                    .foregroundStyle(queuedTurnTint(turn, tokens: tokens))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Menu {
+                Button {
+                    editingQueuedTurn = QueuedTurnEditorDraft(turn: turn)
+                } label: {
+                    Label("编辑", systemImage: "pencil")
+                }
+                .disabled(turn.dispatchState == .dispatching)
+
+                if turn.intent.canGuideCurrentTurn {
+                    Button {
+                        _ = sessionStore.guideQueuedTurnNow(clientMessageID: turn.id)
+                    } label: {
+                        Label("立即引导当前回复", systemImage: "text.bubble")
+                    }
+                    .disabled(!canUseGuidedFollowUp || turn.dispatchState != .waiting)
+                }
+
+                if turn.dispatchState == .needsConfirmation {
+                    Button {
+                        _ = sessionStore.retryQueuedTurn(clientMessageID: turn.id)
+                    } label: {
+                        Label("确认并重试", systemImage: "arrow.clockwise")
+                    }
+                }
+
+                Divider()
+                Button(role: .destructive) {
+                    _ = sessionStore.deleteQueuedTurn(clientMessageID: turn.id)
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+                .disabled(turn.dispatchState == .dispatching)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(themeStore.uiFont(.caption, weight: .semibold))
+                    .foregroundStyle(tokens.secondaryText)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("待发送消息操作")
+        }
+        .padding(.leading, 2)
+    }
+
+    private func queuedTurnIcon(_ turn: QueuedTurnEntry) -> String {
+        switch turn.dispatchState {
+        case .waiting:
+            return turn.intent.startsGoal ? "target" : "clock"
+        case .dispatching:
+            return "paperplane"
+        case .needsConfirmation:
+            return "exclamationmark.triangle"
+        }
+    }
+
+    private func queuedTurnTint(_ turn: QueuedTurnEntry, tokens: ThemeTokens) -> Color {
+        switch turn.dispatchState {
+        case .waiting:
+            return tokens.secondaryText
+        case .dispatching:
+            return tokens.accent
+        case .needsConfirmation:
+            return tokens.warning
+        }
+    }
+
+    private func queuedTurnStatusText(_ turn: QueuedTurnEntry) -> String {
+        switch turn.dispatchState {
+        case .waiting:
+            if turn.waitsForAcceptedTurnStart == true {
+                return "正在确认上一轮状态 · \(turn.intent.title)"
+            }
+            return turn.expectedTurnID == nil ? "等待连接后发送 · \(turn.intent.title)" : "当前回复完成后发送 · \(turn.intent.title)"
+        case .dispatching:
+            return "正在发送 · \(turn.intent.title)"
+        case .needsConfirmation:
+            return turn.lastError ?? "发送结果需要确认"
+        }
     }
 
     @ViewBuilder
@@ -820,34 +1002,75 @@ struct ComposerView: View {
     }
 
     private func composerToolbar(tokens: ThemeTokens) -> some View {
-        HStack(spacing: 10) {
-            toolbarMenuRow
-                .frame(maxWidth: .infinity, alignment: .leading)
+        Group {
+            if isCompactComposer {
+                compactComposerToolbar
+            } else {
+                HStack(spacing: 10) {
+                    toolbarMenuRow
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-            followUpDeliverySendMenu(showLabels: !isCompactComposer)
+                    followUpDeliveryMenu
+                    voiceMicControl
+                    sendButton(showLabels: showsExpandedToolbarLabels)
+                }
+            }
+        }
+    }
+
+    private var compactComposerToolbar: some View {
+        HStack(spacing: 8) {
+            addContentButton
+            followUpDeliveryMenu
+            Spacer(minLength: 0)
+            composerOptionsMenu
             voiceMicControl
-            sendButton(showLabels: !isCompactComposer)
+            sendButton(showLabels: false)
         }
     }
 
     private var toolbarMenuRow: some View {
-        // iPad 保留模型与权限的快速可见性；紧凑宽度把运行配置收进“选项”，
-        // 让添加、语音和发送成为稳定的一级操作。
+        // 推理强度直接放在一级工具栏：它会明显影响响应时间和答案深度，属于每轮都可能调整的
+        // 高频决策，不应该藏在“选项”里。中等宽度只收起模型与权限，确保推理强度始终可见。
         HStack(spacing: 8) {
             addContentButton
             skillPickerButton
             modelPickerControl
-            if !isCompactComposer {
+            if showsWideConfigurationControls {
                 permissionMenu
             }
+            reasoningEffortMenu
             composerOptionsMenu
         }
     }
 
+    private var showsWideConfigurationControls: Bool {
+        !isCompactComposer && (availableWidth.map { $0 >= 680 } ?? true)
+    }
+
+    private var showsExpandedToolbarLabels: Bool {
+        !isCompactComposer && (availableWidth.map { $0 >= 760 } ?? true)
+    }
+
     private var composerOptionsMenu: some View {
         Menu {
-            reasoningEffortOptionsMenu
             if isCompactComposer {
+                Menu {
+                    modelOptionItems
+                } label: {
+                    Label("模型 · \(selectedModelSummaryTitle)", systemImage: "cpu")
+                }
+
+                Menu {
+                    reasoningEffortOptions
+                } label: {
+                    Label("推理强度 · \(reasoningEffortTitle)", systemImage: "brain.head.profile")
+                }
+
+                Divider()
+            }
+
+            if !showsWideConfigurationControls {
                 permissionMenu
             }
 
@@ -878,7 +1101,7 @@ struct ComposerView: View {
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("会话选项")
-        .accessibilityHint("调整推理强度、生成设置和发送模式")
+        .accessibilityHint("调整生成设置和发送模式")
     }
 
     private var voiceMicControl: some View {
@@ -1183,42 +1406,40 @@ struct ComposerView: View {
     }
 
     @ViewBuilder
-    private func followUpDeliverySendMenu(showLabels: Bool) -> some View {
+    private var followUpDeliveryMenu: some View {
         if canChooseRunningFollowUpDelivery {
             let tokens = themeStore.tokens(for: colorScheme)
             let isGuidedAvailable = canUseGuidedFollowUp
             let isGuidedSelected = guidedFollowUpEnabled && isGuidedAvailable
             Menu {
-                Button {
-                    guidedFollowUpEnabled = false
-                } label: {
-                    Label("排队下一轮", systemImage: isGuidedSelected ? "clock" : "checkmark")
-                }
-                Button {
-                    if isGuidedAvailable {
-                        guidedFollowUpEnabled = true
+                Section("发送方式") {
+                    Button {
+                        selectFollowUpDelivery(guided: false)
+                    } label: {
+                        Label("排队（默认）", systemImage: isGuidedSelected ? "clock" : "checkmark")
                     }
-                } label: {
-                    Label(isGuidedAvailable ? "引导当前回复" : "引导当前回复（等待回合）", systemImage: isGuidedSelected ? "checkmark" : "text.bubble")
+                    Button {
+                        selectFollowUpDelivery(guided: true)
+                    } label: {
+                        Label(isGuidedAvailable ? "引导当前回复" : "引导当前回复（当前无活动回合）", systemImage: isGuidedSelected ? "checkmark" : "text.bubble")
+                    }
+                    .disabled(!isGuidedAvailable)
                 }
-                .disabled(!isGuidedAvailable)
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: isGuidedSelected ? "text.bubble.fill" : "clock")
-                        .font(themeStore.uiFont(size: 16, weight: .bold))
-                    if showLabels {
-                        Text(isGuidedSelected ? "引导" : "排队")
-                            .font(themeStore.uiFont(.callout, weight: .semibold))
-                            .lineLimit(1)
-                    }
+                        .font(themeStore.uiFont(size: 15, weight: .bold))
+                    Text(isGuidedSelected ? "引导" : "排队")
+                        .font(themeStore.uiFont(.callout, weight: .semibold))
+                        .lineLimit(1)
                     Image(systemName: "chevron.up")
                         .font(themeStore.uiFont(size: 10, weight: .bold))
                         .opacity(0.72)
                 }
-                .foregroundStyle(isGuidedSelected ? tokens.accent : tokens.secondaryText)
+                .foregroundStyle(isGuidedSelected ? tokens.accent : tokens.primaryText)
                 .frame(height: 44)
-                .padding(.horizontal, showLabels ? 12 : 8)
-                .frame(minWidth: showLabels ? 76 : 48)
+                .padding(.horizontal, 11)
+                .frame(minWidth: 76)
                 .background(
                     isGuidedSelected ? tokens.accent.opacity(0.12) : tokens.elevatedSurface,
                     in: RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -1230,10 +1451,22 @@ struct ComposerView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-            .help(isGuidedSelected ? "运行中发送会直接引导当前回复" : "运行中发送会排队为下一轮消息")
+            .help(isGuidedSelected ? "立即改变当前正在生成的回复" : "先保存在此设备，当前回复完成后自动发送为下一轮")
             .accessibilityLabel("运行中追加方式")
             .accessibilityValue(isGuidedSelected ? "引导当前回复" : "排队下一轮")
+            .accessibilityHint("点按可切换排队或引导当前回复")
         }
+    }
+
+    private func selectFollowUpDelivery(guided: Bool) {
+        guard !guided || canUseGuidedFollowUp else {
+            return
+        }
+        guard guidedFollowUpEnabled != guided else {
+            return
+        }
+        guidedFollowUpEnabled = guided
+        UISelectionFeedbackGenerator().selectionChanged()
     }
 
     @ViewBuilder
@@ -1417,14 +1650,21 @@ struct ComposerView: View {
         .disabled(sessionStore.isRefreshingAppServerModels)
     }
 
-    private var reasoningEffortOptionsMenu: some View {
+    private var reasoningEffortMenu: some View {
         Menu {
             reasoningEffortOptions
         } label: {
-            Label("推理强度 · \(reasoningEffortTitle)", systemImage: "brain.head.profile")
+            composerToolbarControlLabel(
+                title: isCompactComposer ? nil : "推理 · \(reasoningEffortTitle)",
+                systemImage: "brain.head.profile",
+                accessibilityLabel: "推理强度"
+            )
         }
+        .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("推理强度")
         .accessibilityValue(reasoningEffortTitle)
+        .accessibilityHint("选择下一轮回答的思考深度")
+        .help("推理强度：\(reasoningEffortTitle)")
     }
 
     @ViewBuilder
@@ -1439,7 +1679,7 @@ struct ComposerView: View {
                 composerState.turnOptions.reasoningEffort = effort
             } label: {
                 Label(
-                    effort.rawValue,
+                    reasoningEffortTitle(for: effort),
                     systemImage: composerState.turnOptions.reasoningEffort == effort ? "checkmark" : "brain.head.profile"
                 )
             }
@@ -1447,7 +1687,24 @@ struct ComposerView: View {
     }
 
     private var reasoningEffortTitle: String {
-        composerState.turnOptions.reasoningEffort?.rawValue ?? "默认"
+        composerState.turnOptions.reasoningEffort.map { reasoningEffortTitle(for: $0) } ?? "默认"
+    }
+
+    private func reasoningEffortTitle(for effort: CodexAppServerReasoningEffort) -> String {
+        switch effort {
+        case .none:
+            return "关闭"
+        case .minimal:
+            return "最低"
+        case .low:
+            return "低"
+        case .medium:
+            return "中"
+        case .high:
+            return "高"
+        case .xhigh:
+            return "极高"
+        }
     }
 
     private var serviceTierOptionsMenu: some View {
@@ -1896,27 +2153,16 @@ struct ComposerView: View {
     }
 
     private var composerMinHeight: CGFloat {
-        if usesCollapsedComposerTextHeight {
-            return isCompactComposer ? 38 : 34
-        }
-        if composerState.hasNonWhitespaceDraft {
-            // 单行文字输入不要被强行撑成大文本框；内容增多时高度仍由 UIKit 测量值继续向上扩展。
-            return isCompactComposer ? 44 : 48
-        }
-        if !composerState.attachments.isEmpty || composerState.voiceDraftNeedsReview {
-            return isCompactComposer ? 52 : 56
-        }
-        if isCompactComposer {
-            return 60
-        }
-        return 72
+        // 始终保留约三至四行的可点击编辑空间，输入第一行文字时也不缩小。输入区是页面
+        // 主操作，不应退化成附着在工具栏上方的窄缝；更大的落点也更适合 iPad 键盘与触控笔。
+        isCompactComposer ? 72 : 92
     }
 
     private var composerMaxHeight: CGFloat {
         if isCompactComposer {
-            return 190
+            return 220
         }
-        return 260
+        return 300
     }
 
     private var composerTextHeight: CGFloat {
@@ -1928,16 +2174,16 @@ struct ComposerView: View {
     }
 
     private var usesCollapsedComposerTextHeight: Bool {
-        // 空输入时先保持轻量高度；一旦有文字/附件/语音草稿，才恢复更像命令面板的多行空间。
+        // 清空草稿时忽略 UIKit 上一次测得的长文本高度，立即回到稳定的起始画布。
         composerState.isEmpty && !composerState.voiceDraftNeedsReview
     }
 
     private var composerCardPadding: CGFloat {
-        usesCollapsedComposerTextHeight ? 10 : 12
+        isCompactComposer ? 12 : 14
     }
 
     private var composerCardSpacing: CGFloat {
-        usesCollapsedComposerTextHeight ? 8 : 12
+        12
     }
 
     private var composerUIFont: UIFont {
@@ -2652,6 +2898,241 @@ enum ImageAttachmentEncoder {
             pixelWidth: thumbnail.width,
             pixelHeight: thumbnail.height
         )
+    }
+}
+
+private struct QueuedTurnEditorDraft: Identifiable {
+    let id: ClientMessageID
+    let turn: QueuedTurnEntry
+    let text: String
+    let attachments: [CodexAppServerUserInput]
+
+    init(turn: QueuedTurnEntry) {
+        self.id = turn.id
+        self.turn = turn
+        self.text = turn.payload.textPrompt
+        self.attachments = turn.payload.input.filter { input in
+            if case .text = input {
+                return false
+            }
+            return true
+        }
+    }
+
+    func payload(text: String, attachments: [CodexAppServerUserInput]) -> CodexAppServerTurnPayload {
+        var input = CodexAppServerTurnPayload.defaultInput(for: text)
+        input.append(contentsOf: attachments)
+        return CodexAppServerTurnPayload(input: input, options: turn.payload.options)
+    }
+}
+
+private struct QueuedTurnEditorSheet: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+    let draft: QueuedTurnEditorDraft
+    let onSave: (CodexAppServerTurnPayload) -> Void
+    @State private var text: String
+    @State private var attachments: [CodexAppServerUserInput]
+
+    init(draft: QueuedTurnEditorDraft, onSave: @escaping (CodexAppServerTurnPayload) -> Void) {
+        self.draft = draft
+        self.onSave = onSave
+        _text = State(initialValue: draft.text)
+        _attachments = State(initialValue: draft.attachments)
+    }
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+        NavigationStack {
+            Form {
+                Section("消息") {
+                    TextEditor(text: $text)
+                        .frame(minHeight: 150)
+                        .font(themeStore.uiFont(.body))
+                        .scrollContentBackground(.hidden)
+                        .foregroundStyle(tokens.primaryText)
+                }
+                if !attachments.isEmpty {
+                    Section("附件") {
+                        ForEach(Array(attachments.enumerated()), id: \.offset) { index, item in
+                            HStack(spacing: 10) {
+                                Image(systemName: queuedAttachmentIcon(item))
+                                    .foregroundStyle(tokens.accent)
+                                Text(item.previewText)
+                                    .lineLimit(1)
+                                Spacer()
+                                Button(role: .destructive) {
+                                    attachments.remove(at: index)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("删除附件")
+                            }
+                        }
+                    }
+                }
+                Section {
+                    Text("编辑只影响本机待发送内容；保存后仍按原队列顺序发送。")
+                        .font(themeStore.uiFont(.caption))
+                        .foregroundStyle(tokens.secondaryText)
+                }
+            }
+            .navigationTitle("编辑待发送消息")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        onSave(draft.payload(text: text, attachments: attachments))
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return draft.turn.intent.startsGoal ? hasText : (hasText || !attachments.isEmpty)
+    }
+
+    private func queuedAttachmentIcon(_ item: CodexAppServerUserInput) -> String {
+        switch item {
+        case .image, .localImage:
+            return "photo"
+        case .skill:
+            return "wand.and.stars"
+        case .mention:
+            return "at"
+        case .text:
+            return "text.alignleft"
+        }
+    }
+}
+
+private struct QueuedTurnManagerSheet: View {
+    @EnvironmentObject private var themeStore: ThemeStore
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
+    let turns: [QueuedTurnEntry]
+    let canGuideCurrentTurn: Bool
+    let onUpdate: (QueuedTurnEntry, CodexAppServerTurnPayload) -> Void
+    let onDelete: (QueuedTurnEntry) -> Void
+    let onRetry: (QueuedTurnEntry) -> Void
+    let onGuideNow: (QueuedTurnEntry) -> Void
+    let onMove: (IndexSet, Int) -> Void
+    @State private var editingTurn: QueuedTurnEditorDraft?
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+        NavigationStack {
+            Group {
+                if turns.isEmpty {
+                    ContentUnavailableView("没有待发送消息", systemImage: "tray")
+                } else {
+                    List {
+                        Section {
+                            ForEach(turns) { turn in
+                                HStack(spacing: 10) {
+                                    Image(systemName: icon(turn))
+                                        .foregroundStyle(tint(turn, tokens: tokens))
+                                        .frame(width: 22)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(turn.previewText.isEmpty ? "（仅附件）" : turn.previewText)
+                                            .lineLimit(2)
+                                            .font(themeStore.uiFont(.body, weight: .medium))
+                                        Text(status(turn))
+                                            .font(themeStore.uiFont(.caption))
+                                            .foregroundStyle(tint(turn, tokens: tokens))
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    Menu {
+                                        Button("编辑", systemImage: "pencil") {
+                                            editingTurn = QueuedTurnEditorDraft(turn: turn)
+                                        }
+                                        .disabled(turn.dispatchState == .dispatching)
+                                        if turn.intent.canGuideCurrentTurn {
+                                            Button("立即引导当前回复", systemImage: "text.bubble") {
+                                                onGuideNow(turn)
+                                            }
+                                            .disabled(!canGuideCurrentTurn || turn.dispatchState != .waiting)
+                                        }
+                                        if turn.dispatchState == .needsConfirmation {
+                                            Button("确认并重试", systemImage: "arrow.clockwise") {
+                                                onRetry(turn)
+                                            }
+                                        }
+                                        Divider()
+                                        Button("删除", systemImage: "trash", role: .destructive) {
+                                            onDelete(turn)
+                                        }
+                                        .disabled(turn.dispatchState == .dispatching)
+                                    } label: {
+                                        Image(systemName: "ellipsis.circle")
+                                    }
+                                }
+                            }
+                            .onMove(perform: onMove)
+                        } footer: {
+                            Text("按住右侧拖动可调整下一轮发送顺序。队列保存在此设备，App 重新打开后会继续。")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("待发送队列")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") { dismiss() }
+                }
+                if turns.count > 1 {
+                    ToolbarItem(placement: .primaryAction) {
+                        EditButton()
+                    }
+                }
+            }
+            .sheet(item: $editingTurn) { draft in
+                QueuedTurnEditorSheet(draft: draft) { payload in
+                    onUpdate(draft.turn, payload)
+                }
+                .environmentObject(themeStore)
+            }
+        }
+    }
+
+    private func icon(_ turn: QueuedTurnEntry) -> String {
+        switch turn.dispatchState {
+        case .waiting: return turn.intent.startsGoal ? "target" : "clock"
+        case .dispatching: return "paperplane"
+        case .needsConfirmation: return "exclamationmark.triangle"
+        }
+    }
+
+    private func tint(_ turn: QueuedTurnEntry, tokens: ThemeTokens) -> Color {
+        switch turn.dispatchState {
+        case .waiting: return tokens.secondaryText
+        case .dispatching: return tokens.accent
+        case .needsConfirmation: return tokens.warning
+        }
+    }
+
+    private func status(_ turn: QueuedTurnEntry) -> String {
+        switch turn.dispatchState {
+        case .waiting:
+            if turn.waitsForAcceptedTurnStart == true {
+                return "正在确认上一轮状态 · \(turn.intent.title)"
+            }
+            return turn.expectedTurnID == nil ? "等待连接后发送 · \(turn.intent.title)" : "当前回复完成后发送 · \(turn.intent.title)"
+        case .dispatching:
+            return "正在发送 · \(turn.intent.title)"
+        case .needsConfirmation:
+            return turn.lastError ?? "发送结果需要确认"
+        }
     }
 }
 

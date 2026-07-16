@@ -19,6 +19,25 @@ final class ConversationSnapshotTests: XCTestCase {
         )
     }
 
+    func testWorkspaceOpenCurrentDirectoryButton() {
+        let view = WorkspaceOpenCurrentDirectoryButton(
+            directoryName: "gaixiaotongxue",
+            isOpening: false,
+            isDisabled: false,
+            action: {}
+        )
+        .environmentObject(makeThemeStore())
+        .environment(\.colorScheme, .light)
+        .padding(20)
+        .frame(width: 390, height: 110)
+        .background(Color(uiColor: .systemGroupedBackground))
+
+        assertSnapshot(
+            of: view,
+            as: .image(precision: 0.98, layout: .fixed(width: 390, height: 110))
+        )
+    }
+
     // 固定尺寸 + 固定内容，专门锁住气泡对齐这类纯视觉回归（user 贴右、assistant/system 贴左）。
     // 默认保持浅色基线；需要验证深色配色时显式传入 colorScheme，避免依赖 Simulator 当前外观。
     // 首次运行会自动录制参考图到 __Snapshots__/，之后逐像素对比。

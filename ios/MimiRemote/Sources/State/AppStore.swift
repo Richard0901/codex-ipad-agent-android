@@ -578,6 +578,10 @@ final class AppStore: ObservableObject {
     var shouldSeedDebugWorkbenchUI: Bool {
         debugLaunchConfiguration.seedsWorkbenchUI
     }
+
+    var shouldSeedDebugQueuedTurnsUI: Bool {
+        debugLaunchConfiguration.seedsQueuedTurnsUI
+    }
 #endif
 
     func client() throws -> AgentAPIClient {
@@ -1404,17 +1408,22 @@ final class AppStore: ObservableObject {
 private struct DebugLaunchConfiguration {
     let opensWorkbenchWithoutPairing: Bool
     let seedsWorkbenchUI: Bool
+    let seedsQueuedTurnsUI: Bool
     let endpoint: String?
     let token: String?
 
     static func current(processInfo: ProcessInfo = .processInfo) -> DebugLaunchConfiguration {
         let arguments = processInfo.arguments
         let environment = processInfo.environment
+        let seedsQueuedTurnsUI = arguments.contains("--debug-seed-queue-ui")
+            || boolValue(environment["MIMI_DEBUG_SEED_QUEUE_UI"])
         return DebugLaunchConfiguration(
             opensWorkbenchWithoutPairing: arguments.contains("--debug-skip-pairing")
                 || boolValue(environment["MIMI_DEBUG_SKIP_PAIRING"]),
             seedsWorkbenchUI: arguments.contains("--debug-seed-ui")
-                || boolValue(environment["MIMI_DEBUG_SEED_UI"]),
+                || boolValue(environment["MIMI_DEBUG_SEED_UI"])
+                || seedsQueuedTurnsUI,
+            seedsQueuedTurnsUI: seedsQueuedTurnsUI,
             endpoint: argumentValue(named: "--debug-endpoint", in: arguments)
                 ?? environment["MIMI_DEBUG_ENDPOINT"],
             token: argumentValue(named: "--debug-token", in: arguments)

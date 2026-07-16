@@ -937,11 +937,222 @@ enum RunningTurnDelivery {
     case guided
 }
 
-private struct QueuedRunningTurn {
-    let payload: CodexAppServerTurnPayload
+enum QueuedTurnIntent: Codable, Equatable {
+    case standard
+    case plan
+    case goal(objective: String, tokenBudget: Int64?)
+
+    var title: String {
+        switch self {
+        case .standard:
+            return "下一轮"
+        case .plan:
+            return "计划"
+        case .goal:
+            return "目标"
+        }
+    }
+
+    var canGuideCurrentTurn: Bool {
+        if case .standard = self {
+            return true
+        }
+        return false
+    }
+
+    var startsGoal: Bool {
+        if case .goal = self {
+            return true
+        }
+        return false
+    }
+}
+
+enum QueuedTurnDispatchState: String, Codable, Equatable {
+    case waiting
+    case dispatching
+    case needsConfirmation
+}
+
+struct QueuedTurnEntry: Codable, Equatable, Identifiable {
+    var id: ClientMessageID { clientMessageID }
+
+    let sessionID: SessionID
+    let projectID: String?
+    var payload: CodexAppServerTurnPayload
     let clientMessageID: ClientMessageID
-    // 目标模式会提前写入 thread goal；前一轮完成时不能把尚未启动的目标误判为已完成。
-    let startsGoal: Bool
+    var intent: QueuedTurnIntent
+    let createdAt: Date
+    var dispatchState: QueuedTurnDispatchState
+    var expectedTurnID: TurnID?
+    // 上一条 turn/start 已获接受、但 started 事件尚未到达时，后续项必须跨重启继续等待；
+    // blockedCompletionID 用来识别并忽略触发上一条派发的重复 completed 事件。
+    var waitsForAcceptedTurnStart: Bool?
+    var blockedCompletionID: TurnID?
+    var lastAttemptAt: Date?
+    var lastError: String?
+
+    init(
+        sessionID: SessionID,
+        projectID: String? = nil,
+        payload: CodexAppServerTurnPayload,
+        clientMessageID: ClientMessageID,
+        intent: QueuedTurnIntent,
+        createdAt: Date = Date(),
+        dispatchState: QueuedTurnDispatchState = .waiting,
+        expectedTurnID: TurnID? = nil,
+        waitsForAcceptedTurnStart: Bool? = nil,
+        blockedCompletionID: TurnID? = nil,
+        lastAttemptAt: Date? = nil,
+        lastError: String? = nil
+    ) {
+        self.sessionID = sessionID
+        self.projectID = projectID
+        self.payload = payload
+        self.clientMessageID = clientMessageID
+        self.intent = intent
+        self.createdAt = createdAt
+        self.dispatchState = dispatchState
+        self.expectedTurnID = expectedTurnID
+        self.waitsForAcceptedTurnStart = waitsForAcceptedTurnStart
+        self.blockedCompletionID = blockedCompletionID
+        self.lastAttemptAt = lastAttemptAt
+        self.lastError = lastError
+    }
+
+    var previewText: String {
+        payload.previewText
+    }
+
+    var imageCount: Int {
+        payload.input.reduce(into: 0) { count, input in
+            switch input {
+            case .image, .localImage:
+                count += 1
+            default:
+                break
+            }
+        }
+    }
+}
+
+struct QueuedTurnProfileSnapshot: Codable, Equatable {
+    static let schemaVersion = 1
+
+    var version = Self.schemaVersion
+    let profileID: String
+    var queuesBySessionID: [SessionID: [QueuedTurnEntry]]
+}
+
+enum QueuedTurnStoreError: LocalizedError {
+    case invalidProfile
+    case unsupportedVersion(Int)
+    case storageTooLarge(maximumBytes: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidProfile:
+            return "本地队列不属于当前 Mac 连接档案"
+        case .unsupportedVersion(let version):
+            return "本地队列版本不支持（v\(version)）"
+        case .storageTooLarge(let maximumBytes):
+            return "本地队列超过 \(maximumBytes / 1_024 / 1_024) MB，请先删除部分消息或图片"
+        }
+    }
+}
+
+protocol QueuedTurnPersisting {
+    func load(profileID: String) throws -> QueuedTurnProfileSnapshot
+    func save(_ snapshot: QueuedTurnProfileSnapshot) throws
+    func remove(profileID: String) throws
+}
+
+struct FileQueuedTurnStore: QueuedTurnPersisting {
+    static let maximumEncodedByteCount = 64 * 1_024 * 1_024
+
+    private let directoryURL: URL
+    private let fileManager: FileManager
+    private let maximumEncodedByteCount: Int
+
+    init(
+        directoryURL: URL? = nil,
+        fileManager: FileManager = .default,
+        maximumEncodedByteCount: Int = Self.maximumEncodedByteCount
+    ) {
+        self.fileManager = fileManager
+        self.maximumEncodedByteCount = maximumEncodedByteCount
+        if let directoryURL {
+            self.directoryURL = directoryURL
+        } else {
+            let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? fileManager.temporaryDirectory
+            self.directoryURL = applicationSupport
+                .appendingPathComponent("MimiRemote", isDirectory: true)
+                .appendingPathComponent("QueuedTurns", isDirectory: true)
+                .appendingPathComponent("v1", isDirectory: true)
+        }
+    }
+
+    func load(profileID: String) throws -> QueuedTurnProfileSnapshot {
+        let url = fileURL(profileID: profileID)
+        guard fileManager.fileExists(atPath: url.path) else {
+            return QueuedTurnProfileSnapshot(profileID: profileID, queuesBySessionID: [:])
+        }
+        let snapshot = try JSONDecoder().decode(QueuedTurnProfileSnapshot.self, from: Data(contentsOf: url))
+        guard snapshot.version == QueuedTurnProfileSnapshot.schemaVersion else {
+            throw QueuedTurnStoreError.unsupportedVersion(snapshot.version)
+        }
+        guard snapshot.profileID == profileID else {
+            throw QueuedTurnStoreError.invalidProfile
+        }
+        return snapshot
+    }
+
+    func save(_ snapshot: QueuedTurnProfileSnapshot) throws {
+        let data = try JSONEncoder().encode(snapshot)
+        guard data.count <= maximumEncodedByteCount else {
+            throw QueuedTurnStoreError.storageTooLarge(maximumBytes: maximumEncodedByteCount)
+        }
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        var directoryValues = URLResourceValues()
+        directoryValues.isExcludedFromBackup = true
+        var mutableDirectoryURL = directoryURL
+        try? mutableDirectoryURL.setResourceValues(directoryValues)
+
+        let url = fileURL(profileID: snapshot.profileID)
+        try data.write(to: url, options: [.atomic])
+        var fileValues = URLResourceValues()
+        fileValues.isExcludedFromBackup = true
+        var mutableFileURL = url
+        try? mutableFileURL.setResourceValues(fileValues)
+#if os(iOS)
+        try? fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: url.path
+        )
+#endif
+    }
+
+    func remove(profileID: String) throws {
+        let url = fileURL(profileID: profileID)
+        guard fileManager.fileExists(atPath: url.path) else {
+            return
+        }
+        try fileManager.removeItem(at: url)
+    }
+
+    private func fileURL(profileID: String) -> URL {
+        directoryURL.appendingPathComponent(Self.stableDigest(profileID) + ".json", isDirectory: false)
+    }
+
+    private static func stableDigest(_ value: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
+    }
 }
 
 struct HistoryLoadProgress: Equatable {
@@ -1067,6 +1278,8 @@ final class SessionStore: ObservableObject {
     @Published private var foregroundActivityBySessionID: [SessionID: SessionForegroundActivity] = [:]
     @Published private var runtimeActivityBySessionID: [SessionID: RuntimeActivitySnapshot] = [:]
     @Published private var sessionControlStateByID: [SessionID: SessionControlState] = [:]
+    @Published private(set) var queuedRunningTurnsBySessionID: [SessionID: [QueuedTurnEntry]] = [:]
+    @Published private(set) var queuedTurnStorageErrorMessage: String?
 
     private let appStore: AppStore
     private let conversationStore: ConversationStore
@@ -1080,6 +1293,7 @@ final class SessionStore: ObservableObject {
     private let sessionReminderScheduler: any SessionReminderScheduling
     private let sessionReminderNow: () -> Date
     private let historySavingsNoticeStore: HistorySavingsNoticeStore
+    private let queuedTurnStore: any QueuedTurnPersisting
     private let terminalStreamStore = TerminalStreamStore()
     // 草稿跟随 SessionStore 生命周期，避免窗口 resize 或详情页重建时随 ComposerView 的 @State 一起丢失。
     // 不使用 @Published，防止每次键入都触发整个工作台刷新。
@@ -1118,12 +1332,16 @@ final class SessionStore: ObservableObject {
     private var locallyCompletedSessionIDs: Set<SessionID> = []
     private var locallyCompletedGoalThreadIDs: Set<SessionID> = []
     private var listProjectionBySessionID: [SessionID: SessionListProjection] = [:]
-    // app-server 的 turn/start 在活跃 turn 中会退化成 steer，因此“下一轮”必须由客户端真正等待 turn/completed。
-    private var queuedRunningTurnsBySessionID: [SessionID: [QueuedRunningTurn]] = [:]
-    // turn/start 已提交但 turn/started 尚未回流时也视为运行中，防止重复完成事件提前派发下一条。
-    private var queuedTurnDispatchInFlightSessionIDs: Set<SessionID> = []
-    // 排队必须等待“入队时那个 active turn”的完成确认；历史快照或其他 turn 的 completed 都不能放行。
-    private var queuedTurnExpectedCompletionIDBySessionID: [SessionID: TurnID] = [:]
+    // 队列订阅不依赖当前页面；用户切到其他会话后，原 thread 仍能在完成时继续 FIFO 派发。
+    private var queuedSessionSockets: [SessionID: any SessionWebSocketClient] = [:]
+    private var queuedSessionSocketGenerationByID: [SessionID: Int] = [:]
+    private var queuedSessionReadyIDs: Set<SessionID> = []
+    private var queuedSessionReconnectTasks: [SessionID: Task<Void, Never>] = [:]
+    private var queuedTurnStartedIDBySessionID: [SessionID: TurnID] = [:]
+    private var queuedTurnAwaitingStartSessionIDs: Set<SessionID> = []
+    private var queuedTurnBlockedCompletionIDBySessionID: [SessionID: TurnID] = [:]
+    private var queuedGuidanceDispatchClientMessageIDs: Set<ClientMessageID> = []
+    private var currentQueuedTurnProfileID: String?
     private var queuedCommandActionRuns: [QueuedCommandActionRun] = []
     private var projectsByID: [String: AgentProject] = [:]
     private var workspacesByID: [String: AgentWorkspace] = [:]
@@ -1187,6 +1405,7 @@ final class SessionStore: ObservableObject {
     private static let initialSessionPageLimit = 20
     private static let expandedSessionPageLimit = 20
     private static let commandActionHistoryLimit = 10
+    private static let queuedTurnLimitPerSession = 20
 
     init(
         appStore: AppStore,
@@ -1198,6 +1417,7 @@ final class SessionStore: ObservableObject {
         sessionControlStateStore: SessionControlStateStore? = nil,
         sessionReminderStore: SessionReminderStore? = nil,
         historySavingsNoticeStore: HistorySavingsNoticeStore? = nil,
+        queuedTurnStore: (any QueuedTurnPersisting)? = nil,
         sessionReminderScheduler: (any SessionReminderScheduling)? = nil,
         sessionReminderNow: @escaping () -> Date = Date.init,
         clientFactory: (() throws -> any SessionStoreAPIClient)? = nil,
@@ -1263,6 +1483,16 @@ final class SessionStore: ObservableObject {
         } else {
             self.historySavingsNoticeStore = HistorySavingsNoticeStore()
         }
+        if let queuedTurnStore {
+            self.queuedTurnStore = queuedTurnStore
+        } else if clientFactory != nil {
+            self.queuedTurnStore = FileQueuedTurnStore(
+                directoryURL: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("SessionStore.QueuedTurns.\(UUID().uuidString)", isDirectory: true)
+            )
+        } else {
+            self.queuedTurnStore = FileQueuedTurnStore()
+        }
         if let sessionReminderScheduler {
             self.sessionReminderScheduler = sessionReminderScheduler
         } else if clientFactory != nil {
@@ -1306,6 +1536,7 @@ final class SessionStore: ObservableObject {
         reloadSessionListPreferences()
         reloadSessionControlStates()
         reloadSessionReminders()
+        reloadQueuedTurns()
         self.networkReachabilityStatus = self.networkPathStatusSource.currentStatus
         self.networkPathStatusSource.onStatusChange = { [weak self] update in
             Task { @MainActor in
@@ -1320,6 +1551,7 @@ final class SessionStore: ObservableObject {
         webSocketReconnectTask?.cancel()
         sessionSearchTask?.cancel()
         sessionSearchLoadMoreTask?.cancel()
+        queuedSessionReconnectTasks.values.forEach { $0.cancel() }
         networkPathStatusSource.stop()
     }
 
@@ -1418,6 +1650,243 @@ final class SessionStore: ObservableObject {
 
     func removeComposerDraft(for scope: ComposerDraftScopeKey) {
         composerDraftCache.remove(scope: scope)
+    }
+
+    var selectedQueuedTurns: [QueuedTurnEntry] {
+        guard let selectedSessionID else {
+            return []
+        }
+        return queuedRunningTurnsBySessionID[selectedSessionID] ?? []
+    }
+
+    func queuedTurns(sessionID: SessionID) -> [QueuedTurnEntry] {
+        queuedRunningTurnsBySessionID[sessionID] ?? []
+    }
+
+    @discardableResult
+    func updateQueuedTurn(
+        clientMessageID: ClientMessageID,
+        payload: CodexAppServerTurnPayload
+    ) -> Bool {
+        guard !payload.isEmpty,
+              let location = queuedTurnLocation(clientMessageID: clientMessageID),
+              let queuedTurn = queuedRunningTurnsBySessionID[location.sessionID]?[location.index],
+              queuedTurn.dispatchState != .dispatching,
+              !queuedTurn.intent.startsGoal || !payload.textPrompt.isEmpty
+        else {
+            return false
+        }
+        return mutateAndPersistQueuedTurns {
+            guard var queue = queuedRunningTurnsBySessionID[location.sessionID],
+                  queue.indices.contains(location.index) else { return }
+            queue[location.index].payload = payload
+            if case .goal(_, let tokenBudget) = queue[location.index].intent {
+                queue[location.index].intent = .goal(
+                    objective: payload.textPrompt,
+                    tokenBudget: tokenBudget
+                )
+            }
+            queue[location.index].lastError = nil
+            queuedRunningTurnsBySessionID[location.sessionID] = queue
+        }
+    }
+
+    @discardableResult
+    func deleteQueuedTurn(clientMessageID: ClientMessageID) -> Bool {
+        guard let location = queuedTurnLocation(clientMessageID: clientMessageID),
+              queuedRunningTurnsBySessionID[location.sessionID]?[location.index].dispatchState != .dispatching
+        else {
+            return false
+        }
+        let didPersist = mutateAndPersistQueuedTurns {
+            guard var queue = queuedRunningTurnsBySessionID[location.sessionID],
+                  queue.indices.contains(location.index) else { return }
+            queue.remove(at: location.index)
+            setQueuedTurns(queue, sessionID: location.sessionID)
+        }
+        if didPersist {
+            stopQueuedSessionMonitoringIfIdle(sessionID: location.sessionID)
+        }
+        return didPersist
+    }
+
+    @discardableResult
+    func retryQueuedTurn(clientMessageID: ClientMessageID) -> Bool {
+        guard let location = queuedTurnLocation(clientMessageID: clientMessageID),
+              queuedRunningTurnsBySessionID[location.sessionID]?[location.index].dispatchState == .needsConfirmation
+        else {
+            return false
+        }
+        let didPersist = mutateAndPersistQueuedTurns {
+            guard var queue = queuedRunningTurnsBySessionID[location.sessionID],
+                  queue.indices.contains(location.index) else { return }
+            queue[location.index].dispatchState = .waiting
+            queue[location.index].expectedTurnID = sessionsByID[location.sessionID]?.activeTurnID
+            queue[location.index].lastError = nil
+            queuedRunningTurnsBySessionID[location.sessionID] = queue
+        }
+        if didPersist {
+            ensureQueuedSessionMonitoring(sessionID: location.sessionID)
+            dispatchNextQueuedRunningTurnIfIdle(sessionID: location.sessionID)
+        }
+        return didPersist
+    }
+
+    @discardableResult
+    func guideQueuedTurnNow(clientMessageID: ClientMessageID) -> Bool {
+        guard let location = queuedTurnLocation(clientMessageID: clientMessageID),
+              location.sessionID == selectedSessionID,
+              let session = selectedSession,
+              let item = queuedRunningTurnsBySessionID[location.sessionID]?[location.index],
+              item.dispatchState == .waiting,
+              item.intent.canGuideCurrentTurn,
+              let activeTurnID = session.activeTurnID,
+              let socket = readyWebSocket(for: session)
+        else {
+            setErrorMessage("当前没有可引导的活动回合")
+            return false
+        }
+        guard mutateAndPersistQueuedTurns({
+            guard var queue = queuedRunningTurnsBySessionID[location.sessionID],
+                  queue.indices.contains(location.index) else { return }
+            queue[location.index].dispatchState = .dispatching
+            queue[location.index].lastAttemptAt = Date()
+            queue[location.index].lastError = nil
+            queuedRunningTurnsBySessionID[location.sessionID] = queue
+        }) else {
+            return false
+        }
+        queuedGuidanceDispatchClientMessageIDs.insert(clientMessageID)
+        guard socket.sendGuidance(
+            item.payload,
+            clientMessageID: item.clientMessageID,
+            expectedTurnID: activeTurnID
+        ) else {
+            queuedGuidanceDispatchClientMessageIDs.remove(clientMessageID)
+            markQueuedTurnWaitingAfterDefiniteFailure(
+                clientMessageID: clientMessageID,
+                message: "连接尚未就绪，消息仍保留在本机"
+            )
+            return false
+        }
+        conversationStore.appendLocalUser(
+            item.previewText,
+            sessionID: session.id,
+            clientMessageID: item.clientMessageID,
+            sendStatus: .sending,
+            turnPayload: item.payload,
+            userDelivery: .guided
+        )
+        setForegroundActivity(.waitingForAssistant, sessionID: session.id)
+        setStatusMessage("已立即引导当前回复")
+        return true
+    }
+
+    @discardableResult
+    func moveSelectedQueuedTurns(fromOffsets: IndexSet, toOffset: Int) -> Bool {
+        guard let selectedSessionID,
+              var queue = queuedRunningTurnsBySessionID[selectedSessionID],
+              queue.allSatisfy({ $0.dispatchState != .dispatching })
+        else {
+            return false
+        }
+        let previous = queuedRunningTurnsBySessionID
+        let moving = fromOffsets.sorted().compactMap { queue.indices.contains($0) ? queue[$0] : nil }
+        for index in fromOffsets.sorted(by: >) where queue.indices.contains(index) {
+            queue.remove(at: index)
+        }
+        let removedBeforeDestination = fromOffsets.filter { $0 < toOffset }.count
+        let destination = min(max(0, toOffset - removedBeforeDestination), queue.count)
+        queue.insert(contentsOf: moving, at: destination)
+        queuedRunningTurnsBySessionID[selectedSessionID] = queue
+        do {
+            try persistQueuedTurns()
+            queuedTurnStorageErrorMessage = nil
+            return true
+        } catch {
+            queuedRunningTurnsBySessionID = previous
+            reportQueuedTurnStorageError(error)
+            return false
+        }
+    }
+
+    private func reloadQueuedTurns() {
+        let profileID = appStore.notificationRoutingProfileID
+        currentQueuedTurnProfileID = profileID
+        do {
+            var snapshot = try queuedTurnStore.load(profileID: profileID)
+            // dispatching 表示上一个进程在 RPC 确认前中断。协议没有承诺
+            // clientUserMessageId 幂等，因此重启后先阻止盲目重放，等历史对账。
+            var didRecoverAmbiguousDispatch = false
+            for sessionID in snapshot.queuesBySessionID.keys {
+                guard var queue = snapshot.queuesBySessionID[sessionID] else { continue }
+                for index in queue.indices where queue[index].dispatchState == .dispatching {
+                    queue[index].dispatchState = .needsConfirmation
+                    queue[index].lastError = "上次发送在确认前中断，正在核对是否已送达"
+                    didRecoverAmbiguousDispatch = true
+                }
+                snapshot.queuesBySessionID[sessionID] = queue
+            }
+            queuedRunningTurnsBySessionID = snapshot.queuesBySessionID.filter { !$0.value.isEmpty }
+            if didRecoverAmbiguousDispatch {
+                try queuedTurnStore.save(snapshot)
+            }
+            queuedTurnStorageErrorMessage = nil
+        } catch {
+            // 解码失败不覆盖原文件；否则一次版本不兼容会把待发指令静默清空。
+            queuedRunningTurnsBySessionID = [:]
+            reportQueuedTurnStorageError(error)
+        }
+    }
+
+    private func persistQueuedTurns() throws {
+        let profileID = currentQueuedTurnProfileID ?? appStore.notificationRoutingProfileID
+        let snapshot = QueuedTurnProfileSnapshot(
+            profileID: profileID,
+            queuesBySessionID: queuedRunningTurnsBySessionID.filter { !$0.value.isEmpty }
+        )
+        try queuedTurnStore.save(snapshot)
+    }
+
+    @discardableResult
+    private func mutateAndPersistQueuedTurns(_ mutation: () -> Void) -> Bool {
+        let previous = queuedRunningTurnsBySessionID
+        mutation()
+        do {
+            try persistQueuedTurns()
+            queuedTurnStorageErrorMessage = nil
+            return true
+        } catch {
+            queuedRunningTurnsBySessionID = previous
+            reportQueuedTurnStorageError(error)
+            return false
+        }
+    }
+
+    private func reportQueuedTurnStorageError(_ error: Error) {
+        let message = "保存本地队列失败：\(error.localizedDescription)"
+        queuedTurnStorageErrorMessage = message
+        setErrorMessage(message)
+    }
+
+    private func queuedTurnLocation(
+        clientMessageID: ClientMessageID
+    ) -> (sessionID: SessionID, index: Int)? {
+        for (sessionID, queue) in queuedRunningTurnsBySessionID {
+            if let index = queue.firstIndex(where: { $0.clientMessageID == clientMessageID }) {
+                return (sessionID, index)
+            }
+        }
+        return nil
+    }
+
+    private func setQueuedTurns(_ queue: [QueuedTurnEntry], sessionID: SessionID) {
+        if queue.isEmpty {
+            queuedRunningTurnsBySessionID.removeValue(forKey: sessionID)
+            queuedTurnStartedIDBySessionID.removeValue(forKey: sessionID)
+        } else {
+            queuedRunningTurnsBySessionID[sessionID] = queue
+        }
     }
 
     private static func safePreviewFilename(_ rawName: String) -> String {
@@ -1994,11 +2463,37 @@ final class SessionStore: ObservableObject {
         setExpandedProjectIDs([chatArchive.id])
         replaceSessionsIfChanged(with: sessions, projectID: nil)
         setSelectedProjectID(chatArchive.id)
-        setSelectedSessionID(selectedSessionID)
+        setSelectedSessionID(appStore.shouldSeedDebugQueuedTurnsUI ? runningSessionID : selectedSessionID)
+        if appStore.shouldSeedDebugQueuedTurnsUI {
+            // 队列样例需要处于可控的运行中会话，才能同时验收“排队（默认）/引导”切换；
+            // 普通 Debug 工作台仍保留原来的观察态样例，不改变其接管流程覆盖。
+            setSessionControlState(.takenOver, sessionID: runningSessionID)
+        }
         webSocketStatus = .disconnected
         disconnectWebSocket()
         seedDebugConversationMessages(sessionID: selectedSessionID, now: now)
         seedDebugConversationMessages(sessionID: runningSessionID, now: now.addingTimeInterval(-60 * 10))
+        // 调试样例保留两种关键队列态，便于在模拟器直接验收托盘、编辑和歧义重试 UI；
+        // 只写内存，不污染真实连接档案的持久化队列。
+        queuedRunningTurnsBySessionID[runningSessionID] = [
+            QueuedTurnEntry(
+                sessionID: runningSessionID,
+                projectID: chatArchive.id,
+                payload: CodexAppServerTurnPayload(prompt: "当前回复完成后，继续检查排队与引导的提示文案"),
+                clientMessageID: "debug-queued-waiting",
+                intent: .standard,
+                expectedTurnID: "debug-turn-running"
+            ),
+            QueuedTurnEntry(
+                sessionID: runningSessionID,
+                projectID: chatArchive.id,
+                payload: CodexAppServerTurnPayload(prompt: "确认上一条是否已经送达，再决定是否重试"),
+                clientMessageID: "debug-queued-confirmation",
+                intent: .standard,
+                dispatchState: .needsConfirmation,
+                lastError: "上次发送在确认前中断"
+            )
+        ]
         rebuildProjectSessionListSnapshots()
     }
 
@@ -2169,6 +2664,7 @@ final class SessionStore: ObservableObject {
                 disconnectWebSocket()
                 setStatusMessage(sidebarProjects.isEmpty ? "尚未打开工作区" : "已加载 \(sidebarProjects.count) 个最近工作区")
                 setErrorMessage(nil)
+                await reconcilePersistedQueuedTurns()
                 return
             }
 
@@ -2219,6 +2715,8 @@ final class SessionStore: ObservableObject {
                 setSelectedSessionID(nil)
             }
 
+            await reconcilePersistedQueuedTurns()
+            ensureAllQueuedSessionMonitoring()
             setStatusMessage("已加载 \(sidebarProjects.count) 个最近工作区，\(filteredSessions.count) 个会话")
             setErrorMessage(nil)
         } catch {
@@ -3449,6 +3947,7 @@ final class SessionStore: ObservableObject {
             guard connectionTermination == nil, !appStore.requiresRePairing else {
                 return
             }
+            stopAllQueuedSessionMonitoring()
             suspendWebSocketForNetworkLoss()
             setStatusMessage("网络不可用，恢复后自动重连")
             return
@@ -3491,6 +3990,12 @@ final class SessionStore: ObservableObject {
         webSocket = nil
         connectedSessionID = nil
         socket?.disconnect()
+        if let reconnectSessionID {
+            markDispatchingQueuedTurnsNeedsConfirmation(
+                sessionID: reconnectSessionID,
+                message: "网络中断，发送结果需要确认"
+            )
+        }
         // 离线只是暂停传输：不清本地消息、running turn 排队、审批或补充信息状态。
         setWebSocketStatus(.disconnected)
     }
@@ -3516,6 +4021,9 @@ final class SessionStore: ObservableObject {
             // 恢复事件按 path generation 去重；这里只发起一次即时连接，失败后再进入 jitter 退避。
             connectWebSocket(session, isReconnectAttempt: true, allowNonRunning: true)
         }
+
+        await reconcilePersistedQueuedTurns()
+        ensureAllQueuedSessionMonitoring()
 
         guard pathGeneration == networkPathGeneration,
               connectionGeneration == appStore.connectionGeneration,
@@ -3806,7 +4314,11 @@ final class SessionStore: ObservableObject {
         setErrorMessage(nil)
         disconnectWebSocket()
         if let previousSession, supportsCodexThreadManagement(previousSession) {
-            unsubscribeThreadInBackground(previousSession.id)
+            if queuedRunningTurnsBySessionID[previousSession.id]?.isEmpty == false {
+                ensureQueuedSessionMonitoring(sessionID: previousSession.id)
+            } else {
+                unsubscribeThreadInBackground(previousSession.id)
+            }
         }
     }
 
@@ -3817,6 +4329,14 @@ final class SessionStore: ObservableObject {
         networkSuspendedSessionID = nil
         disconnectWebSocket()
         if clearData {
+            if !appStore.isConfigured, let profileID = currentQueuedTurnProfileID {
+                do {
+                    try queuedTurnStore.remove(profileID: profileID)
+                    queuedTurnStorageErrorMessage = nil
+                } catch {
+                    reportQueuedTurnStorageError(error)
+                }
+            }
             clearConnectionData()
         }
         setErrorMessage(nil)
@@ -3857,6 +4377,18 @@ final class SessionStore: ObservableObject {
         // commitPreparedConnection 才会退役旧 WebSocket 并清理旧 Mac 的会话数据。
         try await performPreparedConnectionChange {
             try await appStore.prepareConnectionProfileSwitch(id: id)
+        }
+    }
+
+    func deleteConnectionProfile(id: String) throws {
+        try appStore.deleteConnectionProfile(id: id)
+        do {
+            try queuedTurnStore.remove(profileID: id)
+            queuedTurnStorageErrorMessage = nil
+        } catch {
+            // 档案凭据已经按 AppStore 的事务边界删除；本地队列清理失败不回滚凭据，
+            // 只显式提示残留，避免界面误以为 Mac 连接仍然存在。
+            reportQueuedTurnStorageError(error)
         }
     }
 
@@ -3950,6 +4482,7 @@ final class SessionStore: ObservableObject {
         disconnectWebSocket()
         if didChange {
             clearConnectionData()
+            reloadQueuedTurns()
         }
         setErrorMessage(nil)
         setStatusMessage(nil)
@@ -4077,8 +4610,13 @@ final class SessionStore: ObservableObject {
         if let previousSession,
            previousSession.id != session.id,
            supportsCodexThreadManagement(previousSession) {
-            unsubscribeThreadInBackground(previousSession.id)
+            if queuedRunningTurnsBySessionID[previousSession.id]?.isEmpty == false {
+                ensureQueuedSessionMonitoring(sessionID: previousSession.id)
+            } else {
+                unsubscribeThreadInBackground(previousSession.id)
+            }
         }
+        stopQueuedSessionMonitoring(sessionID: session.id)
         revealProjectInSidebar(session.projectID)
         setErrorMessage(nil)
         conversationStore.retainSessionCache(sessionID: session.id)
@@ -4167,23 +4705,32 @@ final class SessionStore: ObservableObject {
         }
 
         if let session = selectedSession, session.isRunning {
-            // 运行中目标要先确认实时通道可用；否则会出现目标已写入但任务没有真正发送的中间态。
-            guard readyWebSocket(for: session) != nil else {
-                return false
+            // 排队目标必须把“设置目标 + 启动 turn”作为同一个本地队列项保存；
+            // 若在这里提前写远端目标，App 被挂起时会留下“目标已改、任务没发”的半完成状态。
+            if runningDelivery == .queued {
+                let sent = await sendTurn(
+                    payload,
+                    runningDelivery: .queued,
+                    queuedIntent: .goal(objective: normalizedObjective, tokenBudget: tokenBudget)
+                )
+                if sent {
+                    setStatusMessage("目标任务已加入待发送")
+                }
+                return sent
             }
-            // 运行中 thread 已经绑定了 WebSocket，先更新 thread 级目标，再把同一份输入作为目标任务发送。
-            guard await setThreadGoal(
-                threadID: session.id,
-                objective: normalizedObjective,
-                status: .active,
-                tokenBudget: tokenBudget
-            ) else {
+
+            guard readyWebSocket(for: session) != nil,
+                  await setThreadGoal(
+                    threadID: session.id,
+                    objective: normalizedObjective,
+                    status: .active,
+                    tokenBudget: tokenBudget
+                  ) else {
                 return false
             }
             let sent = await sendTurn(
                 payload,
-                runningDelivery: runningDelivery,
-                queuedTurnStartsGoal: true
+                runningDelivery: .guided
             )
             if sent {
                 setStatusMessage("目标任务已启动")
@@ -4224,7 +4771,7 @@ final class SessionStore: ObservableObject {
     func sendTurn(
         _ payload: CodexAppServerTurnPayload,
         runningDelivery: RunningTurnDelivery = .queued,
-        queuedTurnStartsGoal: Bool = false
+        queuedIntent: QueuedTurnIntent? = nil
     ) async -> Bool {
         guard !payload.isEmpty else {
             return false
@@ -4245,54 +4792,54 @@ final class SessionStore: ObservableObject {
                 setErrorMessage("这个会话正在其他客户端运行。请先接管到 iPad，再继续发送。")
                 return false
             }
-            guard let socket = readyWebSocket(for: session, allowNonRunning: selectedSessionHasQueuedTurns) else {
+            let clientMessageID = UUID().uuidString
+            if runningDelivery == .queued {
+                let queueCount = queuedRunningTurnsBySessionID[session.id]?.count ?? 0
+                guard queueCount < Self.queuedTurnLimitPerSession else {
+                    setErrorMessage("每个会话最多保留 \(Self.queuedTurnLimitPerSession) 条待发送消息，请先处理现有队列")
+                    return false
+                }
+                let intent = queuedIntent ?? (payload.options.collaborationMode == .plan ? .plan : .standard)
+                let item = QueuedTurnEntry(
+                    sessionID: session.id,
+                    projectID: session.projectID,
+                    payload: payload,
+                    clientMessageID: clientMessageID,
+                    intent: intent,
+                    expectedTurnID: session.activeTurnID
+                )
+                guard mutateAndPersistQueuedTurns({
+                    queuedRunningTurnsBySessionID[session.id, default: []].append(item)
+                }) else {
+                    return false
+                }
+                setStatusMessage(session.activeTurnID == nil ? "已保存到本机，正在准备发送" : "已保存到本机，将在当前回复完成后发送")
+                ensureQueuedSessionMonitoring(sessionID: session.id)
+                dispatchNextQueuedRunningTurnIfIdle(sessionID: session.id)
+                return true
+            }
+
+            guard let socket = readyWebSocket(for: session) else {
                 return false
             }
-            let clientMessageID = UUID().uuidString
-            let shouldWaitForCurrentTurn = runningDelivery == .queued && (
-                selectedSessionHasQueuedTurns ||
-                session.activeTurnID != nil ||
-                queuedTurnDispatchInFlightSessionIDs.contains(session.id)
-            )
             conversationStore.appendLocalUser(
                 prompt,
                 sessionID: session.id,
                 clientMessageID: clientMessageID,
-                sendStatus: shouldWaitForCurrentTurn ? .local : .sending,
+                sendStatus: .sending,
                 turnPayload: payload,
-                userDelivery: runningDelivery == .guided ? .guided : .queued
+                userDelivery: .guided
             )
             setSessionListProjection(sessionID: session.id, preview: prompt, source: .localUser, clientMessageID: clientMessageID)
-            if shouldWaitForCurrentTurn {
-                // 这里只入本地队列，绝不能提前调用 turn/start；否则 app-server 会把它注入当前回复。
-                queuedRunningTurnsBySessionID[session.id, default: []].append(QueuedRunningTurn(
-                    payload: payload,
-                    clientMessageID: clientMessageID,
-                    startsGoal: queuedTurnStartsGoal
-                ))
-                if queuedTurnExpectedCompletionIDBySessionID[session.id] == nil,
-                   let activeTurnID = session.activeTurnID {
-                    queuedTurnExpectedCompletionIDBySessionID[session.id] = activeTurnID
-                }
-                setStatusMessage("已排队，将在当前回复完成后发送")
-                return true
-            }
-
             setForegroundActivity(.waitingForAssistant, sessionID: session.id)
-            let didAcceptLocally: Bool
-            switch runningDelivery {
-            case .queued:
-                didAcceptLocally = socket.sendTurn(payload, clientMessageID: clientMessageID)
-            case .guided:
-                guard let activeTurnID = session.activeTurnID else {
-                    conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed)
-                    clearSessionListProjection(sessionID: session.id, clientMessageID: clientMessageID)
-                    clearForegroundActivity(sessionID: session.id)
-                    setErrorMessage("引导对话失败：当前会话没有活跃 turn")
-                    return false
-                }
-                didAcceptLocally = socket.sendGuidance(payload, clientMessageID: clientMessageID, expectedTurnID: activeTurnID)
+            guard let activeTurnID = session.activeTurnID else {
+                conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed)
+                clearSessionListProjection(sessionID: session.id, clientMessageID: clientMessageID)
+                clearForegroundActivity(sessionID: session.id)
+                setErrorMessage("引导对话失败：当前会话没有活跃 turn")
+                return false
             }
+            let didAcceptLocally = socket.sendGuidance(payload, clientMessageID: clientMessageID, expectedTurnID: activeTurnID)
             guard didAcceptLocally else {
                 conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed)
                 clearSessionListProjection(sessionID: session.id, clientMessageID: clientMessageID)
@@ -4315,71 +4862,132 @@ final class SessionStore: ObservableObject {
     }
 
     private func dispatchNextQueuedRunningTurnIfIdle(sessionID: SessionID) {
-        guard selectedSessionID == sessionID,
-              !queuedTurnDispatchInFlightSessionIDs.contains(sessionID),
-              let session = sessionsByID[sessionID],
+        guard let session = sessionsByID[sessionID],
+              !queuedTurnAwaitingStartSessionIDs.contains(sessionID),
               session.activeTurnID == nil,
-              var queue = queuedRunningTurnsBySessionID[sessionID],
-              !queue.isEmpty
+              let next = queuedRunningTurnsBySessionID[sessionID]?.first,
+              next.dispatchState == .waiting,
+              next.waitsForAcceptedTurnStart != true,
+              next.expectedTurnID == nil
         else {
             return
         }
         guard canControlSession(session) else {
-            setErrorMessage("排队消息等待发送：请先接管这个会话")
+            setStatusMessage("待发送消息正在等待：请先接管这个会话")
             return
         }
-        guard let socket = readyWebSocket(for: session, allowNonRunning: true) else {
+        guard let socket = socketForQueuedDispatch(sessionID: sessionID) else {
+            ensureQueuedSessionMonitoring(sessionID: sessionID)
             return
         }
 
-        let next = queue.removeFirst()
-        if queue.isEmpty {
-            queuedRunningTurnsBySessionID.removeValue(forKey: sessionID)
-        } else {
+        guard mutateAndPersistQueuedTurns({
+            guard var queue = queuedRunningTurnsBySessionID[sessionID], !queue.isEmpty else { return }
+            queue[0].dispatchState = .dispatching
+            queue[0].lastAttemptAt = Date()
+            queue[0].lastError = nil
             queuedRunningTurnsBySessionID[sessionID] = queue
-        }
-        queuedTurnDispatchInFlightSessionIDs.insert(sessionID)
-        conversationStore.updateSendStatus(
-            clientMessageID: next.clientMessageID,
-            sessionID: sessionID,
-            status: .sending
-        )
-        setForegroundActivity(.waitingForAssistant, sessionID: sessionID)
-
-        guard socket.sendTurn(next.payload, clientMessageID: next.clientMessageID) else {
-            // 本地通道尚未接受时放回队首；连接恢复后仍按原顺序派发。
-            queuedRunningTurnsBySessionID[sessionID, default: []].insert(next, at: 0)
-            queuedTurnDispatchInFlightSessionIDs.remove(sessionID)
-            conversationStore.updateSendStatus(
-                clientMessageID: next.clientMessageID,
-                sessionID: sessionID,
-                status: .local
-            )
-            clearForegroundActivity(sessionID: sessionID)
-            setErrorMessage("排队消息发送失败：WebSocket 未连接")
+        }) else {
             return
         }
 
-        // turn/started 可能稍后才到；先把本地状态推进为 running，避免这段窗口内的新输入绕过队列。
-        locallyCompletedSessionIDs.remove(sessionID)
-        updateSession(sessionID) { item in
+        if case .goal(let objective, let tokenBudget) = next.intent {
+            Task { @MainActor [weak self, socket] in
+                guard let self else { return }
+                guard await self.setThreadGoal(
+                    threadID: sessionID,
+                    objective: objective,
+                    status: .active,
+                    tokenBudget: tokenBudget
+                ) else {
+                    self.markQueuedTurnWaitingAfterDefiniteFailure(
+                        clientMessageID: next.clientMessageID,
+                        message: "目标设置失败，尚未发送"
+                    )
+                    return
+                }
+                self.performQueuedTurnSend(next, session: session, socket: socket)
+            }
+        } else {
+            performQueuedTurnSend(next, session: session, socket: socket)
+        }
+    }
+
+    private func performQueuedTurnSend(
+        _ item: QueuedTurnEntry,
+        session: AgentSession,
+        socket: any SessionWebSocketClient
+    ) {
+        guard queuedTurnLocation(clientMessageID: item.clientMessageID) != nil else { return }
+        setForegroundActivity(.waitingForAssistant, sessionID: session.id)
+
+        queuedTurnAwaitingStartSessionIDs.insert(session.id)
+        guard socket.sendTurn(item.payload, clientMessageID: item.clientMessageID) else {
+            queuedTurnAwaitingStartSessionIDs.remove(session.id)
+            markQueuedTurnWaitingAfterDefiniteFailure(
+                clientMessageID: item.clientMessageID,
+                message: "连接尚未就绪，消息仍保留在本机"
+            )
+            clearForegroundActivity(sessionID: session.id)
+            return
+        }
+
+        // 只有传输层接受 turn/start 后才进入 timeline；纯本地等待项只在输入框上方的队列托盘展示。
+        conversationStore.appendLocalUser(
+            item.previewText,
+            sessionID: session.id,
+            clientMessageID: item.clientMessageID,
+            sendStatus: .sending,
+            turnPayload: item.payload,
+            userDelivery: .queued
+        )
+        setSessionListProjection(
+            sessionID: session.id,
+            preview: item.previewText,
+            source: .localUser,
+            clientMessageID: item.clientMessageID
+        )
+
+        // turn/started 可能稍后才到；先把本地状态推进为 running，避免窗口期重复派发下一项。
+        locallyCompletedSessionIDs.remove(session.id)
+        updateSession(session.id) { item in
             item.status = SessionStatus.running.rawValue
             item.pendingApproval = nil
             item.pendingUserInput = nil
         }
-        contextStore.updateStatus(sessionID: sessionID, status: SessionStatus.running.rawValue)
-        freshEmptyHistorySignatureBySessionID.removeValue(forKey: sessionID)
+        contextStore.updateStatus(sessionID: session.id, status: SessionStatus.running.rawValue)
+        freshEmptyHistorySignatureBySessionID.removeValue(forKey: session.id)
         setStatusMessage("排队消息已发送，等待 Codex 开始下一轮")
     }
 
+    private func markQueuedTurnWaitingAfterDefiniteFailure(
+        clientMessageID: ClientMessageID,
+        message: String
+    ) {
+        guard let location = queuedTurnLocation(clientMessageID: clientMessageID) else { return }
+        _ = mutateAndPersistQueuedTurns {
+            guard var queue = queuedRunningTurnsBySessionID[location.sessionID],
+                  queue.indices.contains(location.index) else { return }
+            queue[location.index].dispatchState = .waiting
+            queue[location.index].lastError = message
+            queuedRunningTurnsBySessionID[location.sessionID] = queue
+        }
+        setStatusMessage(message)
+    }
+
     private func hasQueuedGoalTurn(sessionID: SessionID) -> Bool {
-        queuedRunningTurnsBySessionID[sessionID]?.contains(where: \.startsGoal) == true
+        queuedRunningTurnsBySessionID[sessionID]?.contains(where: { $0.intent.startsGoal }) == true
     }
 
     private func cancelQueuedRunningTurns(sessionID: SessionID, markMessagesFailed: Bool) {
-        let queued = queuedRunningTurnsBySessionID.removeValue(forKey: sessionID) ?? []
-        queuedTurnDispatchInFlightSessionIDs.remove(sessionID)
-        queuedTurnExpectedCompletionIDBySessionID.removeValue(forKey: sessionID)
+        let queued = queuedRunningTurnsBySessionID[sessionID] ?? []
+        queuedGuidanceDispatchClientMessageIDs.subtract(queued.map(\.clientMessageID))
+        _ = mutateAndPersistQueuedTurns {
+            setQueuedTurns([], sessionID: sessionID)
+        }
+        stopQueuedSessionMonitoringIfIdle(sessionID: sessionID)
+        queuedTurnAwaitingStartSessionIDs.remove(sessionID)
+        queuedTurnBlockedCompletionIDBySessionID.removeValue(forKey: sessionID)
         guard markMessagesFailed else {
             return
         }
@@ -4389,6 +4997,343 @@ final class SessionStore: ObservableObject {
                 sessionID: sessionID,
                 status: .failed
             )
+        }
+    }
+
+    private func socketForQueuedDispatch(sessionID: SessionID) -> (any SessionWebSocketClient)? {
+        if selectedSessionID == sessionID,
+           connectedSessionID == sessionID,
+           case .connected = webSocketStatus {
+            return webSocket
+        }
+        guard queuedSessionReadyIDs.contains(sessionID) else {
+            return nil
+        }
+        return queuedSessionSockets[sessionID]
+    }
+
+    private func ensureQueuedSessionMonitoring(sessionID: SessionID) {
+        guard queuedRunningTurnsBySessionID[sessionID]?.isEmpty == false,
+              connectionTermination == nil,
+              !appStore.requiresRePairing,
+              appStore.isConfigured,
+              !isAppInBackground,
+              !isNetworkUnavailable,
+              let session = sessionsByID[sessionID]
+        else {
+            return
+        }
+
+        if selectedSessionID == sessionID {
+            if queuedSessionSockets[sessionID] != nil {
+                stopQueuedSessionMonitoring(sessionID: sessionID)
+            }
+            if connectedSessionID != sessionID || webSocket == nil {
+                connectWebSocket(session, replayBufferedEvents: true, allowNonRunning: true)
+            }
+            return
+        }
+        guard queuedSessionSockets[sessionID] == nil else {
+            return
+        }
+
+        let generation = (queuedSessionSocketGenerationByID[sessionID] ?? 0) + 1
+        queuedSessionSocketGenerationByID[sessionID] = generation
+        let socket = sessionWebSocketFactory?(session) ?? webSocketFactory()
+        socket.onStatus = { [weak self] status in
+            Task { @MainActor in
+                guard self?.isCurrentQueuedSessionSocket(sessionID: sessionID, generation: generation) == true else {
+                    return
+                }
+                switch status {
+                case .connected:
+                    self?.queuedSessionReadyIDs.insert(sessionID)
+                    self?.dispatchNextQueuedRunningTurnIfIdle(sessionID: sessionID)
+                case .failed(let message):
+                    self?.queuedSessionReadyIDs.remove(sessionID)
+                    self?.setStatusMessage("待发送队列连接失败：\(message)")
+                    self?.scheduleQueuedSessionReconnect(sessionID: sessionID, generation: generation)
+                case .terminated(let reason):
+                    self?.queuedSessionReadyIDs.remove(sessionID)
+                    self?.terminateConnection(reason)
+                case .disconnected:
+                    self?.queuedSessionReadyIDs.remove(sessionID)
+                    self?.scheduleQueuedSessionReconnect(sessionID: sessionID, generation: generation)
+                case .connecting:
+                    break
+                }
+            }
+        }
+        socket.onEvent = { [weak self] event in
+            Task { @MainActor in
+                guard self?.isCurrentQueuedSessionSocket(sessionID: sessionID, generation: generation) == true else {
+                    return
+                }
+                await self?.applyRuntimeEvent(event, sessionID: sessionID)
+            }
+        }
+        socket.onSendAccepted = { [weak self] clientMessageID in
+            Task { @MainActor in
+                guard self?.isCurrentQueuedSessionSocket(sessionID: sessionID, generation: generation) == true,
+                      let clientMessageID else { return }
+                _ = self?.handleQueuedSendAccepted(clientMessageID: clientMessageID, sessionID: sessionID)
+            }
+        }
+        socket.onSendFailure = { [weak self] clientMessageID, message in
+            Task { @MainActor in
+                guard self?.isCurrentQueuedSessionSocket(sessionID: sessionID, generation: generation) == true,
+                      let clientMessageID else { return }
+                _ = self?.handleQueuedSendFailure(
+                    clientMessageID: clientMessageID,
+                    sessionID: sessionID,
+                    message: message
+                )
+            }
+        }
+        socket.onApprovalDecisionFailure = { _, _ in }
+        socket.onUserInputResponseFailure = { _, _ in }
+        socket.onControlFailure = { _ in }
+        queuedSessionSockets[sessionID] = socket
+        socket.connect(sessionID: sessionID, replayBufferedEvents: true)
+    }
+
+    private func ensureAllQueuedSessionMonitoring() {
+        for sessionID in queuedRunningTurnsBySessionID.keys {
+            ensureQueuedSessionMonitoring(sessionID: sessionID)
+        }
+    }
+
+    private func isCurrentQueuedSessionSocket(sessionID: SessionID, generation: Int) -> Bool {
+        queuedSessionSockets[sessionID] != nil
+            && queuedSessionSocketGenerationByID[sessionID] == generation
+    }
+
+    private func stopQueuedSessionMonitoringIfIdle(sessionID: SessionID) {
+        guard queuedRunningTurnsBySessionID[sessionID]?.isEmpty != false else { return }
+        guard queuedSessionSockets[sessionID] != nil || queuedSessionReconnectTasks[sessionID] != nil else {
+            return
+        }
+        stopQueuedSessionMonitoring(sessionID: sessionID)
+    }
+
+    private func stopQueuedSessionMonitoring(sessionID: SessionID) {
+        markDispatchingQueuedTurnsNeedsConfirmation(
+            sessionID: sessionID,
+            message: "连接已中断，发送结果需要确认"
+        )
+        queuedSessionSocketGenerationByID[sessionID, default: 0] += 1
+        queuedSessionReconnectTasks.removeValue(forKey: sessionID)?.cancel()
+        queuedSessionReadyIDs.remove(sessionID)
+        let socket = queuedSessionSockets.removeValue(forKey: sessionID)
+        socket?.disconnect()
+    }
+
+    private func scheduleQueuedSessionReconnect(sessionID: SessionID, generation: Int) {
+        guard isCurrentQueuedSessionSocket(sessionID: sessionID, generation: generation),
+              queuedRunningTurnsBySessionID[sessionID]?.isEmpty == false else { return }
+        markDispatchingQueuedTurnsNeedsConfirmation(
+            sessionID: sessionID,
+            message: "连接已中断，发送结果需要确认"
+        )
+        let socket = queuedSessionSockets.removeValue(forKey: sessionID)
+        queuedSessionSocketGenerationByID[sessionID, default: generation] += 1
+        socket?.onStatus = nil
+        socket?.disconnect()
+        queuedSessionReconnectTasks[sessionID]?.cancel()
+        queuedSessionReconnectTasks[sessionID] = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.queuedSessionReconnectTasks.removeValue(forKey: sessionID)
+            self.ensureQueuedSessionMonitoring(sessionID: sessionID)
+        }
+    }
+
+    private func stopAllQueuedSessionMonitoring() {
+        let sessionIDs = Set(queuedSessionSockets.keys).union(queuedSessionReconnectTasks.keys)
+        for sessionID in sessionIDs {
+            stopQueuedSessionMonitoring(sessionID: sessionID)
+        }
+    }
+
+    private func markDispatchingQueuedTurnsNeedsConfirmation(
+        sessionID: SessionID,
+        message: String
+    ) {
+        // 当前连接退役后，即使 turn/start 已 accepted，也可能错过紧随其后的 started；
+        // 清掉仅属于该连接的门闩，恢复时交给 REST 快照重新判定 active turn。
+        queuedTurnAwaitingStartSessionIDs.remove(sessionID)
+        queuedTurnBlockedCompletionIDBySessionID.removeValue(forKey: sessionID)
+        guard queuedRunningTurnsBySessionID[sessionID]?.contains(where: {
+            $0.dispatchState == .dispatching
+        }) == true else {
+            return
+        }
+        _ = mutateAndPersistQueuedTurns {
+            guard var queue = queuedRunningTurnsBySessionID[sessionID] else { return }
+            for index in queue.indices where queue[index].dispatchState == .dispatching {
+                queue[index].dispatchState = .needsConfirmation
+                queue[index].lastError = message
+            }
+            queuedRunningTurnsBySessionID[sessionID] = queue
+        }
+    }
+
+    @discardableResult
+    private func handleQueuedSendAccepted(
+        clientMessageID: ClientMessageID,
+        sessionID: SessionID
+    ) -> Bool {
+        guard let location = queuedTurnLocation(clientMessageID: clientMessageID),
+              location.sessionID == sessionID,
+              let item = queuedRunningTurnsBySessionID[sessionID]?[location.index],
+              item.dispatchState == .dispatching
+        else {
+            return false
+        }
+        let wasGuidance = queuedGuidanceDispatchClientMessageIDs.remove(clientMessageID) != nil
+
+        guard mutateAndPersistQueuedTurns({
+            guard var queue = queuedRunningTurnsBySessionID[sessionID],
+                  queue.indices.contains(location.index) else { return }
+            queue.remove(at: location.index)
+            if !wasGuidance {
+                let blockedCompletionID = queuedTurnBlockedCompletionIDBySessionID[sessionID]
+                for index in queue.indices where queue[index].dispatchState == .waiting {
+                    queue[index].waitsForAcceptedTurnStart = true
+                    queue[index].blockedCompletionID = blockedCompletionID
+                    queue[index].expectedTurnID = nil
+                }
+            }
+            setQueuedTurns(queue, sessionID: sessionID)
+        }) else {
+            return true
+        }
+        conversationStore.updateSendStatus(
+            clientMessageID: clientMessageID,
+            sessionID: sessionID,
+            status: .sent
+        )
+        conversationStore.compactTurnPayloadAfterSendAccepted(
+            clientMessageID: clientMessageID,
+            sessionID: sessionID
+        )
+        stopQueuedSessionMonitoringIfIdle(sessionID: sessionID)
+        return true
+    }
+
+    @discardableResult
+    private func handleQueuedSendFailure(
+        clientMessageID: ClientMessageID,
+        sessionID: SessionID,
+        message: String
+    ) -> Bool {
+        guard let location = queuedTurnLocation(clientMessageID: clientMessageID),
+              location.sessionID == sessionID,
+              queuedRunningTurnsBySessionID[sessionID]?[location.index].dispatchState == .dispatching
+        else {
+            return false
+        }
+        queuedGuidanceDispatchClientMessageIDs.remove(clientMessageID)
+        _ = mutateAndPersistQueuedTurns {
+            guard var queue = queuedRunningTurnsBySessionID[sessionID],
+                  queue.indices.contains(location.index) else { return }
+            queue[location.index].dispatchState = .needsConfirmation
+            queue[location.index].lastError = "发送结果不确定：\(message)"
+            queuedRunningTurnsBySessionID[sessionID] = queue
+        }
+        conversationStore.updateSendStatus(
+            clientMessageID: clientMessageID,
+            sessionID: sessionID,
+            status: .failed
+        )
+        clearForegroundActivity(sessionID: sessionID)
+        queuedTurnAwaitingStartSessionIDs.remove(sessionID)
+        queuedTurnBlockedCompletionIDBySessionID.removeValue(forKey: sessionID)
+        setErrorMessage("待发送消息结果不确定，请确认后重试：\(message)")
+        return true
+    }
+
+    private func reconcilePersistedQueuedTurns() async {
+        guard !queuedRunningTurnsBySessionID.isEmpty,
+              connectionTermination == nil,
+              !appStore.requiresRePairing,
+              !isNetworkUnavailable
+        else {
+            return
+        }
+        let client: any SessionStoreAPIClient
+        do {
+            client = try clientFactory()
+        } catch {
+            return
+        }
+
+        // 每个有待发项的 thread 只做一次有界快照/历史核对。这里宁可要求用户确认重试，
+        // 也不在 client_message_id 是否已落库不明确时盲目重放。
+        for sessionID in Array(queuedRunningTurnsBySessionID.keys) {
+            var authoritativeSession = sessionsByID[sessionID]
+            if authoritativeSession == nil {
+                do {
+                    let response = try await client.session(id: sessionID, afterSeq: replayWatermark(for: sessionID))
+                    let aligned = session(response.session, in: nil)
+                    upsert(aligned)
+                    authoritativeSession = aligned
+                } catch {
+                    continue
+                }
+            }
+
+            let ambiguousIDs = Set(
+                (queuedRunningTurnsBySessionID[sessionID] ?? [])
+                    .filter { $0.dispatchState == .needsConfirmation }
+                    .map(\.clientMessageID)
+            )
+            if !ambiguousIDs.isEmpty,
+               let page = try? await client.messagesPage(
+                    sessionID: sessionID,
+                    before: nil,
+                    limit: 60,
+                    loadMode: .full
+               ) {
+                let deliveredIDs = Set(page.messages.compactMap(\.clientMessageID)).intersection(ambiguousIDs)
+                if !deliveredIDs.isEmpty {
+                    _ = mutateAndPersistQueuedTurns {
+                        guard let queue = queuedRunningTurnsBySessionID[sessionID] else { return }
+                        setQueuedTurns(
+                            queue.filter { !deliveredIDs.contains($0.clientMessageID) },
+                            sessionID: sessionID
+                        )
+                    }
+                }
+            }
+
+            guard let authoritativeSession,
+                  queuedRunningTurnsBySessionID[sessionID]?.first?.dispatchState == .waiting else {
+                ensureQueuedSessionMonitoring(sessionID: sessionID)
+                continue
+            }
+            _ = mutateAndPersistQueuedTurns {
+                guard var queue = queuedRunningTurnsBySessionID[sessionID] else { return }
+                for index in queue.indices where queue[index].dispatchState == .waiting {
+                    if let activeTurnID = authoritativeSession.activeTurnID {
+                        // 权威快照已确认上一条真正开始，持久化门闩可以转成具体 turn 等待。
+                        queue[index].expectedTurnID = activeTurnID
+                        queue[index].waitsForAcceptedTurnStart = nil
+                        queue[index].blockedCompletionID = nil
+                    } else if queue[index].waitsForAcceptedTurnStart != true {
+                        // 普通等待项在权威快照 idle 时可恢复派发；accepted-but-not-started
+                        // 门闩仍等待事件回放，避免瞬时 idle 把下一条注入尚未显现的 turn。
+                        queue[index].expectedTurnID = nil
+                    }
+                }
+                queuedRunningTurnsBySessionID[sessionID] = queue
+            }
+            ensureQueuedSessionMonitoring(sessionID: sessionID)
+            dispatchNextQueuedRunningTurnIfIdle(sessionID: sessionID)
         }
     }
 
@@ -4547,11 +5492,18 @@ final class SessionStore: ObservableObject {
         }
 
         cancelWebSocketReconnect(resetAttempts: false)
+        stopAllQueuedSessionMonitoring()
         webSocketConnectionGeneration += 1
         let socket = webSocket
         webSocket = nil
         connectedSessionID = nil
         socket?.disconnect()
+        if let reconnectSessionID {
+            markDispatchingQueuedTurnsNeedsConfirmation(
+                sessionID: reconnectSessionID,
+                message: "App 已进入后台，发送结果需要确认"
+            )
+        }
         // iOS 可能在后台直接挂起 URLSession，未必及时回调断线。主动退役连接可避免回前台
         // 仍被旧 `.connected` 状态挡住；这里不清消息、排队 turn、审批或补充信息状态。
         setWebSocketStatus(.disconnected)
@@ -4587,6 +5539,7 @@ final class SessionStore: ObservableObject {
         // 回前台同样可能赶上 gateway 还没恢复；做几秒的高频重试，避免单次失败后又卡到下次切换。
         // 正常情况下首次 refreshAll 就成功（errorMessage 为 nil），立即返回，不会有额外开销。
         await refreshUntilLoaded(maxWait: 10, autoAttach: true)
+        ensureAllQueuedSessionMonitoring()
 
         guard connectionTermination == nil,
               !appStore.requiresRePairing,
@@ -6667,6 +7620,12 @@ final class SessionStore: ObservableObject {
                 guard self?.isCurrentWebSocketConnection(sessionID: session.id, generation: connectionGeneration) == true else {
                     return
                 }
+                if self?.handleQueuedSendAccepted(
+                    clientMessageID: clientMessageID,
+                    sessionID: session.id
+                ) == true {
+                    return
+                }
                 self?.conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .sent)
                 self?.conversationStore.compactTurnPayloadAfterSendAccepted(clientMessageID: clientMessageID, sessionID: session.id)
             }
@@ -6677,11 +7636,17 @@ final class SessionStore: ObservableObject {
                     return
                 }
                 if let clientMessageID {
+                    if self?.handleQueuedSendFailure(
+                        clientMessageID: clientMessageID,
+                        sessionID: session.id,
+                        message: message
+                    ) == true {
+                        return
+                    }
                     guard self?.conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed) == true else {
                         return
                     }
                 }
-                self?.queuedTurnDispatchInFlightSessionIDs.remove(session.id)
                 self?.clearForegroundActivity(sessionID: session.id)
                 self?.setErrorMessage("发送失败：\(message)")
             }
@@ -6790,6 +7755,7 @@ final class SessionStore: ObservableObject {
             webSocketReconnectAttemptBySessionID.removeValue(forKey: sessionID)
             setWebSocketStatus(.connected)
             setErrorMessage(nil)
+            dispatchNextQueuedRunningTurnIfIdle(sessionID: sessionID)
         case .failed(let message):
             if isNetworkUnavailable {
                 suspendWebSocketForNetworkLoss(sessionID: sessionID)
@@ -6802,6 +7768,10 @@ final class SessionStore: ObservableObject {
                 connectedSessionID = nil
                 webSocket = nil
             }
+            markDispatchingQueuedTurnsNeedsConfirmation(
+                sessionID: sessionID,
+                message: "连接已中断，发送结果需要确认"
+            )
             conversationStore.markSendingUserMessagesFailed(sessionID: sessionID)
             clearPendingApprovalDecisions(sessionID: sessionID)
             clearPendingUserInputResponses(sessionID: sessionID)
@@ -6825,6 +7795,10 @@ final class SessionStore: ObservableObject {
                 connectedSessionID = nil
                 webSocket = nil
             }
+            markDispatchingQueuedTurnsNeedsConfirmation(
+                sessionID: sessionID,
+                message: "连接已中断，发送结果需要确认"
+            )
             conversationStore.markSendingUserMessagesFailed(sessionID: sessionID)
             clearPendingApprovalDecisions(sessionID: sessionID)
             clearForegroundActivity(sessionID: sessionID)
@@ -6859,6 +7833,13 @@ final class SessionStore: ObservableObject {
         networkRecoveryTask = nil
         cancelWebSocketReconnect(resetAttempts: true)
         webSocketConnectionGeneration += 1
+        if let connectedSessionID {
+            markDispatchingQueuedTurnsNeedsConfirmation(
+                sessionID: connectedSessionID,
+                message: "连接凭据已失效，发送结果需要确认"
+            )
+        }
+        stopAllQueuedSessionMonitoring()
         let socket = webSocket
         webSocket = nil
         connectedSessionID = nil
@@ -6889,6 +7870,10 @@ final class SessionStore: ObservableObject {
         connectedSessionID = nil
         socket?.disconnect()
         if let previousSessionID {
+            markDispatchingQueuedTurnsNeedsConfirmation(
+                sessionID: previousSessionID,
+                message: "连接已中断，发送结果需要确认"
+            )
             conversationStore.markSendingUserMessagesFailed(sessionID: previousSessionID)
         }
         pendingApprovalDecisionIDsBySessionID.removeAll()
@@ -7075,13 +8060,20 @@ final class SessionStore: ObservableObject {
         applyEventReducerOutput(output)
         if case .turnStarted(let metadata) = event {
             let id = metadata.sessionID ?? sessionID
-            let wasQueuedDispatchInFlight = queuedTurnDispatchInFlightSessionIDs.remove(id) != nil
-            if wasQueuedDispatchInFlight,
-               queuedRunningTurnsBySessionID[id]?.isEmpty == false,
-               queuedTurnExpectedCompletionIDBySessionID[id] == nil,
-               let turnID = metadata.turnID {
-                // 第一条排队消息已经启动；后续消息从现在起只等待这个新 turn 完成。
-                queuedTurnExpectedCompletionIDBySessionID[id] = turnID
+            if let turnID = metadata.turnID {
+                queuedTurnAwaitingStartSessionIDs.remove(id)
+                queuedTurnBlockedCompletionIDBySessionID.removeValue(forKey: id)
+                queuedTurnStartedIDBySessionID[id] = turnID
+                // 第一条已派发时，后续队列项统一改为等待这个新 turn；不能继续绑定旧完成事件。
+                _ = mutateAndPersistQueuedTurns {
+                    guard var queue = queuedRunningTurnsBySessionID[id] else { return }
+                    for index in queue.indices where queue[index].dispatchState == .waiting {
+                        queue[index].expectedTurnID = turnID
+                        queue[index].waitsForAcceptedTurnStart = nil
+                        queue[index].blockedCompletionID = nil
+                    }
+                    queuedRunningTurnsBySessionID[id] = queue
+                }
             }
         }
         if case .turnCompleted(let metadata) = event {
@@ -7089,12 +8081,49 @@ final class SessionStore: ObservableObject {
             if let projectID = sessionsByID[id]?.projectID {
                 scheduleSessionListReconciliation(projectID: projectID)
             }
-            if let completedTurnID = metadata.turnID,
-               queuedTurnExpectedCompletionIDBySessionID[id] == completedTurnID {
-                // 只有明确完成了入队时绑定的 turn，才能启动真正的下一轮。
-                queuedTurnExpectedCompletionIDBySessionID.removeValue(forKey: id)
-                queuedTurnDispatchInFlightSessionIDs.remove(id)
-                dispatchNextQueuedRunningTurnIfIdle(sessionID: id)
+            if let completedTurnID = metadata.turnID {
+                let hasPersistedAcceptedTurnBarrier = queuedRunningTurnsBySessionID[id]?.contains(where: {
+                    $0.dispatchState == .waiting
+                        && $0.waitsForAcceptedTurnStart == true
+                        && $0.blockedCompletionID == completedTurnID
+                }) == true
+                let isRepeatedCompletionWhileAwaitingStart = hasPersistedAcceptedTurnBarrier
+                    || (queuedTurnAwaitingStartSessionIDs.contains(id)
+                        && queuedTurnBlockedCompletionIDBySessionID[id] == completedTurnID)
+                if !isRepeatedCompletionWhileAwaitingStart {
+                    let completedBeforeObservedStart = queuedTurnAwaitingStartSessionIDs.remove(id) != nil
+                    queuedTurnBlockedCompletionIDBySessionID.removeValue(forKey: id)
+                    // 只解除明确绑定到本次完成 turn 的等待项。dispatching / needsConfirmation
+                    // 绝不能被完成事件自动重放，否则断线窗口会制造重复消息。
+                    _ = mutateAndPersistQueuedTurns {
+                        guard var queue = queuedRunningTurnsBySessionID[id] else { return }
+                        if completedBeforeObservedStart {
+                            for index in queue.indices where queue[index].dispatchState == .waiting {
+                                queue[index].expectedTurnID = completedTurnID
+                            }
+                        }
+                        for index in queue.indices
+                        where queue[index].dispatchState == .waiting
+                            && queue[index].waitsForAcceptedTurnStart == true {
+                            queue[index].waitsForAcceptedTurnStart = nil
+                            queue[index].blockedCompletionID = nil
+                            queue[index].expectedTurnID = completedTurnID
+                        }
+                        for index in queue.indices
+                        where queue[index].dispatchState == .waiting
+                            && queue[index].expectedTurnID == completedTurnID {
+                            queue[index].expectedTurnID = nil
+                        }
+                        queuedRunningTurnsBySessionID[id] = queue
+                    }
+                    queuedTurnStartedIDBySessionID.removeValue(forKey: id)
+                    if queuedRunningTurnsBySessionID[id]?.first?.dispatchState == .waiting,
+                       queuedRunningTurnsBySessionID[id]?.first?.waitsForAcceptedTurnStart != true,
+                       queuedRunningTurnsBySessionID[id]?.first?.expectedTurnID == nil {
+                        queuedTurnBlockedCompletionIDBySessionID[id] = completedTurnID
+                    }
+                    dispatchNextQueuedRunningTurnIfIdle(sessionID: id)
+                }
             }
         }
         await scheduleRuntimeNotificationIfNeeded(runtimeNotification)
@@ -7110,10 +8139,6 @@ final class SessionStore: ObservableObject {
         let sessionID = metadata.sessionID ?? fallbackSessionID
         if let activeTurnID = sessionsByID[sessionID]?.activeTurnID,
            activeTurnID != completedTurnID {
-            return true
-        }
-        if let expectedTurnID = queuedTurnExpectedCompletionIDBySessionID[sessionID],
-           expectedTurnID != completedTurnID {
             return true
         }
         return false
@@ -7956,9 +8981,12 @@ final class SessionStore: ObservableObject {
         }
         // endpoint 切换后 session/project ID 可能重复；旧 Mac 的草稿不能恢复到新连接。
         composerDraftCache.removeAll()
+        stopAllQueuedSessionMonitoring()
         queuedRunningTurnsBySessionID.removeAll()
-        queuedTurnDispatchInFlightSessionIDs.removeAll()
-        queuedTurnExpectedCompletionIDBySessionID.removeAll()
+        queuedTurnStartedIDBySessionID.removeAll()
+        queuedTurnAwaitingStartSessionIDs.removeAll()
+        queuedTurnBlockedCompletionIDBySessionID.removeAll()
+        queuedGuidanceDispatchClientMessageIDs.removeAll()
         setSelectedSessionID(nil)
         setSelectedProjectID(nil)
         setProjectsIfChanged([])

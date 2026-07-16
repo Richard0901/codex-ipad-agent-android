@@ -598,9 +598,10 @@ struct ConversationTimelineView: View {
             guard retriesAfterLayout else {
                 return
             }
-            // 首次挂载、Markdown 排版和 List 快照可能分多个布局周期完成。
-            // 分两次重锚；用户一旦主动上翻，generation 检查会立刻停止后续滚动。
-            for delay in [120_000_000, 320_000_000] as [UInt64] {
+            // 首次挂载、Markdown 排版和 iOS 27 List 快照可能分多个布局周期完成。
+            // 长列表在 320ms 后仍可能再结算一次行高，因此补一次较晚重锚；
+            // 用户一旦主动上翻，generation 检查会立刻停止后续滚动。
+            for delay in [120_000_000, 320_000_000, 900_000_000] as [UInt64] {
                 try? await Task.sleep(nanoseconds: delay)
                 guard !Task.isCancelled,
                       tailScrollAttemptGeneration == attemptGeneration,

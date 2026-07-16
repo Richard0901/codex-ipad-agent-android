@@ -1293,7 +1293,7 @@ private struct InitialConnectionSettingsSections: View {
 
     private func deleteConnectionProfile(id: String) {
         do {
-            try appStore.deleteConnectionProfile(id: id)
+            try sessionStore.deleteConnectionProfile(id: id)
             localError = nil
         } catch {
             localError = error.localizedDescription

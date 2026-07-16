@@ -31,7 +31,7 @@ struct ConversationLayout: Equatable {
         // 居中的宽度上限同时缩短正文行长，并给系统返回手势留出清晰的边缘空间。
         composerMaxWidth = isWideCompact
             ? min(680, composerAvailableWidth)
-            : (isCompactWidth ? .infinity : min(820, max(360, composerAvailableWidth)))
+            : (isCompactWidth ? .infinity : min(940, max(360, composerAvailableWidth)))
         composerTopPadding = isCompactWidth ? 10 : 12
         // safeAreaInset 已经负责系统手势区；这里只保留卡片与安全区之间的轻量呼吸感，
         // 避免两层底距叠加后让输入卡看起来悬得过高。

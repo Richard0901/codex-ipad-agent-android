@@ -669,22 +669,15 @@ struct OpenWorkspaceSheet: View {
                     }
                 }
 
-                Button {
+                WorkspaceOpenCurrentDirectoryButton(
+                    directoryName: currentDirectoryName,
+                    isOpening: isOpening,
+                    isDisabled: browsePath == nil || isOpening || isBrowsing
+                ) {
                     if let browsePath {
                         Task { await open(path: browsePath) }
                     }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                        Text(isOpening ? "正在打开" : "打开当前目录")
-                        Spacer(minLength: 0)
-                    }
-                    .font(themeStore.uiFont(size: 15, weight: .semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
-                .disabled(browsePath == nil || isOpening || isBrowsing)
             }
             .padding(.vertical, 4)
         } header: {
@@ -883,6 +876,65 @@ struct OpenWorkspaceSheet: View {
             return "“\(path)”还不在已授权范围内。默认浏览授权根是用户 Home；如改过配置，请在本地开发环境中调整 browse_roots（或 AGENTD_BROWSE_ROOTS）后重试。"
         }
         return message
+    }
+}
+
+struct WorkspaceOpenCurrentDirectoryButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var themeStore: ThemeStore
+
+    let directoryName: String
+    let isOpening: Bool
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let tokens = themeStore.tokens(for: colorScheme)
+
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: "folder.badge.plus")
+                    .font(themeStore.uiFont(size: 18, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        tokens.primaryActionForeground.opacity(0.15),
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isOpening ? "正在打开工作区…" : "打开为工作区")
+                        .font(themeStore.uiFont(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                    Text(isOpening ? directoryName : "使用当前文件夹开始工作")
+                        .font(themeStore.uiFont(size: 12))
+                        .foregroundStyle(tokens.primaryActionForeground.opacity(0.78))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                if isOpening {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(tokens.primaryActionForeground)
+                } else {
+                    Image(systemName: "arrow.right")
+                        .font(themeStore.uiFont(size: 13, weight: .bold))
+                        .accessibilityHidden(true)
+                }
+            }
+            .foregroundStyle(tokens.primaryActionForeground)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        }
+        .buttonStyle(.borderedProminent)
+        // 矩形轮廓与文件夹图标共同强化“动作”语义，避免胶囊长条被误认成已选状态。
+        .buttonBorderShape(.roundedRectangle(radius: 12))
+        .controlSize(.large)
+        .tint(tokens.primaryAction)
+        .disabled(isDisabled)
+        .accessibilityLabel(isOpening ? "正在打开工作区" : "打开当前文件夹为工作区")
+        .accessibilityHint("使用当前位置开始工作")
     }
 }
 

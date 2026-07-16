@@ -452,4 +452,12 @@ final class ResponsiveLayoutTests: XCTestCase {
         XCTAssertEqual(layout.composerTopPadding, 12)
         XCTAssertEqual(layout.composerBottomPadding, 10)
     }
+
+    func testConversationLayoutGivesWidePadComposerMoreWorkingRoom() {
+        let layout = ConversationLayout(containerWidth: 1_180, horizontalSizeClass: .regular)
+
+        XCTAssertEqual(layout.composerAvailableWidth, 1_132)
+        XCTAssertEqual(layout.composerMaxWidth, 940)
+        XCTAssertGreaterThan(layout.composerMaxWidth, layout.assistantBubbleMaxWidth)
+    }
 }

@@ -75,7 +75,7 @@ actor CodexAppServerSessionRuntime {
     private var threadsResumedOnConnection: Set<SessionID> = []
     private var bufferedEventsBySessionID: [SessionID: [AgentEvent]] = [:]
     private var eventContinuationsBySessionID: [
-        SessionID: (token: UUID, continuation: AsyncStream<AgentEvent>.Continuation)
+        SessionID: [UUID: AsyncStream<AgentEvent>.Continuation]
     ] = [:]
     private var pendingApprovalRequestsByID: [String: CodexAppServerServerRequest] = [:]
     private var pendingUserInputRequestsByID: [String: CodexAppServerServerRequest] = [:]
@@ -1136,9 +1136,14 @@ actor CodexAppServerSessionRuntime {
         }
         if let continuation {
             let token = UUID()
-            eventContinuationsBySessionID[sessionID] = (token, continuation)
-            for event in bufferedEvents(sessionID: sessionID, replayPolicy: replayPolicy) {
-                continuation.yield(event)
+            let isFirstSubscriber = eventContinuationsBySessionID[sessionID]?.isEmpty != false
+            eventContinuationsBySessionID[sessionID, default: [:]][token] = continuation
+            // backlog 只能被第一个订阅者消费一次；之后同 thread 的可见页面与后台队列
+            // 都从实时扇出接收事件，避免两个 SessionWebSocketClient 互相顶掉 continuation。
+            if isFirstSubscriber {
+                for event in bufferedEvents(sessionID: sessionID, replayPolicy: replayPolicy) {
+                    continuation.yield(event)
+                }
             }
             continuation.onTermination = { [weak self] _ in
                 Task {
@@ -1539,10 +1544,10 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func detachEvents(sessionID: SessionID, token: UUID) {
-        guard eventContinuationsBySessionID[sessionID]?.token == token else {
-            return
+        eventContinuationsBySessionID[sessionID]?.removeValue(forKey: token)
+        if eventContinuationsBySessionID[sessionID]?.isEmpty == true {
+            eventContinuationsBySessionID.removeValue(forKey: sessionID)
         }
-        eventContinuationsBySessionID.removeValue(forKey: sessionID)
     }
 
     private func ensureConfig(forceRefresh: Bool = false) async throws -> CodexAppServerConfigResponse {
@@ -1668,7 +1673,7 @@ actor CodexAppServerSessionRuntime {
     }
 
     private func finishAttachedEventStreams() {
-        let continuations = eventContinuationsBySessionID.values.map { $0.continuation }
+        let continuations = eventContinuationsBySessionID.values.flatMap { $0.values }
         eventContinuationsBySessionID.removeAll(keepingCapacity: true)
         for continuation in continuations {
             continuation.finish()
@@ -2030,8 +2035,10 @@ actor CodexAppServerSessionRuntime {
         guard let sessionID else {
             return
         }
-        if let entry = eventContinuationsBySessionID[sessionID] {
-            entry.continuation.yield(event)
+        if let continuations = eventContinuationsBySessionID[sessionID], !continuations.isEmpty {
+            for continuation in continuations.values {
+                continuation.yield(event)
+            }
         } else {
             bufferedEventsBySessionID[sessionID, default: []].append(event)
         }
