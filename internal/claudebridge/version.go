@@ -9,9 +9,9 @@ import (
 
 const (
 	MinimumVersion = "0.2.0"
-	// 兼容修复尚未形成可引用的远端 SHA，不能把旧 main 伪装成可升级版本；
-	// 当前只允许从已审阅的 0.2.0 源码安装，提交后再替换为固定 --rev 命令。
-	InstallHint = "cargo install --path crates/claude-bridge --locked --force"
+	// 固定到已审阅并发布的 commit，避免远端 main 变化后安装到未经验证的 bridge。
+	BridgeRevision = "c50256dc9cc71f5130a176e32bb6fd33b1e06f74"
+	InstallHint    = "cargo install --git https://github.com/gaixianggeng/alleycat.git --rev " + BridgeRevision + " --locked --force alleycat-claude-bridge"
 )
 
 var semanticVersionPattern = regexp.MustCompile(`(?:^|[^0-9])v?([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?(?:$|[^0-9])`)
@@ -49,9 +49,9 @@ func Compare(left string, right string) int {
 
 func UpgradeMessage(version string) string {
 	if strings.TrimSpace(version) == "" {
-		return fmt.Sprintf("Claude bridge 未返回标准版本；需要 >= %s。请在 alleycat 兼容版源码根目录执行：%s", MinimumVersion, InstallHint)
+		return fmt.Sprintf("Claude bridge 未返回标准版本；需要 >= %s。请执行：%s", MinimumVersion, InstallHint)
 	}
-	return fmt.Sprintf("Claude bridge %s 过旧；需要 >= %s。请在 alleycat 兼容版源码根目录执行：%s", version, MinimumVersion, InstallHint)
+	return fmt.Sprintf("Claude bridge %s 过旧；需要 >= %s。请执行：%s", version, MinimumVersion, InstallHint)
 }
 
 func numericParts(version string) ([3]int, bool) {

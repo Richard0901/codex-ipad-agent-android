@@ -202,16 +202,17 @@ agentd serve --config /path/to/config.json
 
 方案：`agentd` 通过外部 `alleycat-claude-bridge` 子进程把 iPad 的 app-server JSON-RPC WebSocket 转成 Claude bridge 的 stdio JSONL。bridge 不并入本仓库，属于可选依赖；launchd/Homebrew service 的 `PATH` 很窄，建议 `claude.bridge_bin` 写绝对路径。
 
-当前要求 `alleycat-claude-bridge >= 0.2.0`。旧版本和没有标准 `--version` 输出的 bridge 会被 `agentd` 拒绝，避免把“能启动”误判为“协议兼容”。兼容修复形成已审阅的远端 commit 前，不使用仍指向 `0.1.0` 的旧 main 冒充兼容版本；开发环境从已审阅的本地源码安装，安装后重启 `agentd`：
+当前要求 `alleycat-claude-bridge >= 0.2.0`。旧版本和没有标准 `--version` 输出的 bridge 会被 `agentd` 拒绝，避免把“能启动”误判为“协议兼容”。使用下面的不可变 commit 安装已审阅版本，安装后把 `command -v` 返回的绝对路径写入 `claude.bridge_bin`，再重启 `agentd`：
 
 ```bash
-cd /path/to/reviewed/alleycat-source
-cargo install --path crates/claude-bridge --locked --force
+cargo install --git https://github.com/gaixianggeng/alleycat.git \
+  --rev c50256dc9cc71f5130a176e32bb6fd33b1e06f74 \
+  --locked --force alleycat-claude-bridge
 
+command -v alleycat-claude-bridge
+agentd restart
 agentd doctor
 ```
-
-正式发布前必须把上述本地安装替换为 `cargo install --git <repo> --rev <reviewed-sha> --locked --force alleycat-claude-bridge`，并让 README、doctor 提示和发布清单使用同一个 SHA。
 
 配置示例：
 

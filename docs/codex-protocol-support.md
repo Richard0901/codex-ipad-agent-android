@@ -30,7 +30,7 @@ Go Gateway 当前开放 25 个 client frame method，其中 `initialized` 是 no
 
 Claude 实验通道使用更小的独立 allowlist。`alleycat-claude-bridge >= 0.2.0` 时额外开放 `account/rateLimits/read`，请求参数固定改写为 `{}`。Claude Code 2.1.92 headless `stream-json` 不执行 statusline sink，bridge 没有事件缓存时返回 `rateLimits.availability=unavailable`、`unavailableReason=headless_statusline_unavailable`；收到官方 `rate_limit_event` 后返回 `availability=partial`、`unavailableReason=usage_percentage_unavailable`，只映射真实存在的 `rateLimitReachedType`，以及对应 `primary`（5h）或 `secondary`（7d）的 `resetsAt/windowDurationMins`，不补 `usedPercent=0`。Gateway 不访问 Anthropic 私有接口或凭证文件。
 
-Claude bridge 必须通过标准 `--version` 门禁才会被标记为可用；审批反向请求的响应和随后到达的 `serverRequest/resolved` notification 均透明透传。bridge 版本缺失、低于 `0.2.0` 或运行中退出时，Gateway 返回结构化错误并终止等待。
+Claude bridge 必须通过标准 `--version` 门禁才会被标记为可用；审批反向请求的响应和随后到达的 `serverRequest/resolved` notification 均透明透传。bridge 版本缺失、低于 `0.2.0` 或运行中退出时，Gateway 返回结构化错误并终止等待。发布安装固定到已审阅 revision `c50256dc9cc71f5130a176e32bb6fd33b1e06f74`：`cargo install --git https://github.com/gaixianggeng/alleycat.git --rev c50256dc9cc71f5130a176e32bb6fd33b1e06f74 --locked --force alleycat-claude-bridge`。
 
 `thread/search` 是跨工作区全文搜索，额外执行以下边界：
 

@@ -1,6 +1,9 @@
 package claudebridge
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseVersion(t *testing.T) {
 	tests := []struct {
@@ -31,5 +34,14 @@ func TestIsSupported(t *testing.T) {
 	}
 	if IsSupported("0.2.0-beta.1") {
 		t.Fatal("最低正式版门禁不能被预发布版本绕过")
+	}
+}
+
+func TestInstallHintPinsReviewedRevision(t *testing.T) {
+	if !strings.Contains(InstallHint, "https://github.com/gaixianggeng/alleycat.git") {
+		t.Fatalf("安装提示未指向公开 bridge 仓库：%s", InstallHint)
+	}
+	if !strings.Contains(InstallHint, "--rev "+BridgeRevision) {
+		t.Fatalf("安装提示未固定已审阅 revision：%s", InstallHint)
 	}
 }
