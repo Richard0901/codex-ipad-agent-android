@@ -1,6 +1,6 @@
 # Mimi Remote 项目现状与关键决策
 
-更新日期：2026-07-14
+更新日期：2026-07-17
 
 ## 目标
 
@@ -8,7 +8,7 @@
 
 Mimi Remote 的目标是让 iPhone / iPad 安全连接用户自己的 Mac，在明确授权的工作区内远程使用 Codex。项目保持单机优先：不建设云端账号系统，不把代码、Codex 凭证或完整会话托管到开发者服务器。
 
-仓库边界已经拆分：`gaixianggeng/mimi-remote` 使用全新 Git 历史公开 Go 后端、安装脚本和后端文档；`gaixianggeng/codex-ipad-agent` 保持 Private，继续承载 iOS 源码和完整开发历史。后端通过固定白名单脚本从私有主开发仓库单向导出，禁止把包含 iOS 历史的仓库直接改为 Public。
+完整源码仓库 `gaixianggeng/codex-ipad-agent` 使用 MIT License 公开 iOS App、Go 后端、测试和文档。`gaixianggeng/mimi-remote` 继续作为后端公开发布镜像，保留现有 Go Release 和 Homebrew 下载 URL；后端通过固定白名单脚本从完整仓库单向导出，避免在两个仓库手工维护代码。
 
 ## 方案
 
@@ -101,6 +101,7 @@ Mimi TestFlight 使用本机 `git testflight-push`：先推送并核对远端 co
 - [P0 / P1 发布推进清单](p0-p1-roadmap.md)：发布门禁、当前完成度和外部阻断项。
 - [安装、升级与回滚](install-upgrade-rollback.md)：Mac/Linux 安装、凭据备份、升级验证和应急回滚。
 - [iOS README](../ios/MimiRemote/README.md)：iOS 工程结构、构建和验收。
+- [Claude bridge 架构](claude-bridge-architecture.md)：Claude 实验通道的进程生命周期、权限、状态和失败模式。
 - [Tailscale 运维](tailscale-peer-relay-ops.md)：唯一 Endpoint、Peer Relay、验证和回滚。
 - [生产可达性审计](production-reachability-audit.md)：生产主链路与旧代码边界。
 - [功能对照](codex-mac-feature-parity.md)：完整能力、缺口和优先级。

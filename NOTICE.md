@@ -8,7 +8,7 @@
 
 Mimi Remote 是独立开发的第三方客户端。它连接用户自己 Mac 上运行的 `agentd`，再由 `agentd` 连接用户本机的 Codex CLI / app-server 环境。
 
-本项目不隶属于 OpenAI，也没有获得 OpenAI 的赞助、背书或官方授权。`Codex`、`OpenAI` 等名称只用于描述兼容的用户自有工具链。
+本项目不隶属于 OpenAI 或 Anthropic，也没有获得这些公司的赞助、背书或官方授权。`Codex`、`OpenAI`、`Claude`、`Anthropic` 等名称只用于描述兼容的用户自有工具链。
 
 ## 开源许可
 
@@ -43,6 +43,7 @@ Swift Package Manager 依赖：
 运行时外部工具：
 
 - 用户本机自行安装和登录的 Codex CLI / app-server。
+- 用户显式启用实验通道时，自行安装和登录的 Claude Code，以及独立开源仓库提供的 `alleycat-claude-bridge`。
 
 本仓库不打包用户的 Codex 凭证，也不托管第三方服务账号。
 

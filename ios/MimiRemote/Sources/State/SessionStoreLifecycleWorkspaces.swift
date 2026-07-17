@@ -55,32 +55,32 @@ extension SessionStore {
         let debugRateLimit = RateLimitSummary(
             limitName: "Codex",
             planType: "pro",
-            primaryUsedPercent: 62,
-            secondaryUsedPercent: 38,
+            primaryUsedPercent: 42,
+            secondaryUsedPercent: 27,
             primaryResetsAt: Int64(now.addingTimeInterval(60 * 82).timeIntervalSince1970),
             secondaryResetsAt: Int64(now.addingTimeInterval(60 * 60 * 24 * 3).timeIntervalSince1970),
             primaryWindowDurationMins: 300,
             secondaryWindowDurationMins: 10_080,
-            hasCredits: true,
+            hasCredits: false,
             creditsUnlimited: false,
-            creditBalance: "18.40"
+            creditBalance: nil
         )
-        let chatArchive = AgentWorkspace(
-            id: "debug-chat-archive",
-            name: "chat-archive",
-            path: "/Users/demo/code/chat-archive",
-            rootProjectID: "debug-chat-archive",
-            rootProjectName: "chat-archive",
-            rootProjectPath: "/Users/demo/code/chat-archive",
+        let mimiDemo = AgentWorkspace(
+            id: "debug-mimi-demo",
+            name: "mimi-remote",
+            path: "/Users/demo/code/mimi-remote",
+            rootProjectID: "debug-mimi-demo",
+            rootProjectName: "mimi-remote",
+            rootProjectPath: "/Users/demo/code/mimi-remote",
             lastOpenedAt: now.addingTimeInterval(-60 * 8)
         )
-        let ipadAgent = AgentWorkspace(
-            id: "debug-ipad-agent",
-            name: "codex-ipad-agent",
-            path: "/Users/demo/code/codex-ipad-agent",
-            rootProjectID: "debug-ipad-agent",
-            rootProjectName: "codex-ipad-agent",
-            rootProjectPath: "/Users/demo/code/codex-ipad-agent",
+        let sampleApp = AgentWorkspace(
+            id: "debug-sample-app",
+            name: "sample-app",
+            path: "/Users/demo/code/sample-app",
+            rootProjectID: "debug-sample-app",
+            rootProjectName: "sample-app",
+            rootProjectPath: "/Users/demo/code/sample-app",
             lastOpenedAt: now.addingTimeInterval(-60 * 35)
         )
         let selectedSessionID = "debug-session-layout"
@@ -88,59 +88,59 @@ extension SessionStore {
         let sessions = [
             AgentSession(
                 id: selectedSessionID,
-                projectID: chatArchive.id,
-                project: chatArchive.name,
-                dir: chatArchive.path,
-                title: "优化三栏边界和工具按钮",
+                projectID: mimiDemo.id,
+                project: mimiDemo.name,
+                dir: mimiDemo.path,
+                title: "整理开源发布说明",
                 status: SessionStatus.completed.rawValue,
                 source: "debug",
                 runtimeProvider: "codex",
                 resumeID: selectedSessionID,
                 createdAt: now.addingTimeInterval(-60 * 40),
                 updatedAt: now.addingTimeInterval(-60 * 3),
-                preview: "统一左栏、对话区和右侧详情栏的边界，并把操作按钮收成一组。",
+                preview: "核对安装步骤、架构图、隐私边界和公开截图。",
                 rateLimit: debugRateLimit
             ),
             AgentSession(
                 id: runningSessionID,
-                projectID: chatArchive.id,
-                project: chatArchive.name,
-                dir: chatArchive.path,
-                title: "整理会话历史摘要",
+                projectID: mimiDemo.id,
+                project: mimiDemo.name,
+                dir: mimiDemo.path,
+                title: "检查连接恢复测试",
                 status: SessionStatus.running.rawValue,
                 source: "debug",
                 runtimeProvider: "codex",
                 resumeID: runningSessionID,
                 createdAt: now.addingTimeInterval(-60 * 110),
                 updatedAt: now.addingTimeInterval(-60 * 1),
-                preview: "正在检查最近会话的摘要展示和输入区状态。",
+                preview: "正在验证断网恢复、审批和排队消息状态。",
                 activeTurnID: "debug-turn-running"
             ),
             AgentSession(
                 id: "debug-session-workspace",
-                projectID: ipadAgent.id,
-                project: ipadAgent.name,
-                dir: ipadAgent.path,
-                title: "工作区卡片视觉微调",
+                projectID: sampleApp.id,
+                project: sampleApp.name,
+                dir: sampleApp.path,
+                title: "完善示例项目文档",
                 status: SessionStatus.closed.rawValue,
                 source: "debug",
                 runtimeProvider: "codex",
                 resumeID: "debug-session-workspace",
                 createdAt: now.addingTimeInterval(-60 * 180),
                 updatedAt: now.addingTimeInterval(-60 * 28),
-                preview: "卡片等高、选中态和加入会话按钮需要更稳定。"
+                preview: "补充可执行命令、配置示例和故障排查入口。"
             )
         ]
 
         isLoading = false
         setErrorMessage(nil)
         setStatusMessage("Debug UI 样例已加载")
-        setProjectsIfChanged([chatArchive.project, ipadAgent.project])
-        setRecentWorkspacesIfChanged([chatArchive, ipadAgent])
+        setProjectsIfChanged([mimiDemo.project, sampleApp.project])
+        setRecentWorkspacesIfChanged([mimiDemo, sampleApp])
         sessionWorkspaceIDs = nil
-        setExpandedProjectIDs([chatArchive.id])
+        setExpandedProjectIDs([mimiDemo.id])
         replaceSessionsIfChanged(with: sessions, projectID: nil)
-        setSelectedProjectID(chatArchive.id)
+        setSelectedProjectID(mimiDemo.id)
         setSelectedSessionID(appStore.shouldSeedDebugQueuedTurnsUI ? runningSessionID : selectedSessionID)
         if appStore.shouldSeedDebugQueuedTurnsUI {
             // 队列样例需要处于可控的运行中会话，才能同时验收“排队（默认）/引导”切换；
@@ -156,16 +156,16 @@ extension SessionStore {
         queuedRunningTurnsBySessionID[runningSessionID] = [
             QueuedTurnEntry(
                 sessionID: runningSessionID,
-                projectID: chatArchive.id,
-                payload: CodexAppServerTurnPayload(prompt: "当前回复完成后，继续检查排队与引导的提示文案"),
+                projectID: mimiDemo.id,
+                payload: CodexAppServerTurnPayload(prompt: "当前回复完成后，继续检查 README 的构建命令"),
                 clientMessageID: "debug-queued-waiting",
                 intent: .standard,
                 expectedTurnID: "debug-turn-running"
             ),
             QueuedTurnEntry(
                 sessionID: runningSessionID,
-                projectID: chatArchive.id,
-                payload: CodexAppServerTurnPayload(prompt: "确认上一条是否已经送达，再决定是否重试"),
+                projectID: mimiDemo.id,
+                payload: CodexAppServerTurnPayload(prompt: "确认安全扫描完成后，再生成发布摘要"),
                 clientMessageID: "debug-queued-confirmation",
                 intent: .standard,
                 dispatchState: .needsConfirmation,
@@ -180,7 +180,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-user-1",
                 role: "user",
-                content: "帮我把会话页左侧和右侧的边界重新看一下，按钮不要显得零散。",
+                content: "帮我检查这次 README 改动，确认安装步骤和安全边界与代码一致。",
                 createdAt: now.addingTimeInterval(-60 * 18),
                 turnID: "\(sessionID)-turn-1",
                 itemID: "\(sessionID)-item-user-1",
@@ -189,7 +189,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-assistant-1",
                 role: "assistant",
-                content: "我会把维护动作收进统一工具组，并让左右栏使用一致的 sidebar 背景和分割线。左栏空态会放进列表内部，避免和标题或主内容区互相抢位置。",
+                content: "我会核对 Homebrew、源码构建和配对流程，并把 Codex 与 Claude 的运行边界拆开说明。",
                 createdAt: now.addingTimeInterval(-60 * 16),
                 turnID: "\(sessionID)-turn-1",
                 itemID: "\(sessionID)-item-assistant-1",
@@ -199,7 +199,7 @@ extension SessionStore {
                 id: "\(sessionID)-summary-1",
                 role: "system",
                 kind: .reasoningSummary,
-                content: "已完成布局整理：左栏列表内空态、顶部胶囊工具组、右侧详情栏边界统一。",
+                content: "已完成文档核对：安装命令可执行，架构与当前 runtime 选择逻辑一致。",
                 createdAt: now.addingTimeInterval(-60 * 14),
                 turnID: "\(sessionID)-turn-1",
                 itemID: "\(sessionID)-item-summary-1",
@@ -208,7 +208,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-user-2",
                 role: "user",
-                content: "很好，再确认一下没有选中会话和选中会话时都不要出现奇怪的漂浮 icon。",
+                content: "再检查一下截图和示例配置里有没有真实 Token、私有地址或个人目录。",
                 createdAt: now.addingTimeInterval(-60 * 6),
                 turnID: "\(sessionID)-turn-2",
                 itemID: "\(sessionID)-item-user-2",
@@ -217,7 +217,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-assistant-2",
                 role: "assistant",
-                content: "空态会保留一个明确的主行动按钮；有会话时，刷新和右栏入口保持同一组原生 SF Symbol 控件。这样用户能一眼知道哪里是导航、哪里是当前对话、哪里是辅助信息。",
+                content: "截图只使用 /Users/demo 和本地种子数据，配置中的 Token 是占位符；公开门禁也会扫描当前工作树与全部 Git 历史。",
                 createdAt: now.addingTimeInterval(-60 * 4),
                 turnID: "\(sessionID)-turn-2",
                 itemID: "\(sessionID)-item-assistant-2",

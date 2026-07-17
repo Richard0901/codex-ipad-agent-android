@@ -34,7 +34,7 @@ xcuserdata/
 ios/MimiRemote/build/
 ios/MimiRemote/build-test/
 
-# Local implementation design kept out of public releases
+# 本机设计草稿；不是构建或发布所需文件。
 docs/ios-markdown-rendering-design.md
 
 # Logs and temporary files

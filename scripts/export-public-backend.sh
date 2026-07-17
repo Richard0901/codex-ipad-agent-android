@@ -19,7 +19,7 @@ done
 mkdir -p "$TARGET_DIR"
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 if [[ "$TARGET_DIR" == "$ROOT_DIR" || "$TARGET_DIR" == "$ROOT_DIR/"* ]]; then
-  echo "导出失败：目标目录不能是当前私有仓库或其子目录。" >&2
+  echo "导出失败：目标目录不能是完整源码仓库或其子目录。" >&2
   exit 2
 fi
 
@@ -94,11 +94,11 @@ awk '
   }
 ' "$ROOT_DIR/THIRD_PARTY_NOTICES.md" > "$stage/THIRD_PARTY_NOTICES.md"
 
-# 核心逻辑：目标仓库只保留白名单快照和自身 .git，防止私有 iOS 文件或历史被带入公开仓库。
+# 核心逻辑：目标仓库只保留后端发布白名单快照和自身 .git，避免 iOS 与本机发布配置进入后端镜像。
 rsync -a --delete --exclude='.git/' "$stage/" "$TARGET_DIR/"
 
 if [[ -e "$TARGET_DIR/ios" ]] || find "$TARGET_DIR/.github/workflows" -type f -print | grep -Eq 'ios|testflight'; then
-  echo "导出失败：公开快照中出现 iOS 源码或私有发布工作流。" >&2
+  echo "导出失败：后端发布快照中出现 iOS 源码或本机发布工作流。" >&2
   exit 1
 fi
 
