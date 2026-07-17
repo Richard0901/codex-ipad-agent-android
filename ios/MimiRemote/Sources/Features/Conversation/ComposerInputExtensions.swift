@@ -203,12 +203,13 @@ extension ComposerView {
                 enabled ? tokens.primaryAction : tokens.elevatedSurface,
                 in: RoundedRectangle(cornerRadius: 12, style: .continuous)
             )
-            .overlay {
-                if !enabled {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(tokens.border)
-                }
-            }
+            .modifier(
+                ComposerKeycapSurface(
+                    tokens: tokens,
+                    cornerRadius: 12,
+                    usesAccentSurface: enabled
+                )
+            )
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))

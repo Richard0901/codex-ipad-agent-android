@@ -700,6 +700,16 @@ final class ConversationSnapshotTests: XCTestCase {
         )
     }
 
+    func testComposerStatusTrayExpandedWideState() async {
+        // iPad 宽屏展开态必须继续和输入卡共用整条 composer 轨道，防止状态栏退回旧的 680pt 上限。
+        let view = await makeComposerStatusTrayCrowdedView(width: 1024, height: 768, goalExpanded: true)
+
+        assertSnapshot(
+            of: view,
+            as: .image(precision: 0.98, layout: .fixed(width: 1024, height: 768))
+        )
+    }
+
     private func makeComposerStatusTrayCrowdedView(width: CGFloat, height: CGFloat, goalExpanded: Bool = false) async -> some View {
         let project = AgentProject(id: "tray-project", name: "tray-project", path: "/Users/me/code/tray-project")
         let sessionID = "crowded"

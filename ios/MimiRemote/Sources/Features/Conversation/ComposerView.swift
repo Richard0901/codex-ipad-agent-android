@@ -1294,12 +1294,13 @@ struct ComposerView: View {
             isSelected ? tokens.accent : tokens.elevatedSurface,
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
-        .overlay {
-            if !isSelected {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(tokens.border.opacity(0.9), lineWidth: 1)
-            }
-        }
+        .modifier(
+            ComposerKeycapSurface(
+                tokens: tokens,
+                cornerRadius: 12,
+                usesAccentSurface: isSelected
+            )
+        )
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel(accessibilityLabel)
@@ -1346,10 +1347,13 @@ struct ComposerView: View {
                     isGuidedSelected ? tokens.accent.opacity(0.12) : tokens.elevatedSurface,
                     in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(isGuidedSelected ? tokens.accent.opacity(0.42) : tokens.border)
-                }
+                .modifier(
+                    ComposerKeycapSurface(
+                        tokens: tokens,
+                        cornerRadius: 12,
+                        usesAccentSurface: isGuidedSelected
+                    )
+                )
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))

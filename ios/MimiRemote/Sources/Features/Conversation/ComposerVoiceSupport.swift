@@ -27,10 +27,13 @@ struct VoiceMicButton: View {
             .foregroundStyle(tokens.primaryAction)
             .frame(width: 44, height: 44)
             .background(tokens.selectionFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(tokens.border, lineWidth: 1)
-            }
+            .modifier(
+                ComposerKeycapSurface(
+                    tokens: tokens,
+                    cornerRadius: 12,
+                    usesAccentSurface: false
+                )
+            )
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
@@ -66,14 +69,71 @@ struct ComposerPressButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(reduceMotion || !configuration.isPressed ? 1 : 0.96)
-            .opacity(configuration.isPressed ? 0.82 : 1)
+            // 用很小的下沉和阴影收缩模拟键帽行程；不旋转或过度缩放，
+            // 这样连续输入时仍保持稳定、克制的操作反馈。
+            .scaleEffect(reduceMotion || !configuration.isPressed ? 1 : 0.985)
+            .offset(y: reduceMotion || !configuration.isPressed ? 0 : 1.5)
+            .opacity(configuration.isPressed ? 0.94 : 1)
             .animation(
                 reduceMotion
-                    ? .easeOut(duration: 0.08)
-                    : .spring(response: 0.22, dampingFraction: 1),
+                    ? .easeOut(duration: 0.1)
+                    : .spring(response: 0.18, dampingFraction: 1),
                 value: configuration.isPressed
             )
+    }
+}
+
+/// Composer 的按钮共用这一层键帽光影，避免不同入口各自长成不同的拟物风格。
+struct ComposerKeycapSurface: ViewModifier {
+    let tokens: ThemeTokens
+    let cornerRadius: CGFloat
+    let usesAccentSurface: Bool
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
+
+    private var borderColor: Color {
+        if usesAccentSurface {
+            return Color.white.opacity(tokens.resolvedScheme == .light ? 0.34 : 0.22)
+        }
+        return tokens.border.opacity(tokens.resolvedScheme == .light ? 0.88 : 0.96)
+    }
+
+    private var topHighlight: Color {
+        Color.white.opacity(
+            tokens.resolvedScheme == .light
+                ? (usesAccentSurface ? 0.30 : 0.72)
+                : (usesAccentSurface ? 0.18 : 0.12)
+        )
+    }
+
+    private var shadowColor: Color {
+        Color.black.opacity(
+            tokens.resolvedScheme == .light
+                ? (usesAccentSurface ? 0.16 : 0.10)
+                : (usesAccentSurface ? 0.34 : 0.26)
+        )
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                shape.strokeBorder(borderColor, lineWidth: 1)
+            }
+            // 顶部高光配合下方短阴影，让控件看起来像可按下的键帽，
+            // 但不改变文字和图标的对比度。
+            .overlay {
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: [topHighlight, .clear],
+                        startPoint: .top,
+                        endPoint: .center
+                    ),
+                    lineWidth: 1
+                )
+            }
+            .shadow(color: shadowColor, radius: 1.6, y: 1.4)
     }
 }
 

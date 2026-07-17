@@ -289,7 +289,9 @@ struct ComposerStatusTray: View {
             }
         }
         .padding(isGoalExpanded ? 10 : 8)
-        .frame(maxWidth: isGoalExpanded ? 680 : .infinity, alignment: .leading)
+        // 状态栏和输入卡共用同一条 composer 轨道；展开后也不要另设宽度上限，
+        // 否则 iPad 宽屏下会出现上窄下宽、左右边界不一致的视觉断层。
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
