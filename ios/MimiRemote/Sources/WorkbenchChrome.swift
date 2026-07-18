@@ -92,7 +92,7 @@ struct SessionInspectorPresentation: ViewModifier {
                     SessionInspectorView()
                         .toolbar {
                             ToolbarItem(placement: .topBarTrailing) {
-                                Button("完成") {
+                                Button(L10n.text("ui.complete")) {
                                     isPresented = false
                                 }
                             }
@@ -162,15 +162,15 @@ struct AgentWorkbenchTitle: View {
 
     private var primaryText: String {
         if let session = sessionStore.selectedSession {
-            return session.project.isEmpty ? "工作区" : session.project
+            return session.project.isEmpty ? L10n.text("ui.workspace") : session.project
         }
-        return sessionStore.selectedProject?.name ?? "会话"
+        return sessionStore.selectedProject?.name ?? L10n.text("ui.session")
     }
 
     private var secondaryText: String? {
         if let historyProgress {
             // 历史请求没有真实网络进度，标题区只保留轻量状态，避免 32% 这类假进度占据主内容。
-            return "正在\(historyProgress.title)…"
+            return L10n.format("ui.currently_value", historyProgress.title)
         }
         if let session = sessionStore.selectedSession {
             return session.title.isEmpty ? session.dir : session.title

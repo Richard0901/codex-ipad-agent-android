@@ -43,7 +43,7 @@ final class SessionContextStore: ObservableObject {
             environment: SessionContextEnvironment(
                 id: "local",
                 kind: "local",
-                label: "本地",
+                label: L10n.text("ui.local"),
                 cwd: session.dir,
                 provider: session.runtimeProvider ?? session.source,
                 runtimeProvider: session.runtimeProvider

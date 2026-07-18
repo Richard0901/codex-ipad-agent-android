@@ -55,13 +55,13 @@
 		</dict>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>用于通过本机网络或 Tailscale 连接 Mac 上运行的 agentd 服务。</string>
+	<string>Allow Mimi Remote to find and connect to Mimi Mac Assistant (agentd) on your local network or through Tailscale.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>用于扫描 Mac 上 agentd 输出的连接二维码。</string>
+	<string>Allow Mimi Remote to scan the pairing QR code shown by Mimi Mac Assistant (agentd).</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>用于在 Mimi Remote 输入框中把语音转成 Codex 提示词。</string>
+	<string>Allow Mimi Remote to turn your speech into a Codex prompt in the message composer.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>用于在 Mimi Remote 输入框中识别语音并填入待发送内容。</string>
+	<string>Allow Mimi Remote to recognize speech and insert it into the message composer.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>

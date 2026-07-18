@@ -19,22 +19,22 @@ enum ThemeMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .system:
-            return "系统"
+            return L10n.text("ui.system")
         case .light:
-            return "浅色"
+            return L10n.text("ui.light_color")
         case .dark:
-            return "深色"
+            return L10n.text("ui.dark")
         }
     }
 
     var subtitle: String {
         switch self {
         case .system:
-            return "跟随当前设备外观"
+            return L10n.text("ui.follow_the_current_device_appearance")
         case .light:
-            return "明亮阅读界面"
+            return L10n.text("ui.bright_reading_interface")
         case .dark:
-            return "低眩光工作界面"
+            return L10n.text("ui.low_glare_work_surface")
         }
     }
 
@@ -77,7 +77,7 @@ enum ThemePreset: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .codex:
-            return "暖阳"
+            return L10n.text("ui.warm_sun")
         case .github:
             return "GitHub"
         case .xcode:
@@ -90,13 +90,13 @@ enum ThemePreset: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .codex:
-            return "中性暖白配单一深紫主色，克制但不沉闷"
+            return L10n.text("ui.neutral_warm_white_with_a_single_main_color")
         case .github:
-            return "接近 GitHub Primer 的代码审阅配色"
+            return L10n.text("ui.code_review_color_matching_close_to_github_primer")
         case .xcode:
-            return "接近 Xcode 原生编辑区和状态点缀"
+            return L10n.text("ui.close_to_xcode_s_native_editing_area_and")
         case .gruvbox:
-            return "暖色低对比，适合夜间阅读"
+            return L10n.text("ui.warm_colors_and_low_contrast_suitable_for_night")
         }
     }
 
@@ -137,11 +137,11 @@ enum ThemeUIFontPreset: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .system:
-            return "系统"
+            return L10n.text("ui.system")
         case .rounded:
-            return "圆体"
+            return L10n.text("ui.round_body")
         case .serif:
-            return "衬线"
+            return L10n.text("ui.serif")
         }
     }
 

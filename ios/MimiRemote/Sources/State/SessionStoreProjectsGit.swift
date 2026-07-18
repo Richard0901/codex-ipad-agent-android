@@ -483,17 +483,17 @@ extension SessionStore {
             setSelectedSessionID(nil)
             disconnectWebSocket()
         }
-        setStatusMessage("已从当前设备移除 \(project.name)")
+        setStatusMessage(L10n.format("ui.value_has_been_removed_from_the_current_device", project.name))
     }
 
     func toggleSessionPinned(_ session: AgentSession) {
         if pinnedSessionIDs.contains(session.id) {
             pinnedSessionIDs.remove(session.id)
-            setStatusMessage("已取消置顶 \(session.title)")
+            setStatusMessage(L10n.format("ui.unpinned_value", session.title))
         } else {
             archivedSessionIDs.remove(session.id)
             pinnedSessionIDs.insert(session.id)
-            setStatusMessage("已置顶 \(session.title)")
+            setStatusMessage(L10n.format("ui.pinned_value", session.title))
         }
         saveSessionListPreferences()
         rebuildSessionIndexes()
@@ -502,11 +502,11 @@ extension SessionStore {
     func toggleSessionArchived(_ session: AgentSession) {
         if archivedSessionIDs.contains(session.id) {
             archivedSessionIDs.remove(session.id)
-            setStatusMessage("已取消归档 \(session.title)")
+            setStatusMessage(L10n.format("ui.unarchived_value", session.title))
         } else {
             archivedSessionIDs.insert(session.id)
             pinnedSessionIDs.remove(session.id)
-            setStatusMessage("已归档 \(session.title)")
+            setStatusMessage(L10n.format("ui.archived_value", session.title))
         }
         saveSessionListPreferences()
         rebuildSessionIndexes()
@@ -518,13 +518,13 @@ extension SessionStore {
         toggleSessionArchived(session)
         do {
             try await clientFactory().setSessionArchived(id: session.id, archived: shouldArchive)
-            setStatusMessage(shouldArchive ? "已归档远端会话 \(session.title)" : "已取消远端归档 \(session.title)")
+            setStatusMessage(shouldArchive ? L10n.format("ui.archived_remote_session_value", session.title) : L10n.format("ui.remote_archiving_value_has_been_canceled", session.title))
             return true
         } catch {
             setStatusMessage(
                 shouldArchive
-                    ? "已在本地归档，远端归档失败：\(error.localizedDescription)"
-                    : "已在本地取消归档，远端取消失败：\(error.localizedDescription)"
+                    ? L10n.format("ui.already_archived_locally_remote_archiving_failed_value", error.localizedDescription)
+                    : L10n.format("ui.the_archive_has_been_canceled_locally_but_the", error.localizedDescription)
             )
             return false
         }
@@ -538,11 +538,11 @@ extension SessionStore {
     func renameSession(_ session: AgentSession, name: String) async -> Bool {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard supportsCodexThreadManagement(session), !normalized.isEmpty else {
-            setStatusMessage("会话名称不能为空")
+            setStatusMessage(L10n.text("ui.session_name_cannot_be_empty"))
             return false
         }
         guard normalized.utf8.count <= 256 else {
-            setStatusMessage("会话名称不能超过 256 bytes")
+            setStatusMessage(L10n.text("ui.session_name_cannot_exceed_256_bytes"))
             return false
         }
         do {
@@ -552,10 +552,10 @@ extension SessionStore {
             if let refreshed = try? await client.session(id: session.id, afterSeq: nil) {
                 upsert(refreshed.session)
             }
-            setStatusMessage("已重命名会话为 \(normalized)")
+            setStatusMessage(L10n.format("ui.session_renamed_to_value", normalized))
             return true
         } catch {
-            setStatusMessage("重命名失败：\(error.localizedDescription)")
+            setStatusMessage(L10n.format("ui.rename_failed_value", error.localizedDescription))
             return false
         }
     }
@@ -563,19 +563,19 @@ extension SessionStore {
     @discardableResult
     func compactSessionContext(_ session: AgentSession) async -> Bool {
         guard supportsCodexThreadManagement(session) else {
-            setStatusMessage("当前运行通道不支持手动压缩")
+            setStatusMessage(L10n.text("ui.the_current_running_channel_does_not_support_manual"))
             return false
         }
         guard !session.isRunning else {
-            setStatusMessage("请等待当前 Turn 完成后再压缩上下文")
+            setStatusMessage(L10n.text("ui.please_wait_for_the_current_turn_to_complete"))
             return false
         }
         do {
             try await clientFactory().compactThread(threadID: session.id)
-            setStatusMessage("已开始压缩 \(session.title) 的上下文")
+            setStatusMessage(L10n.format("ui.compression_of_context_for_value_has_started", session.title))
             return true
         } catch {
-            setStatusMessage("上下文压缩失败：\(error.localizedDescription)")
+            setStatusMessage(L10n.format("ui.context_compression_failed_value", error.localizedDescription))
             return false
         }
     }
@@ -584,11 +584,11 @@ extension SessionStore {
     func startReview(_ session: AgentSession, target: CodexAppServerReviewTarget) async -> Bool {
         let latestSession = sessionsByID[session.id] ?? session
         guard supportsCodexThreadManagement(latestSession) else {
-            setStatusMessage("当前运行通道不支持 Codex Review")
+            setStatusMessage(L10n.text("ui.the_current_running_channel_does_not_support_codex"))
             return false
         }
         guard !latestSession.isRunning else {
-            setStatusMessage("请等待当前 Turn 完成后再开始 Review")
+            setStatusMessage(L10n.text("ui.please_wait_until_the_current_turn_is_completed"))
             return false
         }
 
@@ -596,7 +596,7 @@ extension SessionStore {
         do {
             normalizedTarget = try target.validatedInlineTarget()
         } catch {
-            setStatusMessage("Review 目标无效：\(error.localizedDescription)")
+            setStatusMessage(L10n.format("ui.review_target_is_invalid_value", error.localizedDescription))
             return false
         }
 
@@ -607,10 +607,10 @@ extension SessionStore {
                 // 产品入口始终在原会话内执行，不能由调用方切换成 detached。
                 delivery: .inline
             )
-            setStatusMessage("已开始审查 \(latestSession.title)：\(reviewTargetDescription(normalizedTarget))")
+            setStatusMessage(L10n.format("ui.review_started_for_value_value", latestSession.title, reviewTargetDescription(normalizedTarget)))
             return true
         } catch {
-            setStatusMessage("Review 启动失败：\(error.localizedDescription)")
+            setStatusMessage(L10n.format("ui.review_startup_failed_value", error.localizedDescription))
             return false
         }
     }
@@ -624,14 +624,14 @@ extension SessionStore {
     func reviewTargetDescription(_ target: CodexAppServerReviewTarget) -> String {
         switch target {
         case .uncommittedChanges:
-            return "未提交改动"
+            return L10n.text("ui.changes_not_committed")
         case .baseBranch(let branch):
-            return "相对 \(branch) 的改动"
+            return L10n.format("ui.changes_from_value", branch)
         case .commit(let sha, _):
-            return "提交 \(sha)"
+            return L10n.format("ui.submit_value", sha)
         case .custom:
             // validatedInlineTarget 已拒绝 custom；保留分支是为了让枚举扩展时编译器继续提示。
-            return "自定义目标"
+            return L10n.text("ui.custom_goal")
         }
     }
 
@@ -647,7 +647,7 @@ extension SessionStore {
                 saveSessionReminders()
             }
             sessionReminderScheduler.cancel(sessionID: session.id)
-            setStatusMessage("提醒时间已过，未保存提醒 \(session.title)")
+            setStatusMessage(L10n.format("ui.the_reminder_time_has_passed_and_the_reminder", session.title))
             return
         }
         let boundedInterval = max(60, interval)
@@ -661,7 +661,7 @@ extension SessionStore {
             sessionRemindersByID.removeValue(forKey: session.id)
             saveSessionReminders()
             sessionReminderScheduler.cancel(sessionID: session.id)
-            setStatusMessage("提醒时间已过，未保存提醒 \(session.title)")
+            setStatusMessage(L10n.format("ui.the_reminder_time_has_passed_and_the_reminder", session.title))
             return
         }
         sessionRemindersByID[session.id] = reminder
@@ -676,12 +676,12 @@ extension SessionStore {
             )
             switch try await sessionReminderScheduler.schedule(reminder, route: route) {
             case .scheduled:
-                setStatusMessage("已设置提醒 \(session.title)")
+                setStatusMessage(L10n.format("ui.reminder_value_has_been_set", session.title))
             case .permissionDenied:
-                setStatusMessage("已保存 App 内提醒；系统通知未开启，请在 iOS“设置 > 通知 > Mimi Remote”中开启")
+                setStatusMessage(L10n.text("ui.the_in_app_reminder_has_been_saved_the"))
             }
         } catch {
-            setStatusMessage("已保存提醒，但通知调度失败：\(error.localizedDescription)")
+            setStatusMessage(L10n.format("ui.reminder_saved_but_notification_scheduling_failed_value", error.localizedDescription))
         }
     }
 
@@ -689,7 +689,7 @@ extension SessionStore {
         sessionRemindersByID.removeValue(forKey: session.id)
         saveSessionReminders()
         sessionReminderScheduler.cancel(sessionID: session.id)
-        setStatusMessage("已清除提醒 \(session.title)")
+        setStatusMessage(L10n.format("ui.reminder_cleared_value", session.title))
     }
 
     func isWorkspaceUnavailable(_ projectID: String) -> Bool {
@@ -720,7 +720,7 @@ extension SessionStore {
         }
 #if DEBUG
         guard !isDebugWorkbenchUISeedActive else {
-            setStatusMessage("Debug UI 样例已展开 \(project.name)")
+            setStatusMessage(L10n.format("ui.debug_ui_sample_expanded_value", project.name))
             return
         }
 #endif
@@ -846,7 +846,7 @@ extension SessionStore {
             }
             stopAllQueuedSessionMonitoring()
             suspendWebSocketForNetworkLoss()
-            setStatusMessage("网络不可用，恢复后自动重连")
+            setStatusMessage(L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
             return
         }
 
@@ -862,7 +862,7 @@ extension SessionStore {
         }
         // unknown 是 NWPathMonitor 首次回调前的正常状态；只有已经存在传输错误或挂起会话时
         // 才复用现有单次恢复任务，避免健康冷启动额外刷新，也不引入常驻 timer。
-        setStatusMessage("网络已恢复，正在重新连接")
+        setStatusMessage(L10n.text("ui.the_network_has_been_restored_and_is_reconnecting"))
         let connectionGeneration = appStore.connectionGeneration
         networkRecoveryTask = Task { [weak self] in
             await self?.recoverAfterNetworkBecameAvailable(
@@ -890,7 +890,7 @@ extension SessionStore {
         if let reconnectSessionID {
             markDispatchingQueuedTurnsNeedsConfirmation(
                 sessionID: reconnectSessionID,
-                message: "网络中断，发送结果需要确认"
+                message: L10n.text("ui.the_network_is_interrupted_and_the_sending_result")
             )
         }
         // 离线只是暂停传输：不清本地消息、running turn 排队、审批或补充信息状态。

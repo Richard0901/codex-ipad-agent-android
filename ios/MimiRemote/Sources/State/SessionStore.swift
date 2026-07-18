@@ -599,7 +599,7 @@ final class SessionStore: ObservableObject {
               let activeTurnID = session.activeTurnID,
               let socket = readyWebSocket(for: session)
         else {
-            setErrorMessage("当前没有可引导的活动回合")
+            setErrorMessage(L10n.text("ui.there_are_currently_no_active_rounds_to_boot"))
             return false
         }
         guard mutateAndPersistQueuedTurns({
@@ -621,7 +621,7 @@ final class SessionStore: ObservableObject {
             queuedGuidanceDispatchClientMessageIDs.remove(clientMessageID)
             markQueuedTurnWaitingAfterDefiniteFailure(
                 clientMessageID: clientMessageID,
-                message: "连接尚未就绪，消息仍保留在本机"
+                message: L10n.text("ui.the_connection_is_not_ready_yet_the_message")
             )
             return false
         }
@@ -634,7 +634,7 @@ final class SessionStore: ObservableObject {
             userDelivery: .guided
         )
         setForegroundActivity(.waitingForAssistant, sessionID: session.id)
-        setStatusMessage("已立即引导当前回复")
+        setStatusMessage(L10n.text("ui.directed_current_reply_immediately"))
         return true
     }
 
@@ -678,7 +678,7 @@ final class SessionStore: ObservableObject {
                 guard var queue = snapshot.queuesBySessionID[sessionID] else { continue }
                 for index in queue.indices where queue[index].dispatchState == .dispatching {
                     queue[index].dispatchState = .needsConfirmation
-                    queue[index].lastError = "上次发送在确认前中断，正在核对是否已送达"
+                    queue[index].lastError = L10n.text("ui.the_last_sending_was_interrupted_before_confirmation_checking")
                     didRecoverAmbiguousDispatch = true
                 }
                 snapshot.queuesBySessionID[sessionID] = queue
@@ -720,7 +720,7 @@ final class SessionStore: ObservableObject {
     }
 
     func reportQueuedTurnStorageError(_ error: Error) {
-        let message = "保存本地队列失败：\(error.localizedDescription)"
+        let message = L10n.format("ui.failed_to_save_local_queue_value", error.localizedDescription)
         queuedTurnStorageErrorMessage = message
         setErrorMessage(message)
     }
@@ -937,9 +937,9 @@ final class SessionStore: ObservableObject {
         }
         guard selectedSession.isRunning else {
             if selectedSession.isAppServerHistory {
-                return "历史"
+                return L10n.text("ui.history")
             }
-            return selectedSession.status == "closed" ? "已结束" : selectedSession.status
+            return selectedSession.status == "closed" ? L10n.text("ui.ended") : selectedSession.status
         }
         return webSocketStatus.title
     }
@@ -1054,16 +1054,16 @@ final class SessionStore: ObservableObject {
         var next = sessionWorkspaceIDs ?? allProjectIDs
         if next.contains(project.id) {
             next.remove(project.id)
-            setStatusMessage("已从会话移除 \(project.name)")
+            setStatusMessage(L10n.format("ui.value_has_been_removed_from_the_conversation", project.name))
         } else {
             next.insert(project.id)
-            setStatusMessage("已在会话显示 \(project.name)")
+            setStatusMessage(L10n.format("ui.already_shown_in_session_value", project.name))
         }
         setSessionWorkspaceIDs(next.intersection(allProjectIDs))
     }
 
     func resetSessionWorkspaceSelection() {
-        setStatusMessage("会话已恢复显示全部工作区")
+        setStatusMessage(L10n.text("ui.session_resumed_show_all_workspaces"))
         setSessionWorkspaceIDs(nil)
     }
 
@@ -1166,7 +1166,7 @@ final class SessionStore: ObservableObject {
         guard isSelectedSessionObserving else {
             return nil
         }
-        return "这个会话正在其他客户端运行，iPad 当前仅观察。接管后才会发送新消息或处理审批。"
+        return L10n.text("ui.this_session_is_running_on_other_clients_the")
     }
 
     func takeOverSession(_ session: AgentSession) {
@@ -1176,7 +1176,7 @@ final class SessionStore: ObservableObject {
             // 回放（completed 内容仍会补播），完整回放会把旧 delta 再直播一遍。
             connectWebSocket(session, replayBufferedEvents: false)
         }
-        setStatusMessage("已接管到 iPad")
+        setStatusMessage(L10n.text("ui.taken_over_to_ipad"))
     }
 
     func takeOverSelectedSession() {

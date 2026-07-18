@@ -30,6 +30,15 @@ targets:
         buildPhase: resources
       - path: Resources/PrivacyInfo.xcprivacy
         buildPhase: resources
+      - path: Resources/Localizable.xcstrings
+        buildPhase: resources
+      - path: Resources/en.lproj/InfoPlist.strings
+        buildPhase: resources
+      - path: Resources/zh-Hans.lproj/InfoPlist.strings
+        buildPhase: resources
+      - path: ../../LICENSE
+        group: Resources
+        buildPhase: resources
       - path: ../../THIRD_PARTY_NOTICES.md
         group: Resources
         buildPhase: resources

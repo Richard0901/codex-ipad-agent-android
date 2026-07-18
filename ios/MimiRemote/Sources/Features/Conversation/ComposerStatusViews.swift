@@ -45,7 +45,7 @@ struct QueuedTurnEditorSheet: View {
         let tokens = themeStore.tokens(for: colorScheme)
         NavigationStack {
             Form {
-                Section("消息") {
+                Section(L10n.text("ui.news")) {
                     TextEditor(text: $text)
                         .frame(minHeight: 150)
                         .font(themeStore.uiFont(.body))
@@ -53,7 +53,7 @@ struct QueuedTurnEditorSheet: View {
                         .foregroundStyle(tokens.primaryText)
                 }
                 if !attachments.isEmpty {
-                    Section("附件") {
+                    Section(L10n.text("ui.accessories")) {
                         ForEach(Array(attachments.enumerated()), id: \.offset) { index, item in
                             HStack(spacing: 10) {
                                 Image(systemName: queuedAttachmentIcon(item))
@@ -67,25 +67,25 @@ struct QueuedTurnEditorSheet: View {
                                     Image(systemName: "trash")
                                 }
                                 .buttonStyle(.borderless)
-                                .accessibilityLabel("删除附件")
+                                .accessibilityLabel(L10n.text("ui.delete_attachment"))
                             }
                         }
                     }
                 }
                 Section {
-                    Text("编辑只影响本机待发送内容；保存后仍按原队列顺序发送。")
+                    Text(L10n.text("ui.editing_only_affects_the_local_content_to_be"))
                         .font(themeStore.uiFont(.caption))
                         .foregroundStyle(tokens.secondaryText)
                 }
             }
-            .navigationTitle("编辑待发送消息")
+            .navigationTitle(L10n.text("ui.edit_message_to_send"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
+                    Button(L10n.text("ui.save")) {
                         onSave(draft.payload(text: text, attachments: attachments))
                         dismiss()
                     }
@@ -132,7 +132,7 @@ struct QueuedTurnManagerSheet: View {
         NavigationStack {
             Group {
                 if turns.isEmpty {
-                    ContentUnavailableView("没有待发送消息", systemImage: "tray")
+                    ContentUnavailableView(L10n.text("ui.no_messages_to_send"), systemImage: "tray")
                 } else {
                     List {
                         Section {
@@ -142,7 +142,7 @@ struct QueuedTurnManagerSheet: View {
                                         .foregroundStyle(turn.displayTint(tokens: tokens))
                                         .frame(width: 22)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(turn.previewText.isEmpty ? "（仅附件）" : turn.previewText)
+                                        Text(turn.previewText.isEmpty ? L10n.text("ui.accessories_only") : turn.previewText)
                                             .lineLimit(2)
                                             .font(themeStore.uiFont(.body, weight: .medium))
                                         Text(turn.displayStatusText)
@@ -151,23 +151,23 @@ struct QueuedTurnManagerSheet: View {
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     Menu {
-                                        Button("编辑", systemImage: "pencil") {
+                                        Button(L10n.text("ui.edit"), systemImage: "pencil") {
                                             editingTurn = QueuedTurnEditorDraft(turn: turn)
                                         }
                                         .disabled(turn.dispatchState == .dispatching)
                                         if turn.intent.canGuideCurrentTurn {
-                                            Button("立即引导当前回复", systemImage: "text.bubble") {
+                                            Button(L10n.text("ui.direct_current_reply_now"), systemImage: "text.bubble") {
                                                 onGuideNow(turn)
                                             }
                                             .disabled(!canGuideCurrentTurn || turn.dispatchState != .waiting)
                                         }
                                         if turn.dispatchState == .needsConfirmation {
-                                            Button("确认并重试", systemImage: "arrow.clockwise") {
+                                            Button(L10n.text("ui.confirm_and_try_again"), systemImage: "arrow.clockwise") {
                                                 onRetry(turn)
                                             }
                                         }
                                         Divider()
-                                        Button("删除", systemImage: "trash", role: .destructive) {
+                                        Button(L10n.text("ui.delete"), systemImage: "trash", role: .destructive) {
                                             onDelete(turn)
                                         }
                                         .disabled(turn.dispatchState == .dispatching)
@@ -178,16 +178,16 @@ struct QueuedTurnManagerSheet: View {
                             }
                             .onMove(perform: onMove)
                         } footer: {
-                            Text("按住右侧拖动可调整下一轮发送顺序。队列保存在此设备，App 重新打开后会继续。")
+                            Text(L10n.text("ui.press_and_drag_on_the_right_side_to"))
                         }
                     }
                 }
             }
-            .navigationTitle("待发送队列")
+            .navigationTitle(L10n.text("ui.queue_to_be_sent"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("完成") { dismiss() }
+                    Button(L10n.text("ui.complete")) { dismiss() }
                 }
                 if turns.count > 1 {
                     ToolbarItem(placement: .primaryAction) {
@@ -235,13 +235,13 @@ extension QueuedTurnEntry {
         switch dispatchState {
         case .waiting:
             if waitsForAcceptedTurnStart == true {
-                return "正在确认上一轮状态 · \(intent.title)"
+                return L10n.format("ui.confirming_the_status_of_the_previous_round_value", intent.title)
             }
-            return expectedTurnID == nil ? "等待连接后发送 · \(intent.title)" : "当前回复完成后发送 · \(intent.title)"
+            return expectedTurnID == nil ? L10n.format("ui.send_after_waiting_for_connection_value", intent.title) : L10n.format("ui.sent_after_current_reply_is_complete_value", intent.title)
         case .dispatching:
-            return "正在发送 · \(intent.title)"
+            return L10n.format("ui.sending_value", intent.title)
         case .needsConfirmation:
-            return lastError ?? "发送结果需要确认"
+            return lastError ?? L10n.text("ui.sending_results_requires_confirmation")
         }
     }
 }
@@ -305,12 +305,12 @@ struct ComposerStatusTray: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     if sessionControlNotice != nil {
-                        collapsedChip(title: "观察", systemImage: "eye", tint: tokens.secondaryText, tokens: tokens)
+                        collapsedChip(title: L10n.text("ui.observe"), systemImage: "eye", tint: tokens.secondaryText, tokens: tokens)
                     }
                     if quotaNotice != nil {
-                        collapsedChip(title: "额度", systemImage: "speedometer", tint: tokens.warning, tokens: tokens)
+                        collapsedChip(title: L10n.text("ui.quota"), systemImage: "speedometer", tint: tokens.warning, tokens: tokens)
                     } else if usage != nil {
-                        collapsedChip(title: "额度", systemImage: "speedometer", tint: tokens.warning, tokens: tokens)
+                        collapsedChip(title: L10n.text("ui.quota"), systemImage: "speedometer", tint: tokens.warning, tokens: tokens)
                     }
                     if let goal {
                         collapsedChip(title: collapsedGoalChipTitle(for: goal.status), systemImage: "target", tint: goalStatusTint(goal, tokens: tokens), tokens: tokens)
@@ -321,7 +321,7 @@ struct ComposerStatusTray: View {
             .layoutPriority(1)
 
             iconButton(
-                title: isGoalExpanded ? "收起状态" : "展开状态",
+                title: isGoalExpanded ? L10n.text("ui.collapse_state") : L10n.text("ui.expanded_state"),
                 systemImage: isGoalExpanded ? "chevron.up" : "chevron.down",
                 tint: tokens.secondaryText,
                 isDisabled: false,
@@ -347,7 +347,7 @@ struct ComposerStatusTray: View {
                 .layoutPriority(1)
 
             iconButton(
-                title: "收起状态",
+                title: L10n.text("ui.collapse_state"),
                 systemImage: "chevron.up",
                 tint: tokens.secondaryText,
                 isDisabled: false,
@@ -422,12 +422,12 @@ struct ComposerStatusTray: View {
         traySegment(tokens: tokens, tint: tokens.secondaryText, minWidth: 132) {
             HStack(spacing: 7) {
                 segmentIcon("eye", tint: tokens.secondaryText)
-                Text("仅观察")
+                Text(L10n.text("ui.just_observe"))
                     .font(themeStore.uiFont(.caption, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
                     .lineLimit(1)
                 Button(action: onTakeOver) {
-                    Text("接管")
+                    Text(L10n.text("ui.take_over"))
                 }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
@@ -443,7 +443,7 @@ struct ComposerStatusTray: View {
         traySegment(tokens: tokens, tint: tokens.warning, minWidth: 230, layoutPriority: 1) {
             HStack(spacing: 8) {
                 segmentIcon("speedometer", tint: tokens.warning)
-                Text(notice.blocksSending ? "额度已用尽" : notice.title)
+                Text(notice.blocksSending ? L10n.text("ui.quota_has_been_exhausted") : notice.title)
                     .font(themeStore.uiFont(.caption, weight: .semibold))
                     .foregroundStyle(tokens.warning)
                     .lineLimit(1)
@@ -463,7 +463,7 @@ struct ComposerStatusTray: View {
         traySegment(tokens: tokens, tint: tokens.warning, minWidth: 250, layoutPriority: 1) {
             HStack(spacing: 8) {
                 segmentIcon("speedometer", tint: tokens.warning)
-                Text("额度 \(usage.primaryText)")
+                Text(L10n.format("ui.quota_value", usage.primaryText))
                     .font(themeStore.uiFont(.caption, weight: .semibold))
                     .foregroundStyle(tokens.warning)
                     .lineLimit(1)
@@ -491,7 +491,7 @@ struct ComposerStatusTray: View {
                 ProgressView(value: progress)
                     .tint(tint)
                     .frame(maxWidth: .infinity)
-                    .accessibilityLabel("目标 token 预算进度")
+                    .accessibilityLabel(L10n.text("ui.target_token_budget_progress"))
                     .accessibilityValue(goal.budgetPercentText ?? goal.progressText)
             }
 
@@ -512,30 +512,30 @@ struct ComposerStatusTray: View {
     private func goalMetrics(_ goal: ThreadGoal, tokens: ThemeTokens) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
-                goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
+                goalDetailText(L10n.format("ui.status_value", goal.status.displayText), symbol: "circle.dashed", tokens: tokens)
+                goalDetailText(L10n.format("ui.progress_value", goal.progressText), symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
                 if let percent = goal.budgetPercentText {
-                    goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
+                    goalDetailText(L10n.format("ui.budget_value", percent), symbol: "percent", tokens: tokens)
                 }
-                goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
+                goalDetailText(L10n.format("ui.time_taken_value", goal.elapsedText), symbol: "timer", tokens: tokens)
             }
             VStack(alignment: .leading, spacing: 4) {
-                goalDetailText("状态 \(goal.status.displayText)", symbol: "circle.dashed", tokens: tokens)
-                goalDetailText("进度 \(goal.progressText)", symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
+                goalDetailText(L10n.format("ui.status_value", goal.status.displayText), symbol: "circle.dashed", tokens: tokens)
+                goalDetailText(L10n.format("ui.progress_value", goal.progressText), symbol: "gauge.with.dots.needle.33percent", tokens: tokens)
                 if let percent = goal.budgetPercentText {
-                    goalDetailText("预算 \(percent)", symbol: "percent", tokens: tokens)
+                    goalDetailText(L10n.format("ui.budget_value", percent), symbol: "percent", tokens: tokens)
                 }
-                goalDetailText("用时 \(goal.elapsedText)", symbol: "timer", tokens: tokens)
+                goalDetailText(L10n.format("ui.time_taken_value", goal.elapsedText), symbol: "timer", tokens: tokens)
             }
         }
     }
 
     private func goalActionRow(_ goal: ThreadGoal, tint: Color, tokens: ThemeTokens) -> some View {
         HStack(spacing: 6) {
-            iconButton(title: "编辑目标", systemImage: "pencil", tint: tokens.secondaryText, isDisabled: isGoalUpdating, action: onEditGoal)
+            iconButton(title: L10n.text("ui.edit_target"), systemImage: "pencil", tint: tokens.secondaryText, isDisabled: isGoalUpdating, action: onEditGoal)
             iconButton(title: primaryGoalActionTitle(for: goal.status), systemImage: primaryGoalActionSymbol(for: goal.status), tint: tint, isDisabled: isGoalUpdating, action: onTogglePauseGoal)
-            iconButton(title: "标记完成", systemImage: "checkmark.circle", tint: tokens.success, isDisabled: isGoalUpdating || goal.status == .complete, action: onCompleteGoal)
-            iconButton(title: "清除目标", systemImage: "trash", tint: .red, isDisabled: isGoalUpdating, action: onClearGoal)
+            iconButton(title: L10n.text("ui.mark_complete"), systemImage: "checkmark.circle", tint: tokens.success, isDisabled: isGoalUpdating || goal.status == .complete, action: onCompleteGoal)
+            iconButton(title: L10n.text("ui.clear_target"), systemImage: "trash", tint: .red, isDisabled: isGoalUpdating, action: onClearGoal)
         }
     }
 
@@ -576,8 +576,8 @@ struct ComposerStatusTray: View {
         .buttonStyle(.plain)
         .foregroundStyle(isRefreshDisabled ? themeStore.tokens(for: colorScheme).tertiaryText : tint)
         .disabled(isRefreshDisabled)
-        .help("刷新 Codex 使用量")
-        .accessibilityLabel("刷新 Codex 使用量")
+        .help(L10n.text("ui.refresh_codex_usage"))
+        .accessibilityLabel(L10n.text("ui.refresh_codex_usage"))
     }
 
     private func iconButton(
@@ -643,7 +643,7 @@ struct ComposerStatusTray: View {
     }
 
     private func primaryGoalActionTitle(for status: ThreadGoalStatus) -> String {
-        status == .active ? "暂停目标" : "继续目标"
+        status == .active ? L10n.text("ui.pause_target") : L10n.text("ui.continue_target")
     }
 
     private func primaryGoalActionSymbol(for status: ThreadGoalStatus) -> String {
@@ -653,17 +653,17 @@ struct ComposerStatusTray: View {
     private func collapsedGoalChipTitle(for status: ThreadGoalStatus) -> String {
         switch status {
         case .active:
-            return "目标"
+            return L10n.text("ui.target")
         case .paused:
-            return "暂停"
+            return L10n.text("ui.pause")
         case .blocked:
-            return "受阻"
+            return L10n.text("ui.blocked")
         case .usageLimited:
-            return "额度"
+            return L10n.text("ui.quota")
         case .budgetLimited:
-            return "预算"
+            return L10n.text("ui.budget")
         case .complete:
-            return "完成"
+            return L10n.text("ui.complete")
         }
     }
 }

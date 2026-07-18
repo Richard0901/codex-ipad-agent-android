@@ -28,12 +28,12 @@ struct AttachmentPreviewSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(tokens.surface)
-            .navigationTitle("附件预览")
+            .navigationTitle(L10n.text("ui.attachment_preview"))
             .navigationBarTitleDisplayMode(.inline)
             .quickLookPreview($previewURL)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                    Button(L10n.text("ui.close")) { dismiss() }
                 }
             }
         }
@@ -70,18 +70,18 @@ struct AttachmentPreviewSheet: View {
                             .frame(maxWidth: .infinity)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     case .failure:
-                        previewMessage("图片加载失败", detail: url, tokens: tokens)
+                        previewMessage(L10n.text("ui.image_loading_failed"), detail: url, tokens: tokens)
                     @unknown default:
-                        previewMessage("图片加载失败", detail: url, tokens: tokens)
+                        previewMessage(L10n.text("ui.image_loading_failed"), detail: url, tokens: tokens)
                     }
                 }
             } else {
-                previewMessage("无法预览这个图片引用", detail: url, tokens: tokens)
+                previewMessage(L10n.text("ui.unable_to_preview_this_image_reference"), detail: url, tokens: tokens)
             }
         case .localImage(let path, _):
             localImagePreview(path: path, tokens: tokens)
         case .text(let text, _):
-            previewMessage("文本附件", detail: text, tokens: tokens)
+            previewMessage(L10n.text("ui.text_attachment"), detail: text, tokens: tokens)
         case .skill(let name, let path):
             previewMessage("$\(name)", detail: path, tokens: tokens)
         case .mention(let name, let path):
@@ -120,17 +120,17 @@ struct AttachmentPreviewSheet: View {
     private func localImagePreview(path: String, tokens: ThemeTokens) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             previewMessage(
-                "本机图片路径",
-                detail: path + "\n发送时由本机 agentd 读取；也可以通过 agentd 安全读取授权范围内的文件并用 QuickLook 预览。",
+                L10n.text("ui.native_image_path"),
+                detail: path + L10n.text("ui.it_is_read_by_the_local_agentd_when"),
                 tokens: tokens
             )
             Button {
                 Task { await previewLocalImage(path: path) }
             } label: {
                 if previewingLocalImagePath == path {
-                    Label("正在预览", systemImage: "hourglass")
+                    Label(L10n.text("ui.previewing"), systemImage: "hourglass")
                 } else {
-                    Label("预览文件", systemImage: "eye")
+                    Label(L10n.text("ui.preview_file"), systemImage: "eye")
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -148,7 +148,7 @@ struct AttachmentPreviewSheet: View {
     private func previewLocalImage(path: String) async {
         let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !targetPath.isEmpty else {
-            localImagePreviewError = "本机路径为空，无法预览。"
+            localImagePreviewError = L10n.text("ui.the_local_path_is_empty_and_cannot_be")
             return
         }
 
@@ -168,13 +168,13 @@ struct AttachmentPreviewSheet: View {
 
     private func userFacingPreviewError(_ error: Error) -> String {
         if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
-            return "当前 agentd 版本还不支持文件预览，请升级 agentd。"
+            return L10n.text("ui.the_current_agentd_version_does_not_support_file")
         }
         if case AgentAPIError.server(let status, _) = error, status == 403 {
-            return "该文件不在授权范围内或不可访问。"
+            return L10n.text("ui.the_file_is_not_within_authorization_or_is")
         }
         if case AgentAPIError.server(let status, _) = error, status == 413 {
-            return "文件过大，暂不支持预览。"
+            return L10n.text("ui.the_file_is_too_large_and_preview_is")
         }
         return error.localizedDescription
     }
@@ -207,9 +207,9 @@ enum PhotoLibraryPickerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unsupportedImage:
-            return "所选项目不是支持的图片"
+            return L10n.text("ui.the_selected_item_is_not_a_supported_image")
         case .unreadableImage:
-            return "无法读取所选图片"
+            return L10n.text("ui.unable_to_read_selected_image")
         }
     }
 }
@@ -335,7 +335,7 @@ struct AddContentPanel: View {
                         .background(tokens.selectionFill, in: Circle())
                 }
                 .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-                .accessibilityLabel("返回添加内容")
+                .accessibilityLabel(L10n.text("ui.return_to_add_content"))
             } else {
                 Image(systemName: "plus")
                     .font(themeStore.uiFont(.callout, weight: .bold))
@@ -366,22 +366,22 @@ struct AddContentPanel: View {
                     .background(tokens.selectionFill.opacity(0.72), in: Circle())
             }
             .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-            .accessibilityLabel("关闭添加内容")
+            .accessibilityLabel(L10n.text("ui.close_adding_content"))
         }
     }
 
     private func rootActions(tokens: ThemeTokens) -> some View {
         VStack(spacing: 8) {
             panelActionButton(
-                title: "图片",
-                subtitle: "从照片图库选择，可多选",
+                title: L10n.text("ui.pictures"),
+                subtitle: L10n.text("ui.select_from_photo_gallery_multiple_selections_possible"),
                 systemImage: "photo.on.rectangle.angled",
                 tokens: tokens,
                 action: onPickPhotos
             )
             panelActionButton(
-                title: "@ 插件",
-                subtitle: pluginShortcuts.isEmpty ? "查看已安装的 Codex 插件" : "\(pluginShortcuts.count) 个已安装插件",
+                title: L10n.text("ui.plugin"),
+                subtitle: pluginShortcuts.isEmpty ? L10n.text("ui.view_installed_codex_plugins") : L10n.plural("ui.plugins_installed_count", count: pluginShortcuts.count),
                 systemImage: "at",
                 tokens: tokens
             ) {
@@ -389,15 +389,15 @@ struct AddContentPanel: View {
             }
             panelActionButton(
                 title: "Skill",
-                subtitle: skillShortcuts.isEmpty ? "添加结构化工作流" : "\(skillShortcuts.count) 个可用 Skill",
+                subtitle: skillShortcuts.isEmpty ? L10n.text("ui.add_structured_workflow") : L10n.plural("ui.skills_available_count", count: skillShortcuts.count),
                 systemImage: "wand.and.stars",
                 tokens: tokens
             ) {
                 page = .skills
             }
             panelActionButton(
-                title: "快捷短语",
-                subtitle: "插入常用任务模板",
+                title: L10n.text("ui.shortcut_phrase"),
+                subtitle: L10n.text("ui.insert_frequently_used_task_templates"),
                 systemImage: "bolt.fill",
                 tokens: tokens
             ) {
@@ -450,11 +450,11 @@ struct AddContentPanel: View {
 
     private func pluginList(tokens: ThemeTokens) -> some View {
         VStack(spacing: 10) {
-            searchField(placeholder: "搜索插件", tokens: tokens)
+            searchField(placeholder: L10n.text("ui.search_plugin"), tokens: tokens)
             if filteredPlugins.isEmpty {
                 emptyCapabilities(
-                    title: searchText.isEmpty ? "暂无已安装插件" : "没有匹配的插件",
-                    detail: searchText.isEmpty ? "请先在 Mac 端安装并启用 Codex 插件" : "换个名称试试",
+                    title: searchText.isEmpty ? L10n.text("ui.no_plugins_installed_yet") : L10n.text("ui.no_matching_plugin"),
+                    detail: searchText.isEmpty ? L10n.text("ui.please_install_and_enable_the_codex_plug_in") : L10n.text("ui.try_another_name"),
                     tokens: tokens
                 )
             } else {
@@ -481,7 +481,7 @@ struct AddContentPanel: View {
                                         Image(systemName: "plus.circle.fill")
                                             .foregroundStyle(tokens.accent)
                                     } else {
-                                        Text("已停用")
+                                        Text(L10n.text("ui.deactivated"))
                                             .font(themeStore.uiFont(.caption2, weight: .semibold))
                                             .foregroundStyle(tokens.tertiaryText)
                                     }
@@ -504,11 +504,11 @@ struct AddContentPanel: View {
 
     private func skillList(tokens: ThemeTokens) -> some View {
         VStack(spacing: 10) {
-            searchField(placeholder: "搜索 Skill", tokens: tokens)
+            searchField(placeholder: L10n.text("ui.search_skill"), tokens: tokens)
             if filteredSkills.isEmpty {
                 emptyCapabilities(
-                    title: searchText.isEmpty ? "暂无可用 Skill" : "没有匹配的 Skill",
-                    detail: searchText.isEmpty ? "刷新后仍为空时，请检查 Mac 端配置" : "换个名称试试",
+                    title: searchText.isEmpty ? L10n.text("ui.no_skills_available_yet") : L10n.text("ui.no_matching_skill"),
+                    detail: searchText.isEmpty ? L10n.text("ui.if_it_is_still_empty_after_refreshing_please") : L10n.text("ui.try_another_name"),
                     tokens: tokens
                 )
             } else {
@@ -525,7 +525,7 @@ struct AddContentPanel: View {
                                             .font(themeStore.uiFont(.callout, weight: .semibold))
                                             .foregroundStyle(tokens.primaryText)
                                             .lineLimit(1)
-                                        Text(skill.presentationDescription ?? "添加为结构化能力")
+                                        Text(skill.presentationDescription ?? L10n.text("ui.added_as_structured_capability"))
                                             .font(themeStore.uiFont(.caption))
                                             .foregroundStyle(tokens.secondaryText)
                                             .lineLimit(1)
@@ -597,7 +597,7 @@ struct AddContentPanel: View {
                         .foregroundStyle(tokens.tertiaryText)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("清除搜索")
+                .accessibilityLabel(L10n.text("ui.clear_search"))
             }
         }
         .padding(.horizontal, 11)
@@ -622,7 +622,7 @@ struct AddContentPanel: View {
                 Button {
                     onRefreshCapabilities()
                 } label: {
-                    Label(isRefreshingCapabilities ? "刷新中" : "刷新列表", systemImage: "arrow.clockwise")
+                    Label(isRefreshingCapabilities ? L10n.text("ui.refreshing") : L10n.text("ui.refresh_list"), systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .disabled(isRefreshingCapabilities)
@@ -662,7 +662,7 @@ struct AddContentPanel: View {
     private func pluginSubtitle(_ plugin: CodexPluginCapability) -> String {
         nonEmpty(plugin.description)
             ?? nonEmpty(plugin.marketplace)
-            ?? "已安装插件"
+            ?? L10n.text("ui.plugin_installed")
     }
 
     private func nonEmpty(_ value: String?) -> String? {
@@ -672,26 +672,26 @@ struct AddContentPanel: View {
 
     private var pageTitle: String {
         switch page {
-        case .root: return "添加内容"
-        case .plugins: return "@ 插件"
-        case .skills: return "选择 Skill"
-        case .shortcuts: return "快捷短语"
+        case .root: return L10n.text("ui.add_content")
+        case .plugins: return L10n.text("ui.plugin")
+        case .skills: return L10n.text("ui.select_skill")
+        case .shortcuts: return L10n.text("ui.shortcut_phrase")
         }
     }
 
     private var pageSubtitle: String {
         switch page {
-        case .root: return "补充下一条消息的上下文"
-        case .plugins: return "引用 Mac 端已安装的 Codex 插件"
-        case .skills: return "选择后作为结构化能力发送"
-        case .shortcuts: return "点按即可插入输入框"
+        case .root: return L10n.text("ui.add_context_for_the_next_message")
+        case .plugins: return L10n.text("ui.reference_the_installed_codex_plug_in_on_mac")
+        case .skills: return L10n.text("ui.selected_and_sent_as_structured_capabilities")
+        case .shortcuts: return L10n.text("ui.click_to_insert_input_box")
         }
     }
 
     private static let shortcuts = [
-        "检查这段实现并给出风险",
-        "实现这个功能并补测试",
-        "只做最小可运行版本，避免过度设计",
-        "解释失败日志并给修复方案"
+        L10n.text("ui.check_this_implementation_and_give_the_risks"),
+        L10n.text("ui.implement_this_function_and_add_tests"),
+        L10n.text("ui.only_make_the_smallest_runnable_version_to_avoid"),
+        L10n.text("ui.explain_the_failure_log_and_provide_repair_solutions")
     ]
 }

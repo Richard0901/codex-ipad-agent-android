@@ -34,7 +34,7 @@ extension SessionStore {
         }
         var projectID = projectID
         guard let workspace = ensureWorkspaceForKnownProjectID(projectID) else {
-            setErrorMessage("工作区已失效，请重新打开")
+            setErrorMessage(L10n.text("ui.the_workspace_has_expired_please_reopen_it"))
             return false
         }
         projectID = workspace.id
@@ -136,7 +136,7 @@ extension SessionStore {
                 }
                 setForegroundActivity(.waitingForAssistant, sessionID: responseSession.id)
             } else {
-                conversationStore.appendSystem("交互式会话已启动。", sessionID: responseSession.id)
+                conversationStore.appendSystem(L10n.text("ui.an_interactive_session_has_been_started"), sessionID: responseSession.id)
             }
             if let firstMessage = response.firstMessage {
                 conversationStore.completeMessage(firstMessage, metadata: .empty, fallbackSessionID: responseSession.id)
@@ -145,14 +145,12 @@ extension SessionStore {
                     clearForegroundActivity(sessionID: responseSession.id)
                 }
             }
-            if resume != nil {
-                conversationStore.appendSystem("已继续这个历史会话。", sessionID: responseSession.id)
-            }
             // 历史已成为 canonical 快照后，WS 只需要补连接状态；否则 buffered content replay
             // 会把同一 turn 的过程卡再次 append 到时间线。历史加载失败时仍保留 replay，避免漏消息。
             let shouldReplayBufferedEvents = resume == nil || !didLoadInitialHistory
             connectWebSocket(responseSession, replayBufferedEvents: shouldReplayBufferedEvents)
-            setStatusMessage("会话已启动")
+            // 恢复反馈属于页面生命周期状态，不是服务端 transcript 内容，避免它参与历史排序。
+            setStatusMessage(resume == nil ? L10n.text("ui.session_started") : L10n.text("ui.this_historical_conversation_has_been_continued"))
             setErrorMessage(nil)
             return true
         } catch {
@@ -234,7 +232,7 @@ extension SessionStore {
                     )
                     setHistoryLoadProgress(
                         sessionID: session.id,
-                        title: loadMode == .full ? "请求完整历史" : "请求缩略历史",
+                        title: loadMode == .full ? L10n.text("ui.request_full_history") : L10n.text("ui.request_thumbnail_history"),
                         fraction: 0.32
                     )
                     let didLoad = await awaitHistoryLoadJob(
@@ -289,7 +287,7 @@ extension SessionStore {
         }
 
         if !quiet {
-            setHistoryLoadProgress(sessionID: session.id, title: loadMode == .full ? "准备加载完整历史" : "准备加载缩略历史", fraction: 0.08)
+            setHistoryLoadProgress(sessionID: session.id, title: loadMode == .full ? L10n.text("ui.ready_to_load_full_history") : L10n.text("ui.prepare_to_load_abbreviated_history"), fraction: 0.08)
         }
         defer {
             if !quiet {
@@ -298,7 +296,7 @@ extension SessionStore {
         }
 
         if !quiet {
-            setHistoryLoadProgress(sessionID: session.id, title: loadMode == .full ? "请求完整历史" : "请求缩略历史", fraction: 0.32)
+            setHistoryLoadProgress(sessionID: session.id, title: loadMode == .full ? L10n.text("ui.request_full_history") : L10n.text("ui.request_thumbnail_history"), fraction: 0.32)
         }
         return await awaitHistoryLoadJob(job, session: session, quiet: quiet, successStatusMessage: successStatusMessage)
     }
@@ -386,11 +384,11 @@ extension SessionStore {
             return false
         }
         if !effectiveQuiet {
-            setHistoryLoadProgress(sessionID: sessionID, title: "解析历史消息", fraction: 0.74)
+            setHistoryLoadProgress(sessionID: sessionID, title: L10n.text("ui.parse_historical_messages"), fraction: 0.74)
         }
         applyHistoryFirstPage(result.page, sessionID: sessionID)
         if !effectiveQuiet {
-            setHistoryLoadProgress(sessionID: sessionID, title: "更新界面", fraction: 0.94)
+            setHistoryLoadProgress(sessionID: sessionID, title: L10n.text("ui.update_interface"), fraction: 0.94)
         }
         updateHistoryPageState(sessionID: sessionID, page: result.page, preserveExistingCursorOnEmptyPage: true)
         historyLoadedSignatureBySessionID[sessionID] = job.sessionSignature
@@ -428,7 +426,7 @@ extension SessionStore {
         if let policyFailure = historyPolicyFailure(from: error) {
             switch job.loadMode {
             case .full:
-                let message = "完整历史内容较大，正在切换缩略历史。"
+                let message = L10n.text("ui.the_full_history_content_is_large_and_the")
                 if !effectiveQuiet {
                     setHistoryLoadNotice(sessionID: sessionID, kind: .loadingSummary, message: message)
                     setStatusMessage(message)
@@ -439,12 +437,12 @@ extension SessionStore {
                     loadMode: .economy,
                     force: true,
                     reason: .automatic,
-                    successStatusMessage: effectiveQuiet ? nil : "已自动加载缩略历史"
+                    successStatusMessage: effectiveQuiet ? nil : L10n.text("ui.thumbnail_history_automatically_loaded")
                 )
             case .economy where job.allowPolicyRetry:
                 let delay = policyFailure.retryAfterNanoseconds ?? historyPolicyRetryFallbackNanoseconds
                 let seconds = policyFailure.retryAfterSeconds ?? Int((delay + 999_999_999) / 1_000_000_000)
-                let message = "服务器临时限流，\(seconds) 秒后自动重试缩略历史。"
+                let message = L10n.plural("ui.compact_history_retry_seconds_count", count: seconds)
                 if !effectiveQuiet {
                     setHistoryLoadNotice(sessionID: sessionID, kind: .loadingSummary, message: message)
                     setStatusMessage(message)
@@ -462,7 +460,7 @@ extension SessionStore {
                     loadMode: .economy,
                     force: true,
                     reason: .automatic,
-                    successStatusMessage: effectiveQuiet ? nil : "已加载缩略历史",
+                    successStatusMessage: effectiveQuiet ? nil : L10n.text("ui.thumbnail_history_loaded"),
                     allowPolicyRetry: false
                 )
             default:
@@ -472,13 +470,13 @@ extension SessionStore {
         if job.loadMode == .full {
             if !effectiveQuiet {
                 setHistoryLoadNotice(sessionID: sessionID, kind: .fullFailed)
-                setStatusMessage("完整历史加载失败：\(error.localizedDescription)")
+                setStatusMessage(L10n.format("ui.full_history_loading_failed_value", error.localizedDescription))
             }
         } else {
             // 终态失败必须离开“正在加载”横幅，否则重连触发的静默刷新会让界面永远停在加载中。
             if !effectiveQuiet {
                 setHistoryLoadNotice(sessionID: sessionID, kind: .summaryFailed)
-                setErrorMessage("缩略历史加载失败：\(error.localizedDescription)")
+                setErrorMessage(L10n.format("ui.thumbnail_history_loading_failed_value", error.localizedDescription))
             }
         }
         return false
@@ -627,15 +625,15 @@ extension SessionStore {
         let defaultMessage: String
         switch kind {
         case .loadingFull:
-            defaultMessage = "正在加载完整历史，内容较大时可能需要等待。"
+            defaultMessage = L10n.text("ui.loading_the_complete_history_you_may_need_to")
         case .fullFailed:
-            defaultMessage = "完整历史加载失败，可能是内容过大。"
+            defaultMessage = L10n.text("ui.the_complete_history_failed_to_load_the_content")
         case .loadingSummary:
-            defaultMessage = "正在加载缩略历史。"
+            defaultMessage = L10n.text("ui.loading_thumbnail_history")
         case .summaryLoaded:
-            defaultMessage = "当前显示缩略历史。"
+            defaultMessage = L10n.text("ui.currently_showing_abbreviated_history")
         case .summaryFailed:
-            defaultMessage = "缩略历史加载失败，可能是网络不稳或服务器限流。"
+            defaultMessage = L10n.text("ui.the_thumbnail_history_loading_failed_possibly_due_to")
         }
         let message = customMessage ?? defaultMessage
         historySavingsNoticesBySessionID[sessionID] = HistorySavingsNotice(sessionID: sessionID, kind: kind, message: message)
@@ -643,7 +641,7 @@ extension SessionStore {
 
     func refreshSelectedSessionContent(
         _ session: AgentSession,
-        successStatusMessage: String = "当前会话已刷新",
+        successStatusMessage: String = L10n.text("ui.the_current_session_has_been_refreshed"),
         reason: HistoryLoadReason = .manualFull
     ) async {
         isRefreshingSelectedSession = true
@@ -792,7 +790,7 @@ extension SessionStore {
     ) async {
         var projectID = projectID
         guard let workspace = ensureWorkspaceForKnownProjectID(projectID) else {
-            setErrorMessage("工作区已失效，请重新打开")
+            setErrorMessage(L10n.text("ui.the_workspace_has_expired_please_reopen_it"))
             return
         }
         projectID = workspace.id
@@ -828,7 +826,7 @@ extension SessionStore {
             updateSessionPageState(projectID: projectID, page: page)
             clearWorkspaceUnavailable(projectID)
             if updateStatusMessage {
-                setStatusMessage("已加载 \(filteredSessions.count) 个会话")
+                setStatusMessage(L10n.plural("ui.sessions_loaded_count", count: filteredSessions.count))
             }
             // 手动刷新/切换工作区成功时可以清掉旧错误；发送后的后台刷新不能抢掉刚产生的发送失败提示。
             if clearErrorOnSuccess {
@@ -1321,7 +1319,7 @@ extension SessionStore {
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
         guard !collapsed.isEmpty else {
-            return "新会话"
+            return L10n.text("ui.new_session")
         }
         if collapsed.count <= 42 {
             return collapsed

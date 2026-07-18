@@ -23,10 +23,10 @@ struct WorkspaceView: View {
     private func emptyState(tokens: ThemeTokens) -> some View {
         VStack(spacing: 14) {
             VStack(spacing: 7) {
-                Text("选择会话")
+                Text(L10n.text("ui.select_session"))
                     .font(themeStore.uiFont(.headline, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
-                Text("从左侧选择历史会话继续上下文；需要打开目录时，可以先到工作区添加常用项目。")
+                Text(L10n.text("ui.select_the_historical_session_from_the_left_to"))
                     .font(themeStore.uiFont(.callout))
                     .foregroundStyle(tokens.secondaryText)
                     .multilineTextAlignment(.center)
@@ -35,7 +35,7 @@ struct WorkspaceView: View {
 
             if let onOpenWorkspaces {
                 Button(action: onOpenWorkspaces) {
-                    Label("去工作区", systemImage: "folder")
+                    Label(L10n.text("ui.go_to_work_area"), systemImage: "folder")
                         .font(themeStore.uiFont(.callout, weight: .semibold))
                 }
                 .buttonStyle(.bordered)

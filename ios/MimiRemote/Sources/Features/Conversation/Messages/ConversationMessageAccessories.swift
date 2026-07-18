@@ -42,7 +42,7 @@ struct FileReferencePreviewStrip: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(previewingPath != nil)
-                .accessibilityLabel("预览 \(reference.name)")
+                .accessibilityLabel(L10n.format("ui.preview_value", reference.name))
             }
 
             if let previewError {
@@ -159,18 +159,18 @@ struct RuntimeSummaryCard: View {
                     .lineLimit(3)
             } else {
                 if let command = payload.command {
-                    activityDetailRow("命令", value: command, monospaced: true)
+                    activityDetailRow(L10n.text("ui.command"), value: command, monospaced: true)
                 }
                 if let cwd = payload.cwd {
-                    activityDetailRow("目录", value: cwd, monospaced: true)
+                    activityDetailRow(L10n.text("ui.directory"), value: cwd, monospaced: true)
                 }
                 if !payload.filePaths.isEmpty {
-                    activityDetailRow("文件", value: payload.filePaths.prefix(5).joined(separator: ", "), monospaced: true)
+                    activityDetailRow(L10n.text("ui.file"), value: payload.filePaths.prefix(5).joined(separator: ", "), monospaced: true)
                 }
                 if let toolName = payload.toolName, payload.category == .toolCall {
-                    activityDetailRow("工具", value: toolName, monospaced: true)
+                    activityDetailRow(L10n.text("ui.tools"), value: toolName, monospaced: true)
                 }
-                let statusText = [payload.status.map { "状态 \($0)" }, payload.exitCode.map { "退出码 \($0)" }]
+                let statusText = [payload.status.map { L10n.format("ui.status_value", $0) }, payload.exitCode.map { L10n.format("ui.exit_code_value", $0) }]
                     .compactMap { $0 }
                     .joined(separator: " · ")
                 if !statusText.isEmpty {
@@ -244,35 +244,35 @@ struct RuntimeSummaryCard: View {
         }
         switch message.kind {
         case .commentary:
-            return "过程说明"
+            return L10n.text("ui.process_description")
         case .plan:
-            return "计划"
+            return L10n.text("ui.plan")
         case .reasoningSummary:
-            return "推理摘要"
+            return L10n.text("ui.reasoning_summary")
         case .commandSummary:
-            return "命令"
+            return L10n.text("ui.command")
         case .fileChangeSummary:
-            return "文件变更"
+            return L10n.text("ui.file_changes")
         case .approval:
             if isApprovedApproval {
-                return "审批已批准"
+                return L10n.text("ui.approval_approved")
             }
             if isDeclinedApproval {
-                return "审批已拒绝"
+                return L10n.text("ui.approval_rejected")
             }
-            return "等待审批"
+            return L10n.text("ui.waiting_for_approval")
         case .userInput:
-            if message.content.hasPrefix("已跳过补充信息") || message.content.hasPrefix("已跳过引导输入") {
-                return "补充信息已跳过"
+            if message.content.hasPrefix(L10n.text("ui.additional_information_skipped")) || message.content.hasPrefix(L10n.text("ui.boot_input_skipped")) {
+                return L10n.text("ui.supplementary_information_skipped")
             }
-            if message.content.hasPrefix("补充信息已提交") || message.content.hasPrefix("引导输入已提交") {
-                return "补充信息已提交"
+            if message.content.hasPrefix(L10n.text("ui.additional_information_has_been_submitted")) || message.content.hasPrefix(L10n.text("ui.boot_input_submitted")) {
+                return L10n.text("ui.additional_information_has_been_submitted")
             }
-            return "等待补充信息"
+            return L10n.text("ui.waiting_for_additional_information")
         case .error:
-            return "运行异常"
+            return L10n.text("ui.abnormal_operation")
         case .message:
-            return "状态"
+            return L10n.text("ui.status")
         }
     }
 
@@ -375,11 +375,11 @@ struct RuntimeSummaryCard: View {
     }
 
     private var isApprovedApproval: Bool {
-        message.content.hasPrefix("审批已批准") || message.content.hasPrefix("已批准")
+        message.content.hasPrefix(L10n.text("ui.approval_approved")) || message.content.hasPrefix(L10n.text("ui.approved"))
     }
 
     private var isDeclinedApproval: Bool {
-        message.content.hasPrefix("审批已拒绝") || message.content.hasPrefix("已拒绝")
+        message.content.hasPrefix(L10n.text("ui.approval_rejected")) || message.content.hasPrefix(L10n.text("ui.rejected"))
     }
 
     private var tokens: ThemeTokens {
@@ -401,18 +401,18 @@ extension View {
             Button {
                 UIPasteboard.general.string = message.content
             } label: {
-                Label("复制", systemImage: "doc.on.doc")
+                Label(L10n.text("ui.copy"), systemImage: "doc.on.doc")
             }
 
             if message.role == .user && message.sendStatus == .failed, let retry {
                 Button(action: retry) {
-                    Label("重试", systemImage: "arrow.clockwise")
+                    Label(L10n.text("ui.try_again"), systemImage: "arrow.clockwise")
                 }
             }
 
             if message.role == .assistant && message.sendStatus == .sending, let stop {
                 Button(role: .destructive, action: stop) {
-                    Label("停止", systemImage: "stop.circle")
+                    Label(L10n.text("ui.stop"), systemImage: "stop.circle")
                 }
             }
         }
@@ -433,7 +433,7 @@ struct MessageTimestampCaption: View {
             .foregroundStyle(isFallback ? tokens.warning : (foreground ?? tokens.tertiaryText))
             .lineLimit(1)
             .minimumScaleFactor(0.88)
-            .accessibilityLabel(isFallback ? "消息时间 兜底估算 \(text)" : "消息时间 \(text)")
+            .accessibilityLabel(isFallback ? L10n.format("ui.message_time_full_estimate_value", text) : L10n.format("ui.message_time_value", text))
     }
 }
 
@@ -442,24 +442,24 @@ extension ConversationMessage {
         let text: String
         switch role {
         case .user:
-            text = "发出 \(Self.compactTime(createdAt))"
+            text = L10n.format("ui.issue_value", Self.compactTime(createdAt))
         case .assistant:
             guard sendStatus != .sending else {
                 let started = Self.compactTime(createdAt)
                 guard let updatedAt else {
-                    return "开始 \(started)"
+                    return L10n.format("ui.start_value", started)
                 }
                 let latest = Self.compactTime(updatedAt)
-                return started == latest ? "开始 \(started)" : "开始 \(started) · 最近 \(latest)"
+                return started == latest ? L10n.format("ui.start_value", started) : L10n.format("ui.started_value_last_value", started, latest)
             }
             let completedAt = updatedAt ?? createdAt
             let started = Self.compactTime(createdAt)
             let completed = Self.compactTime(completedAt)
             // 同一分钟内开始和完成显示相同时间时，只保留完成时间，减少气泡右下角噪音。
             if started == completed {
-                text = "完成 \(completed)"
+                text = L10n.format("ui.complete_value", completed)
             } else {
-                text = "开始 \(started) · 完成 \(completed)"
+                text = L10n.format("ui.start_value_complete_value", started, completed)
             }
         case .system:
             if let updatedAt, Self.compactTime(updatedAt) != Self.compactTime(createdAt) {

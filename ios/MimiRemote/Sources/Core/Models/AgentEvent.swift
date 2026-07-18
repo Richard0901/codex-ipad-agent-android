@@ -101,10 +101,10 @@ extension AgentEvent: Decodable {
         case "turn_completed":
             self = .turnCompleted(metadata)
         case "warning":
-            self = .warning(try Self.decodePayload(from: container, key: .warning, fallback: "未知警告"), metadata)
+            self = .warning(try Self.decodePayload(from: container, key: .warning, fallback: L10n.text("ui.unknown_warning")), metadata)
         case "error":
             self = .error(
-                try Self.decodePayload(from: container, key: .error, fallback: "未知错误"),
+                try Self.decodePayload(from: container, key: .error, fallback: L10n.text("ui.unknown_error")),
                 metadata
             )
         default:
@@ -250,9 +250,9 @@ enum StructuredAgentEvent: Decodable, Hashable {
         case "turn_completed":
             self = .turnCompleted(metadata)
         case "warning":
-            self = .warning(try Self.decodePayload(from: container, key: .warning, fallback: "未知警告"), metadata)
+            self = .warning(try Self.decodePayload(from: container, key: .warning, fallback: L10n.text("ui.unknown_warning")), metadata)
         case "error":
-            self = .error(try Self.decodePayload(from: container, key: .error, fallback: "未知错误"), metadata)
+            self = .error(try Self.decodePayload(from: container, key: .error, fallback: L10n.text("ui.unknown_error")), metadata)
         default:
             self = .unknown(type, metadata)
         }
@@ -342,7 +342,8 @@ struct CodexAppServerEventProjector {
                 deltaKeys: ["delta", "text"],
                 bufferSuffix: "reasoning-summary-\(summaryIndex)",
                 kind: .reasoningSummary,
-                activityCategory: .thinking
+                activityCategory: .thinking,
+                usesDistinctBufferItemID: true
             )
         case "item/reasoning/summaryPartAdded":
             // 这是新分段边界，本身没有可展示文本；后续 summaryTextDelta 会带 index。
@@ -350,16 +351,13 @@ struct CodexAppServerEventProjector {
         case "thread/tokenUsage/updated":
             return tokenUsageContextEvent(params: params, metadata: metadata)
         case "thread/compacted":
-            return systemNoticeEvent(
-                text: "上下文已压缩",
-                itemID: "context-compaction",
-                kind: .reasoningSummary,
-                metadata: metadata
-            )
+            // compaction 只替换模型上下文，不是用户可见的 Turn Item；写入 transcript 会在
+            // replacement_history 到达时制造重复或错序。token/context 状态由各自通知更新。
+            return nil
         case "thread/name/updated":
             let name = firstString(in: params, keys: ["threadName", "name"])
             return systemNoticeEvent(
-                text: name.map { "会话已命名为：\($0)" } ?? "会话名称已清除",
+                text: name.map { L10n.format("ui.the_session_has_been_named_value", $0) } ?? L10n.text("ui.session_name_cleared"),
                 itemID: "thread-name",
                 kind: .message,
                 metadata: metadata
@@ -369,7 +367,7 @@ struct CodexAppServerEventProjector {
         case "mcpServer/startupStatus/updated":
             return mcpServerStatusContextEvent(params: params, metadata: metadata)
         case "deprecationNotice":
-            let summary = firstString(in: params, keys: ["summary"]) ?? "app-server 协议能力已废弃"
+            let summary = firstString(in: params, keys: ["summary"]) ?? L10n.text("ui.app_server_protocol_capability_is_obsolete")
             let details = firstString(in: params, keys: ["details"])
             return .warning(
                 AgentErrorPayload(
@@ -615,7 +613,8 @@ struct CodexAppServerEventProjector {
         deltaKeys: [String],
         bufferSuffix: String,
         kind: MessageKind,
-        activityCategory: ConversationActivityCategory? = nil
+        activityCategory: ConversationActivityCategory? = nil,
+        usesDistinctBufferItemID: Bool = false
     ) -> AgentEvent? {
         guard let delta = firstString(in: params, keys: deltaKeys), !delta.isEmpty else {
             return nil
@@ -628,14 +627,16 @@ struct CodexAppServerEventProjector {
         let payload = activityCategory.map { category in
             ConversationActivityPayload(
                 category: category,
-                displayTitle: category == .thinking ? "推理摘要" : "过程更新",
+                displayTitle: category == .thinking ? L10n.text("ui.reasoning_summary") : L10n.text("ui.process_update"),
                 subtitle: next,
                 status: "inProgress"
             )
         }
         return systemNoticeEvent(
             text: next,
-            itemID: metadata.itemID ?? bufferSuffix,
+            itemID: usesDistinctBufferItemID
+                ? "\(metadata.itemID ?? "reasoning"):\(bufferSuffix)"
+                : (metadata.itemID ?? bufferSuffix),
             kind: kind,
             metadata: metadata,
             activityPayload: payload
@@ -697,10 +698,10 @@ struct CodexAppServerEventProjector {
         let outputTokens = firstInt(in: total, keys: ["outputTokens"])
         let window = firstInt(in: usage, keys: ["modelContextWindow"])
         var parts: [String] = []
-        if let totalTokens { parts.append("总计 \(totalTokens) tok") }
-        if let inputTokens { parts.append("输入 \(inputTokens)") }
-        if let outputTokens { parts.append("输出 \(outputTokens)") }
-        if let window { parts.append("上下文 \(window)") }
+        if let totalTokens { parts.append(L10n.format("ui.token_usage_total", totalTokens)) }
+        if let inputTokens { parts.append(L10n.format("ui.token_usage_input", inputTokens)) }
+        if let outputTokens { parts.append(L10n.format("ui.token_usage_output", outputTokens)) }
+        if let window { parts.append(L10n.format("ui.token_usage_context_window", window)) }
         guard !parts.isEmpty else {
             return nil
         }
@@ -711,7 +712,7 @@ struct CodexAppServerEventProjector {
                 tasks: [SessionContextTask(
                     id: "token-usage",
                     kind: "token_usage",
-                    title: "Token 使用量",
+                    title: L10n.text("ui.token_usage"),
                     subtitle: parts.joined(separator: " · "),
                     status: "updated"
                 )],
@@ -735,7 +736,7 @@ struct CodexAppServerEventProjector {
                 tasks: [SessionContextTask(
                     id: metadata.itemID ?? "mcp-progress",
                     kind: "mcp_tool",
-                    title: "MCP 工具调用",
+                    title: L10n.text("ui.mcp_tool_call"),
                     subtitle: message,
                     status: "inProgress"
                 )],
@@ -839,12 +840,12 @@ struct CodexAppServerEventProjector {
         let status = firstString(in: item, keys: ["status"]) ?? fallbackStatus
         switch firstString(in: item, keys: ["type"]) {
         case "commandExecution":
-            let title = firstString(in: item, keys: ["command", "processId"]) ?? "命令执行"
+            let title = firstString(in: item, keys: ["command", "processId"]) ?? L10n.text("ui.command_execution")
             let subtitle = firstString(in: item, keys: ["cwd"]) ?? commandActionSummary(from: item["commandActions"]?.arrayValue)
             return SessionContextTask(id: id, kind: "command", title: String(title.prefix(80)), subtitle: subtitle, status: status)
         case "fileChange":
             let changes = item["changes"]?.arrayValue?.compactMap(\.objectValue) ?? []
-            let title = changes.isEmpty ? "文件变更" : "文件变更 x\(changes.count)"
+            let title = changes.isEmpty ? L10n.text("ui.file_changes") : L10n.plural("ui.files_changed_count", count: changes.count)
             return SessionContextTask(id: id, kind: "file_change", title: title, subtitle: fileChangeTaskSummary(from: changes), status: status)
         case "mcpToolCall":
             let server = firstString(in: item, keys: ["server"])
@@ -853,13 +854,13 @@ struct CodexAppServerEventProjector {
             return SessionContextTask(
                 id: id,
                 kind: "mcp_tool",
-                title: ConversationActivityPayload(item: item)?.displayTitle ?? (title.isEmpty ? "MCP 工具" : title),
+                title: ConversationActivityPayload(item: item)?.displayTitle ?? (title.isEmpty ? L10n.text("ui.mcp_tools") : title),
                 subtitle: firstString(in: item, keys: ["pluginId"]),
                 status: status
             )
         case "dynamicToolCall":
             let namespace = firstString(in: item, keys: ["namespace"])
-            let tool = firstString(in: item, keys: ["tool"]) ?? "动态工具"
+            let tool = firstString(in: item, keys: ["tool"]) ?? L10n.text("ui.dynamic_tools")
             let title = [namespace, tool].compactMap { $0 }.joined(separator: ".")
             return SessionContextTask(
                 id: id,
@@ -869,7 +870,7 @@ struct CodexAppServerEventProjector {
                 status: status
             )
         case "collabAgentToolCall":
-            let title = firstString(in: item, keys: ["tool", "agentNickname", "nickname"]) ?? "子 Agent"
+            let title = firstString(in: item, keys: ["tool", "agentNickname", "nickname"]) ?? L10n.text("ui.sub_agent")
             return SessionContextTask(id: id, kind: "subagent", title: title, subtitle: firstString(in: item, keys: ["agentRole", "role"]), status: status)
         default:
             return nil
@@ -917,7 +918,7 @@ struct CodexAppServerEventProjector {
                     SessionContextTask(
                         id: metadata.itemID ?? change.path,
                         kind: "file_change",
-                        title: "文件变更",
+                        title: L10n.text("ui.file_changes"),
                         subtitle: change.path,
                         status: change.status
                     )
@@ -1058,7 +1059,7 @@ struct CodexAppServerEventProjector {
             let options = mcpElicitationOptions(from: schema)
             let title = firstString(in: schema, keys: ["title"]) ?? key
             let description = firstString(in: schema, keys: ["description"])
-                ?? "请填写 \(title)"
+                ?? L10n.format("ui.please_fill_in_value", title)
             return AgentUserInputQuestion(
                 id: key,
                 header: title,
@@ -1074,7 +1075,7 @@ struct CodexAppServerEventProjector {
             questions = [AgentUserInputQuestion(
                 id: "response",
                 header: firstString(in: params, keys: ["serverName"]) ?? "MCP",
-                question: firstString(in: params, keys: ["message"]) ?? "MCP 服务请求补充信息",
+                question: firstString(in: params, keys: ["message"]) ?? L10n.text("ui.mcp_service_request_supplementary_information"),
                 isOther: true,
                 isSecret: false,
                 options: []
@@ -1094,8 +1095,8 @@ struct CodexAppServerEventProjector {
     ) -> [AgentUserInputOption] {
         if schema["type"]?.stringValue == "boolean" {
             return [
-                AgentUserInputOption(label: "true", description: "是"),
-                AgentUserInputOption(label: "false", description: "否")
+                AgentUserInputOption(label: "true", description: L10n.text("ui.yes")),
+                AgentUserInputOption(label: "false", description: L10n.text("ui.no"))
             ]
         }
         if let values = schema["enum"]?.arrayValue?.compactMap(\.stringValue), !values.isEmpty {
@@ -1147,22 +1148,22 @@ struct CodexAppServerEventProjector {
     private func approvalTitle(kind: String, params: [String: CodexAppServerJSONValue]) -> String {
         switch kind {
         case "file_change":
-            return "Agent 请求修改文件"
+            return L10n.text("ui.agent_requests_to_modify_a_file")
         case "permission":
-            return "Agent 请求提升权限"
+            return L10n.text("ui.agent_requests_elevated_privileges")
         case "user_input":
-            return "Agent 请求补充输入"
+            return L10n.text("ui.agent_requests_additional_input")
         case "mcp_elicitation":
-            let server = firstString(in: params, keys: ["serverName"]) ?? "MCP 服务"
-            return "\(server) 请求用户确认"
+            let server = firstString(in: params, keys: ["serverName"]) ?? L10n.text("ui.mcp_service")
+            return L10n.format("ui.value_requests_user_confirmation", server)
         default:
             if let command = commandSummary(params: params) {
-                return "Agent 请求执行命令：\(command)"
+                return L10n.format("ui.agent_requests_execution_command_value", command)
             }
             if let toolName = firstString(in: params, keys: ["toolName", "tool_name"]) {
-                return "Claude 请求使用工具：\(toolName)"
+                return L10n.format("ui.claude_requested_tools_value", toolName)
             }
-            return "Agent 请求执行命令"
+            return L10n.text("ui.agent_requests_to_execute_a_command")
         }
     }
 

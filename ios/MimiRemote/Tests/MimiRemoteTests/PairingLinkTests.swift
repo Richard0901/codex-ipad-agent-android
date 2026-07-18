@@ -318,18 +318,18 @@ final class PairingLinkTests: XCTestCase {
         let forgetCurrent = ConnectionCredentialRemovalConfirmation.forgettingCurrent(currentProfile)
         XCTAssertEqual(forgetCurrent.id, "forget-current:mac-a")
         XCTAssertEqual(forgetCurrent.target, .current(profileID: "mac-a"))
-        XCTAssertEqual(forgetCurrent.title, "忘记当前 Mac？")
+        XCTAssertEqual(forgetCurrent.title, L10n.text("ui.forgot_your_current_mac"))
         XCTAssertTrue(forgetCurrent.message.contains("工作室 Mac"))
         XCTAssertTrue(forgetCurrent.message.contains("Keychain"))
-        XCTAssertTrue(forgetCurrent.message.contains("重新扫码配对"))
+        XCTAssertTrue(forgetCurrent.message.contains(L10n.text("ui.scan_the_qr_code_again_to_pair")))
 
         let deleteSaved = ConnectionCredentialRemovalConfirmation.deletingSavedProfile(savedProfile)
         XCTAssertEqual(deleteSaved.id, "delete-profile:mac-b")
         XCTAssertEqual(deleteSaved.target, .savedProfile(profileID: "mac-b"))
         XCTAssertTrue(deleteSaved.title.contains("随身 Mac"))
         XCTAssertTrue(deleteSaved.message.contains("随身 Mac"))
-        XCTAssertTrue(deleteSaved.message.contains("当前 Mac 连接不会受影响"))
-        XCTAssertTrue(deleteSaved.message.contains("重新扫码配对"))
+        XCTAssertTrue(deleteSaved.message.contains(L10n.text("ui.current_mac")))
+        XCTAssertTrue(deleteSaved.message.contains(L10n.text("ui.scan_the_qr_code_again_to_pair")))
     }
 
     func testRenamingCurrentAndOtherProfilesOnlyPersistsDisplayNames() throws {
@@ -971,7 +971,7 @@ final class PairingLinkTests: XCTestCase {
         XCTAssertTrue(connected)
         XCTAssertTrue(store.localAgentDetected)
         XCTAssertTrue(store.isUsingLocalConnection)
-        XCTAssertEqual(store.connectionStatus, .connected("本机直连"))
+        XCTAssertEqual(store.connectionStatus, .connected(L10n.text("ui.direct_connection_to_this_machine")))
         XCTAssertEqual(store.endpoint, "http://100.64.0.1:8787")
         XCTAssertEqual(store.connectionEndpoint, "http://127.0.0.1:8787")
         XCTAssertEqual(try store.client().endpoint, "http://127.0.0.1:8787")
@@ -1046,8 +1046,8 @@ final class PairingLinkTests: XCTestCase {
         XCTAssertTrue(store.isUsingLocalConnection)
         XCTAssertEqual(store.endpoint, "http://127.0.0.1:8787")
         XCTAssertEqual(store.token, "local-auto-token")
-        XCTAssertEqual(store.connectionProfiles.first?.displayName, "这台 Mac")
-        XCTAssertEqual(store.connectionStatus, .connected("本机直连"))
+        XCTAssertEqual(store.connectionProfiles.first?.displayName, L10n.text("ui.this_mac"))
+        XCTAssertEqual(store.connectionStatus, .connected(L10n.text("ui.direct_connection_to_this_machine")))
         XCTAssertEqual(
             probedEndpoints,
             ["http://127.0.0.1:8787", "http://127.0.0.1:8787"]
@@ -1111,7 +1111,7 @@ final class PairingLinkTests: XCTestCase {
         XCTAssertEqual(store.token, "fresh-local-token")
         XCTAssertTrue(store.isUsingLocalConnection)
         XCTAssertFalse(store.requiresRePairing)
-        XCTAssertEqual(store.connectionStatus, .connected("本机直连"))
+        XCTAssertEqual(store.connectionStatus, .connected(L10n.text("ui.direct_connection_to_this_machine")))
         XCTAssertEqual(calls.map(\.token), ["stale-local-token", "fresh-local-token"])
         XCTAssertEqual(Set(calls.map(\.endpoint)), ["http://127.0.0.1:8787"])
     }

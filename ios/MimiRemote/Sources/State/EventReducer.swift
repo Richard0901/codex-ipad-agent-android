@@ -24,6 +24,7 @@ enum EventReducerActiveTurnMutation {
 }
 
 enum EventReducerMessageMutation {
+    case turnLifecycle(ConversationTurnLifecycle, AgentEventMetadata, SessionID)
     case assistantDelta(AgentDelta, AgentEventMetadata, SessionID)
     case completed(AgentMessage, AgentEventMetadata, SessionID)
     case system(String, SessionID, MessageKind, AgentEventMetadata?)
@@ -115,6 +116,7 @@ actor EventReducer {
                 id
             ))
             output.foregroundUpdates.append((id, .waitingForAssistant, nil))
+            output.messageMutations.append(.turnLifecycle(.inProgress, metadata, fallbackSessionID))
         case .assistantDelta(let delta, let metadata):
             let id = metadata.sessionID ?? fallbackSessionID
             setActiveTurnIfPresent(metadata, fallbackSessionID: fallbackSessionID, output: &output)
@@ -144,13 +146,13 @@ actor EventReducer {
             setActiveTurnIfPresent(metadata, fallbackSessionID: fallbackSessionID, output: &output)
             output.contextUpdates.append((
                 SessionContextSnapshot(
-                    tasks: [SessionContextTask(id: change.path, kind: "file_change", title: "文件变更", subtitle: change.path, status: change.status)],
+                    tasks: [SessionContextTask(id: change.path, kind: "file_change", title: L10n.text("ui.file_changes"), subtitle: change.path, status: change.status)],
                     updatedAt: Date()
                 ),
                 id
             ))
             output.messageMutations.append(.system(
-                "文件变更：\(change.path) \(change.status)",
+                L10n.format("ui.file_changes_value_value", change.path, change.status),
                 id,
                 .fileChangeSummary,
                 metadata
@@ -182,8 +184,8 @@ actor EventReducer {
                 ),
                 id
             ))
-            let risk = request.risk.map { "，风险：\($0)" } ?? ""
-            output.messageMutations.append(.system("等待审批：\(request.title)\(risk)", id, .approval, metadata))
+            let risk = request.risk.map { L10n.format("ui.risk_value", $0) } ?? ""
+            output.messageMutations.append(.system(L10n.format("ui.awaiting_approval_value_value", request.title, risk), id, .approval, metadata))
         case .approvalResolved(let metadata):
             let id = metadata.sessionID ?? fallbackSessionID
             setActiveTurnIfPresent(metadata, fallbackSessionID: fallbackSessionID, output: &output)
@@ -212,7 +214,7 @@ actor EventReducer {
                 ),
                 id
             ))
-            output.messageMutations.append(.system("等待补充信息：\(request.title)", id, .userInput, metadata))
+            output.messageMutations.append(.system(L10n.format("ui.waiting_for_additional_information_named", request.title), id, .userInput, metadata))
         case .userInputResolved(let metadata, let skipped):
             let id = metadata.sessionID ?? fallbackSessionID
             setActiveTurnIfPresent(metadata, fallbackSessionID: fallbackSessionID, output: &output)
@@ -235,6 +237,7 @@ actor EventReducer {
             output.pendingApprovalTaskClears.append(id)
             output.messageMutations.append(.resolveLatestPendingApproval(id))
             output.messageMutations.append(.resolveLatestPendingUserInput(id, skipped: false))
+            output.messageMutations.append(.turnLifecycle(.completed, metadata, fallbackSessionID))
             output.messageMutations.append(.markCurrentAssistantCompleted(metadata, fallbackSessionID))
             output.activeTurnMutations.append(.clear(id, metadata.turnID))
             output.foregroundClears.append(id)
@@ -244,7 +247,7 @@ actor EventReducer {
                 sessionID: fallbackSessionID,
                 seq: nil
             ))
-            output.messageMutations.append(.system("运行警告：\(payload.message)", fallbackSessionID, .error, metadata))
+            output.messageMutations.append(.system(L10n.format("ui.run_warning_value", payload.message), fallbackSessionID, .error, metadata))
         case .error(let payload, let metadata):
             let id = metadata.sessionID ?? fallbackSessionID
             // 多 runtime 下错误必须按通知携带的 thread 归属，不能回退到当前选中的其他会话。
@@ -267,7 +270,8 @@ actor EventReducer {
                 sessionID: id,
                 seq: nil
             ))
-            output.messageMutations.append(.system("运行错误：\(payload.message)", id, .error, metadata))
+            output.messageMutations.append(.system(L10n.format("ui.run_error_value", payload.message), id, .error, metadata))
+            output.messageMutations.append(.turnLifecycle(.failed, metadata, fallbackSessionID))
         case .unknown(let type):
             let eventType = type.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !eventType.isEmpty,
@@ -278,7 +282,7 @@ actor EventReducer {
             // 新版 runtime 可能先增加事件再升级客户端。诊断区每种类型只提示一次，
             // 避免高频心跳/进度事件把用户真正关心的输出淹没。
             output.logAppends.append(EventReducerLogAppend(
-                text: "\n[agentd] 已忽略暂不支持的事件：\(eventType)\n",
+                text: L10n.format("ui.agentd_ignored_unsupported_event_value", eventType),
                 sessionID: fallbackSessionID,
                 seq: nil
             ))

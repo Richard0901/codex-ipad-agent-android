@@ -88,34 +88,34 @@ struct MessageRow: View, Equatable {
     private var statusCaption: some View {
         switch message.sendStatus {
         case .failed:
-            Text("发送失败")
+            Text(L10n.text("ui.sending_failed"))
                 .font(themeStore.uiFont(.caption2))
                 .foregroundStyle(.red)
         case .sending:
             deliveryCaption(sendingDeliveryCaption)
         case .sent:
             if message.userDelivery == .injected {
-                deliveryCaption("已引导对话")
+                deliveryCaption(L10n.text("ui.conversation_guided"))
             } else if showsActiveDeliveryStatus {
-                deliveryCaption("已送达，等待回复")
+                deliveryCaption(L10n.text("ui.sent_waiting_for_reply"))
             }
         case .confirmed:
             if message.userDelivery == .injected {
-                deliveryCaption("已引导对话")
+                deliveryCaption(L10n.text("ui.conversation_guided"))
             }
         case .local:
-            deliveryCaption(message.userDelivery == .queued ? "已排队，等待当前回复完成" : "待发送")
+            deliveryCaption(message.userDelivery == .queued ? L10n.text("ui.queued_waiting_for_the_current_reply_to_be") : L10n.text("ui.to_be_sent"))
         }
     }
 
     private var sendingDeliveryCaption: String {
         switch message.userDelivery {
         case .queued:
-            return "排队发送中…"
+            return L10n.text("ui.queuing_to_send")
         case .guided, .injected:
-            return "引导发送中…"
+            return L10n.text("ui.guide_is_being_sent")
         case nil:
-            return "发送中…"
+            return L10n.text("ui.sending")
         }
     }
 

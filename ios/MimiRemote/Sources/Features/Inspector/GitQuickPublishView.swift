@@ -4,21 +4,21 @@ enum GitCommitMessageSuggestion {
     static func make(from status: GitStatusResponse) -> String {
         let paths = status.files.map { $0.path.lowercased() }
         guard !paths.isEmpty else {
-            return "chore: 同步当前分支"
+            return L10n.text("ui.chore_synchronize_the_current_branch")
         }
 
         if paths.allSatisfy({ $0.hasSuffix(".md") || $0.hasPrefix("docs/") }) {
-            return "docs: 更新项目文档"
+            return L10n.text("ui.docs_update_project_documentation")
         }
         if paths.allSatisfy(isTestPath) {
-            return "test: 更新自动化测试"
+            return L10n.text("ui.test_update_automated_tests")
         }
         if paths.allSatisfy(isReleasePath) {
-            return "chore: 更新发布流程"
+            return L10n.text("ui.chore_update_release_process")
         }
 
         let type = status.files.contains(where: isAddedFile) ? "feat" : "chore"
-        return "\(type): 更新\(scopeName(for: paths))"
+        return L10n.format("ui.value_update_value", type, scopeName(for: paths))
     }
 
     private static func isTestPath(_ path: String) -> Bool {
@@ -41,23 +41,23 @@ enum GitCommitMessageSuggestion {
     private static func scopeName(for paths: [String]) -> String {
         if paths.allSatisfy({ $0.hasPrefix("ios/") }) {
             if paths.contains(where: { $0.contains("/conversation/") }) {
-                return "会话交互"
+                return L10n.text("ui.conversational_interaction")
             }
             if paths.contains(where: { $0.contains("/inspector/") }) {
-                return "Git 变更面板"
+                return L10n.text("ui.git_change_panel")
             }
             if paths.contains(where: { $0.contains("/state/") }) {
-                return "iOS 状态管理"
+                return L10n.text("ui.ios_state_management")
             }
-            return "iOS 客户端"
+            return L10n.text("ui.ios_client")
         }
         if paths.allSatisfy({ $0.hasPrefix("internal/") || $0.hasPrefix("cmd/") }) {
-            return "主机服务"
+            return L10n.text("ui.hosting_service")
         }
         if paths.allSatisfy({ $0.hasPrefix("scripts/") || $0.hasPrefix("config/") }) {
-            return "项目工具"
+            return L10n.text("ui.project_tools")
         }
-        return "项目变更"
+        return L10n.text("ui.project_changes")
     }
 }
 
@@ -98,7 +98,7 @@ struct GitQuickPublishBox: View {
                 HStack(spacing: 7) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在检查主机发布能力")
+                    Text(L10n.text("ui.checking_host_publishing_capabilities"))
                 }
                 .font(themeStore.uiFont(.caption2))
                 .foregroundStyle(tokens.secondaryText)
@@ -116,7 +116,7 @@ struct GitQuickPublishBox: View {
                     .lineLimit(4)
             }
 
-            Label("执行前会再次确认，不会自动发布", systemImage: "shield.lefthalf.filled")
+            Label(L10n.text("ui.it_will_be_confirmed_again_before_execution_and"), systemImage: "shield.lefthalf.filled")
                 .font(themeStore.uiFont(.caption2))
                 .foregroundStyle(tokens.tertiaryText)
         }
@@ -156,22 +156,22 @@ struct GitQuickPublishBox: View {
 
     private var testFlightCaption: String {
         if releaseIsRunning {
-            return "主机正在归档并上传，可离开此页面"
+            return L10n.text("ui.the_host_is_archiving_and_uploading_you_can")
         }
         if status.hasChanges {
-            return "提交推送成功后可用"
+            return L10n.text("ui.available_after_successful_push_submission")
         }
-        return testFlightStatus?.capability.reason ?? "主机未配置 TestFlight 发布流程"
+        return testFlightStatus?.capability.reason ?? L10n.text("ui.the_host_is_not_configured_with_the_testflight")
     }
 
     @ViewBuilder
     private func header(tokens: ThemeTokens) -> some View {
         HStack(spacing: 8) {
-            Label("快捷发布", systemImage: "wand.and.sparkles")
+            Label(L10n.text("ui.quick_release"), systemImage: "wand.and.sparkles")
                 .font(themeStore.uiFont(.caption, weight: .semibold))
                 .foregroundStyle(tokens.primaryText)
             if testFlightStatus?.capability.isIOSProject == true {
-                Text("iOS 项目")
+                Text(L10n.text("ui.ios_project"))
                     .font(themeStore.uiFont(.caption2, weight: .semibold))
                     .foregroundStyle(tokens.accent)
                     .padding(.horizontal, 7)
@@ -193,10 +193,10 @@ struct GitQuickPublishBox: View {
                 .font(themeStore.uiFont(size: 18, weight: .semibold))
                 .foregroundStyle(status.hasChanges ? tokens.accent : tokens.success)
             VStack(alignment: .leading, spacing: 2) {
-                Text(status.hasChanges ? "\(status.files.count) 个文件待提交" : "工作区已提交")
+                Text(status.hasChanges ? L10n.plural("ui.files_to_commit_count", count: status.files.count) : L10n.text("ui.workspace_submitted"))
                     .font(themeStore.uiFont(.caption, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
-                Text("\(status.branch ?? "当前分支") → origin/\(status.branch ?? "当前分支")")
+                Text("\(status.branch ?? L10n.text("ui.current_branch")) → origin/\(status.branch ?? L10n.text("ui.current_branch"))")
                     .font(themeStore.codeFont(.caption2))
                     .foregroundStyle(tokens.secondaryText)
             }
@@ -206,24 +206,24 @@ struct GitQuickPublishBox: View {
     @ViewBuilder
     private func commitMessageField(tokens: ThemeTokens) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("提交说明")
+            Text(L10n.text("ui.submission_instructions"))
                 .font(themeStore.uiFont(.caption2))
                 .foregroundStyle(tokens.tertiaryText)
             HStack(spacing: 6) {
-                TextField("提交说明", text: $message, axis: .vertical)
+                TextField(L10n.text("ui.submission_instructions"), text: $message, axis: .vertical)
                     .font(themeStore.uiFont(.caption))
                     .textFieldStyle(.plain)
                     .lineLimit(1...3)
                     .padding(.horizontal, 9)
                     .frame(minHeight: 40)
                 Button(action: onRegenerateMessage) {
-                    Label("重新生成提交说明", systemImage: "wand.and.sparkles")
+                    Label(L10n.text("ui.regenerate_commit_instructions"), systemImage: "wand.and.sparkles")
                         .labelStyle(.iconOnly)
                         .frame(width: 38, height: 38)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(tokens.accent)
-                .help("根据当前文件重新生成提交说明")
+                .help(L10n.text("ui.regenerate_commit_instructions_based_on_current_file"))
             }
             .background(tokens.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
@@ -244,7 +244,7 @@ struct GitQuickPublishBox: View {
                 } else {
                     Image(systemName: "arrow.up.circle")
                 }
-                Text(status.hasChanges ? "提交并推送" : "推送当前分支")
+                Text(status.hasChanges ? L10n.text("ui.submit_and_push") : L10n.text("ui.push_current_branch"))
             }
             .font(themeStore.uiFont(.caption, weight: .semibold))
             .foregroundStyle(canQuickPublish ? Color.white : tokens.tertiaryText)
@@ -254,7 +254,7 @@ struct GitQuickPublishBox: View {
         }
         .buttonStyle(.plain)
         .disabled(!canQuickPublish)
-        .accessibilityHint("暂存当前工作区变更，提交后普通推送到 origin")
+        .accessibilityHint(L10n.text("ui.temporarily_save_changes_to_the_current_workspace_and"))
     }
 
     @ViewBuilder
@@ -267,7 +267,7 @@ struct GitQuickPublishBox: View {
                 } else {
                     Image(systemName: "paperplane")
                 }
-                Text(releaseIsRunning ? "正在发布 TestFlight" : "发布 TestFlight")
+                Text(releaseIsRunning ? L10n.text("ui.publishing_testflight") : L10n.text("ui.publish_testflight"))
             }
             .font(themeStore.uiFont(.caption, weight: .semibold))
             .foregroundStyle(canPublishTestFlight ? tokens.primaryText : tokens.tertiaryText)
@@ -281,7 +281,7 @@ struct GitQuickPublishBox: View {
         }
         .buttonStyle(.plain)
         .disabled(!canPublishTestFlight)
-        .accessibilityHint("在主机执行已配置并通过预检的本地 TestFlight 发布流程")
+        .accessibilityHint(L10n.text("ui.execute_a_configured_and_preflighted_local_testflight_publishing"))
     }
 
     @ViewBuilder
@@ -305,9 +305,9 @@ struct GitQuickPublishBox: View {
 
     private func releaseJobTitle(_ job: GitTestFlightJob) -> String {
         switch job.state {
-        case "running": return "TestFlight 发布进行中"
-        case "succeeded": return "TestFlight 发布完成"
-        default: return "TestFlight 发布失败"
+        case "running": return L10n.text("ui.testflight_release_in_progress")
+        case "succeeded": return L10n.text("ui.testflight_release_completed")
+        default: return L10n.text("ui.testflight_publishing_failed")
         }
     }
 

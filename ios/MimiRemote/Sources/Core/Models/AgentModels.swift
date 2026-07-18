@@ -224,11 +224,11 @@ enum SessionForegroundActivity: Equatable, Sendable {
     var title: String {
         switch self {
         case .refreshing:
-            return "同步中"
+            return L10n.text("ui.synchronizing")
         case .waitingForAssistant:
-            return "等待回复"
+            return L10n.text("ui.waiting_for_reply")
         case .receivingAssistant:
-            return "正在回复"
+            return L10n.text("ui.replying")
         }
     }
 
@@ -298,45 +298,45 @@ struct RuntimeActivityDisplay: Equatable {
         }
         // 这里表达的是“最近收到 runtime 事件”的证据，不判断命令是否真的卡死。
         // 长命令无输出时，用户看到的是无新事件时长和连接状态，避免误报。
-        let runningText = "运行 \(compactClockDuration(now.timeIntervalSince(snapshot.turnStartedAt)))"
+        let runningText = L10n.format("ui.run_value", compactClockDuration(now.timeIntervalSince(snapshot.turnStartedAt)))
         let idleSeconds = max(0, now.timeIntervalSince(snapshot.lastActivityAt))
 
         switch webSocketStatus {
         case .connected:
             if idleSeconds <= freshThreshold {
                 return RuntimeActivityDisplay(
-                    detailText: "\(runningText) · 最后活动 \(relativeDurationText(idleSeconds))前",
+                    detailText: L10n.format("ui.value_last_activity_value_ago", runningText, relativeDurationText(idleSeconds)),
                     tone: .active,
                     systemImage: "dot.radiowaves.left.and.right"
                 )
             }
             if idleSeconds <= staleThreshold {
                 return RuntimeActivityDisplay(
-                    detailText: "\(runningText) · 等待输出 · \(relativeDurationText(idleSeconds))无新事件",
+                    detailText: L10n.format("ui.value_waiting_for_output_value_no_new_events", runningText, relativeDurationText(idleSeconds)),
                     tone: .neutral,
                     systemImage: "hourglass"
                 )
             }
             return RuntimeActivityDisplay(
-                detailText: "\(runningText) · 连接正常 · \(relativeDurationText(idleSeconds))无新事件",
+                detailText: L10n.format("ui.value_the_connection_is_normal_value_no_new", runningText, relativeDurationText(idleSeconds)),
                 tone: .warning,
                 systemImage: "exclamationmark.triangle"
             )
         case .connecting:
             return RuntimeActivityDisplay(
-                detailText: "\(runningText) · 正在重连 · 无法确认运行状态",
+                detailText: L10n.format("ui.value_reconnecting_unable_to_confirm_running_status", runningText),
                 tone: .warning,
                 systemImage: "antenna.radiowaves.left.and.right.slash"
             )
         case .disconnected, .failed:
             return RuntimeActivityDisplay(
-                detailText: "\(runningText) · 连接断开 · 无法确认运行状态",
+                detailText: L10n.format("ui.value_connection_disconnected_unable_to_confirm_running_status", runningText),
                 tone: .warning,
                 systemImage: "wifi.slash"
             )
         case .terminated(let reason):
             return RuntimeActivityDisplay(
-                detailText: "\(runningText) · \(reason.title) · 无法确认运行状态",
+                detailText: L10n.format("ui.value_value_unable_to_confirm_running_status", runningText, reason.title),
                 tone: .warning,
                 systemImage: "lock.trianglebadge.exclamationmark"
             )
@@ -357,16 +357,16 @@ struct RuntimeActivityDisplay: Equatable {
     static func relativeDurationText(_ duration: TimeInterval) -> String {
         let seconds = max(0, Int(duration.rounded()))
         if seconds < 60 {
-            return "\(seconds) 秒"
+            return L10n.plural("ui.seconds_count", count: seconds)
         }
         let minutes = seconds / 60
         let remainingSeconds = seconds % 60
         if minutes < 60 {
-            return remainingSeconds == 0 ? "\(minutes) 分钟" : "\(minutes)m \(remainingSeconds)s"
+            return remainingSeconds == 0 ? L10n.plural("ui.minutes_count", count: minutes) : "\(minutes)m \(remainingSeconds)s"
         }
         let hours = minutes / 60
         let remainingMinutes = minutes % 60
-        return remainingMinutes == 0 ? "\(hours) 小时" : "\(hours)h \(remainingMinutes)m"
+        return remainingMinutes == 0 ? L10n.plural("ui.hours_count", count: hours) : "\(hours)h \(remainingMinutes)m"
     }
 }
 
@@ -375,33 +375,33 @@ extension AgentSession {
         // 侧栏和对话顶部共用这套优先级，避免同一个会话在不同入口显示成两种状态。
         // 审批/输入是需要用户处理的状态，优先级高于流式输出；foreground activity 负责区分等待回复和正在回复。
         if status == SessionStatus.waitingForApproval.rawValue || pendingApproval != nil {
-            return AgentSessionDisplayStatus(title: "待审批", systemImage: "checkmark.seal.fill", tone: .warning, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.pending_approval"), systemImage: "checkmark.seal.fill", tone: .warning, showsSpinner: false)
         }
         if status == SessionStatus.waitingForInput.rawValue || pendingUserInput != nil {
-            return AgentSessionDisplayStatus(title: "待输入", systemImage: "keyboard", tone: .warning, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.to_be_entered"), systemImage: "keyboard", tone: .warning, showsSpinner: false)
         }
         if let foregroundActivity {
             return foregroundActivity.displayStatus
         }
         if activeTurnID != nil {
-            return AgentSessionDisplayStatus(title: "处理中", systemImage: "bolt.fill", tone: .active, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.processing"), systemImage: "bolt.fill", tone: .active, showsSpinner: false)
         }
 
         switch status {
         case SessionStatus.running.rawValue:
-            return AgentSessionDisplayStatus(title: "运行中", systemImage: "circle.dotted", tone: .active, showsSpinner: true)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.running"), systemImage: "circle.dotted", tone: .active, showsSpinner: true)
         case SessionStatus.history.rawValue:
-            return AgentSessionDisplayStatus(title: "历史", systemImage: "clock.arrow.circlepath", tone: .neutral, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.history"), systemImage: "clock.arrow.circlepath", tone: .neutral, showsSpinner: false)
         case SessionStatus.completed.rawValue:
-            return AgentSessionDisplayStatus(title: "完成", systemImage: "checkmark.circle", tone: .complete, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.complete"), systemImage: "checkmark.circle", tone: .complete, showsSpinner: false)
         case SessionStatus.failed.rawValue:
-            return AgentSessionDisplayStatus(title: "失败", systemImage: "exclamationmark.triangle.fill", tone: .danger, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.failed_status"), systemImage: "exclamationmark.triangle.fill", tone: .danger, showsSpinner: false)
         case SessionStatus.closed.rawValue:
-            return AgentSessionDisplayStatus(title: "已结束", systemImage: "checkmark.circle", tone: .neutral, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.ended"), systemImage: "checkmark.circle", tone: .neutral, showsSpinner: false)
         case SessionStatus.idle.rawValue:
-            return AgentSessionDisplayStatus(title: "空闲", systemImage: "pause.circle", tone: .neutral, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.free"), systemImage: "pause.circle", tone: .neutral, showsSpinner: false)
         case SessionStatus.unknown.rawValue, "":
-            return AgentSessionDisplayStatus(title: "状态待确认", systemImage: "circle", tone: .neutral, showsSpinner: false)
+            return AgentSessionDisplayStatus(title: L10n.text("ui.status_awaiting_confirmation"), systemImage: "circle", tone: .neutral, showsSpinner: false)
         default:
             let text = status.replacingOccurrences(of: "_", with: " ")
             return AgentSessionDisplayStatus(title: text, systemImage: "circle", tone: .neutral, showsSpinner: false)
@@ -411,20 +411,20 @@ extension AgentSession {
     func statusBadges(foregroundActivity: SessionForegroundActivity?) -> [AgentSessionStatusBadge] {
         var badges: [AgentSessionStatusBadge] = []
         if activeTurnID != nil {
-            badges.append(AgentSessionStatusBadge(id: "active-turn", title: "回合处理中", systemImage: "bolt.fill", tone: .active))
+            badges.append(AgentSessionStatusBadge(id: "active-turn", title: L10n.text("ui.round_in_progress"), systemImage: "bolt.fill", tone: .active))
         }
         if let approval = pendingApproval {
-            badges.append(AgentSessionStatusBadge(id: "approval-\(approval.id)", title: "审批 \(approval.title)", systemImage: "checkmark.seal", tone: .warning))
+            badges.append(AgentSessionStatusBadge(id: "approval-\(approval.id)", title: L10n.format("ui.approval_value", approval.title), systemImage: "checkmark.seal", tone: .warning))
         } else if let userInput = pendingUserInput {
-            badges.append(AgentSessionStatusBadge(id: "input-\(userInput.id)", title: "引导 \(userInput.title)", systemImage: "questionmark.bubble", tone: .warning))
+            badges.append(AgentSessionStatusBadge(id: "input-\(userInput.id)", title: L10n.format("ui.boot_value", userInput.title), systemImage: "questionmark.bubble", tone: .warning))
         } else if status == SessionStatus.waitingForInput.rawValue {
-            badges.append(AgentSessionStatusBadge(id: "waiting-input", title: "等待输入", systemImage: "keyboard", tone: .warning))
+            badges.append(AgentSessionStatusBadge(id: "waiting-input", title: L10n.text("ui.waiting_for_input"), systemImage: "keyboard", tone: .warning))
         }
         if let foregroundActivity {
             badges.append(AgentSessionStatusBadge(id: "foreground-\(foregroundActivity.title)", title: foregroundActivity.title, systemImage: foregroundActivity.displayStatus.systemImage, tone: foregroundActivity.displayStatus.tone))
         }
         if let goal {
-            badges.append(AgentSessionStatusBadge(id: "goal-\(goal.threadID)-\(goal.status.rawValue)", title: "目标 \(goal.sidebarProgressText)", systemImage: "target", tone: goal.status.sessionStatusTone))
+            badges.append(AgentSessionStatusBadge(id: "goal-\(goal.threadID)-\(goal.status.rawValue)", title: L10n.format("ui.target_value", goal.sidebarProgressText), systemImage: "target", tone: goal.status.sessionStatusTone))
         }
         if let usage = usage?.compactText {
             badges.append(AgentSessionStatusBadge(id: "usage-\(usage)", title: usage, systemImage: "gauge.with.dots.needle.33percent", tone: .neutral))
@@ -447,17 +447,17 @@ enum ThreadGoalStatus: String, Codable, Hashable, CaseIterable {
     var displayText: String {
         switch self {
         case .active:
-            return "运行中"
+            return L10n.text("ui.running")
         case .paused:
-            return "已暂停"
+            return L10n.text("ui.suspended")
         case .blocked:
-            return "已阻塞"
+            return L10n.text("ui.blocked_059c4d40")
         case .usageLimited:
-            return "用量受限"
+            return L10n.text("ui.dosage_limited")
         case .budgetLimited:
-            return "预算用尽"
+            return L10n.text("ui.budget_exhausted")
         case .complete:
-            return "已完成"
+            return L10n.text("ui.completed_status")
         }
     }
 
@@ -716,6 +716,18 @@ struct ThreadGoal: Identifiable, Codable, Hashable {
     }()
 }
 
+enum ConversationTurnLifecycle: String, Codable, Hashable {
+    case inProgress
+    case completed
+    case interrupted
+    case failed
+    case unknown
+
+    var isTerminal: Bool {
+        self == .completed || self == .interrupted || self == .failed
+    }
+}
+
 struct CodexHistoryMessage: Identifiable, Codable, Hashable {
     var id: MessageID
     let role: String
@@ -732,6 +744,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
     let revision: ModelRevision?
     let sendStatus: MessageSendStatus?
     let timelineOrdinal: Int64?
+    let turnLifecycle: ConversationTurnLifecycle?
     let userDelivery: UserMessageDelivery?
     let isTimestampFallback: Bool
 
@@ -751,6 +764,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
         revision: ModelRevision? = nil,
         sendStatus: MessageSendStatus? = nil,
         timelineOrdinal: Int64? = nil,
+        turnLifecycle: ConversationTurnLifecycle? = nil,
         userDelivery: UserMessageDelivery? = nil,
         isTimestampFallback: Bool = false
     ) {
@@ -769,6 +783,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
         self.revision = revision
         self.sendStatus = sendStatus
         self.timelineOrdinal = timelineOrdinal
+        self.turnLifecycle = turnLifecycle
         self.userDelivery = userDelivery
         self.isTimestampFallback = isTimestampFallback
     }
@@ -789,6 +804,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
         case revision
         case sendStatus = "send_status"
         case timelineOrdinal = "timeline_ordinal"
+        case turnLifecycle = "turn_lifecycle"
         case userDelivery = "user_delivery"
         case isTimestampFallback = "is_timestamp_fallback"
     }
@@ -816,6 +832,7 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
             revision: try container.decodeIfPresent(ModelRevision.self, forKey: .revision),
             sendStatus: try container.decodeIfPresent(MessageSendStatus.self, forKey: .sendStatus),
             timelineOrdinal: try container.decodeIfPresent(Int64.self, forKey: .timelineOrdinal),
+            turnLifecycle: try container.decodeIfPresent(ConversationTurnLifecycle.self, forKey: .turnLifecycle),
             userDelivery: try container.decodeIfPresent(UserMessageDelivery.self, forKey: .userDelivery),
             isTimestampFallback: try container.decodeIfPresent(Bool.self, forKey: .isTimestampFallback) ?? false
         )
@@ -838,8 +855,32 @@ struct CodexHistoryMessage: Identifiable, Codable, Hashable {
             revision: revision,
             sendStatus: sendStatus,
             timelineOrdinal: timelineOrdinal,
+            turnLifecycle: turnLifecycle,
             userDelivery: userDelivery,
             isTimestampFallback: true
+        )
+    }
+
+    func withTurnLifecycle(_ lifecycle: ConversationTurnLifecycle) -> CodexHistoryMessage {
+        CodexHistoryMessage(
+            id: id,
+            role: role,
+            kind: kind,
+            content: content,
+            turnPayload: turnPayload,
+            activityPayload: activityPayload,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            clientMessageID: clientMessageID,
+            turnID: turnID,
+            itemID: itemID,
+            seq: seq,
+            revision: revision,
+            sendStatus: sendStatus,
+            timelineOrdinal: timelineOrdinal,
+            turnLifecycle: lifecycle,
+            userDelivery: userDelivery,
+            isTimestampFallback: isTimestampFallback
         )
     }
 }
@@ -856,13 +897,13 @@ enum ConversationImageItemProjection {
         let source: String?
         switch item["type"]?.stringValue {
         case "imageGeneration":
-            title = "生成的图片"
+            title = L10n.text("ui.generated_image")
             let result = item["result"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
             // gateway 会把生成图的大段 base64 改写成短 history-media URL；若改写被关闭，
             // 优先回退 savedPath，避免再把 1-2 MB base64 塞进 Markdown 和 SwiftUI diff。
             source = result.flatMap(supportedImageSource) ?? firstNonEmptyPath(in: item, keys: ["savedPath", "saved_path"])
         case "imageView":
-            title = "截图"
+            title = L10n.text("ui.screenshot")
             source = firstNonEmptyPath(in: item, keys: ["path"])
         default:
             return nil
@@ -1271,6 +1312,7 @@ struct ConversationMessage: Identifiable, Hashable {
     var turnPayload: CodexAppServerTurnPayload?
     var activityPayload: ConversationActivityPayload?
     var timelineOrdinal: Int64?
+    var turnLifecycle: ConversationTurnLifecycle?
     var userDelivery: UserMessageDelivery?
     var isTimestampFallback: Bool
     private(set) var contentRevision: UInt64
@@ -1301,6 +1343,7 @@ struct ConversationMessage: Identifiable, Hashable {
         turnPayload: CodexAppServerTurnPayload? = nil,
         activityPayload: ConversationActivityPayload? = nil,
         timelineOrdinal: Int64? = nil,
+        turnLifecycle: ConversationTurnLifecycle? = nil,
         userDelivery: UserMessageDelivery? = nil,
         isTimestampFallback: Bool = false
     ) {
@@ -1319,6 +1362,7 @@ struct ConversationMessage: Identifiable, Hashable {
         self.turnPayload = turnPayload
         self.activityPayload = activityPayload
         self.timelineOrdinal = timelineOrdinal
+        self.turnLifecycle = turnLifecycle
         self.userDelivery = userDelivery
         self.isTimestampFallback = isTimestampFallback
         let fingerprint = Self.makeRenderFingerprint(for: content)
@@ -1342,6 +1386,7 @@ struct ConversationMessage: Identifiable, Hashable {
             && lhs.turnPayload == rhs.turnPayload
             && lhs.activityPayload == rhs.activityPayload
             && lhs.timelineOrdinal == rhs.timelineOrdinal
+            && lhs.turnLifecycle == rhs.turnLifecycle
             && lhs.userDelivery == rhs.userDelivery
             && lhs.isTimestampFallback == rhs.isTimestampFallback
             && lhs.contentDigest == rhs.contentDigest
@@ -1363,6 +1408,7 @@ struct ConversationMessage: Identifiable, Hashable {
         hasher.combine(turnPayload)
         hasher.combine(activityPayload)
         hasher.combine(timelineOrdinal)
+        hasher.combine(turnLifecycle)
         hasher.combine(userDelivery)
         hasher.combine(isTimestampFallback)
         hasher.combine(contentDigest)
@@ -1510,17 +1556,17 @@ struct ConversationActivityPayload: Codable, Hashable {
             guard let text = Self.firstString(in: item, keys: ["text"])?.trimmedNonEmpty else {
                 return nil
             }
-            self.init(category: .plan, displayTitle: "计划", subtitle: text)
+            self.init(category: .plan, displayTitle: L10n.text("ui.plan"), subtitle: text)
 
         case "reasoning":
             let text = Self.reasoningText(from: item)
             guard !text.isEmpty else {
                 return nil
             }
-            self.init(category: .thinking, displayTitle: "推理摘要", subtitle: text)
+            self.init(category: .thinking, displayTitle: L10n.text("ui.reasoning_summary"), subtitle: text)
 
         case "commandExecution":
-            let command = Self.firstString(in: item, keys: ["command", "processId"])?.trimmedNonEmpty ?? "命令执行"
+            let command = Self.firstString(in: item, keys: ["command", "processId"])?.trimmedNonEmpty ?? L10n.text("ui.command_execution")
             let actionTitle = Self.commandActionTitle(from: item["commandActions"]?.arrayValue)
             let status = Self.firstString(in: item, keys: ["status"])?.trimmedNonEmpty
             let cwd = Self.firstString(in: item, keys: ["cwd"])?.trimmedNonEmpty
@@ -1529,7 +1575,7 @@ struct ConversationActivityPayload: Codable, Hashable {
             let outputByteCount = output?.utf8.count
             self.init(
                 category: .runCommand,
-                displayTitle: actionTitle ?? "运行 \(command)",
+                displayTitle: actionTitle ?? L10n.format("ui.run_value", command),
                 subtitle: cwd,
                 status: status,
                 command: command,
@@ -1544,8 +1590,8 @@ struct ConversationActivityPayload: Codable, Hashable {
             let changes = item["changes"]?.arrayValue?.compactMap(\.objectValue) ?? []
             let filePaths = Self.filePaths(from: changes)
             let status = Self.firstString(in: item, keys: ["status"])?.trimmedNonEmpty ?? "modified"
-            let summary = filePaths.first.map(Self.shortPath) ?? "工作区"
-            let title = filePaths.count > 1 ? "修改 \(filePaths.count) 个文件" : "修改 \(summary)"
+            let summary = filePaths.first.map(Self.shortPath) ?? L10n.text("ui.workspace")
+            let title = filePaths.count > 1 ? L10n.plural("ui.files_modified_count", count: filePaths.count) : L10n.format("ui.modify_value", summary)
             self.init(category: .editFile, displayTitle: title, subtitle: status, status: status, filePaths: filePaths)
 
         case "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "webSearch":
@@ -1600,21 +1646,21 @@ struct ConversationActivityPayload: Codable, Hashable {
     var displayStatusText: String? {
         switch normalizedStatus {
         case "completed", "complete", "success", "succeeded":
-            return "已完成"
+            return L10n.text("ui.completed_status")
         case "failed", "failure", "error":
-            return "失败"
+            return L10n.text("ui.failed_status")
         case "inprogress", "running", "started":
-            return "进行中"
+            return L10n.text("ui.in_progress")
         case "pending", "queued":
-            return "等待中"
+            return L10n.text("ui.waiting")
         case "cancelled", "canceled":
-            return "已取消"
+            return L10n.text("ui.canceled")
         case "modified":
-            return "已修改"
+            return L10n.text("ui.modified")
         case "added", "created":
-            return "已新增"
+            return L10n.text("ui.added")
         case "deleted", "removed":
-            return "已删除"
+            return L10n.text("ui.deleted")
         default:
             return nil
         }
@@ -1700,35 +1746,35 @@ struct ConversationActivityPayload: Codable, Hashable {
 
     private var commandSummaryText: String {
         let command = command?.trimmedNonEmpty ?? displayTitle
-        var lines = ["命令：\(command)"]
+        var lines = [L10n.format("ui.command_value", command)]
         if let cwd {
-            lines.append("目录：\(cwd)")
+            lines.append(L10n.format("ui.directory_value", cwd))
         }
-        let statusLine = [displayStatusText.map { "状态：\($0)" }, exitCode.map { "退出码：\($0)" }]
+        let statusLine = [displayStatusText.map { L10n.format("ui.status_value_bcee9cc0", $0) }, exitCode.map { L10n.format("ui.exit_code_value_3dde4ee9", $0) }]
             .compactMap { $0 }
-            .joined(separator: "，")
+            .joined(separator: L10n.text("ui.list_separator"))
         if !statusLine.isEmpty {
             lines.append(statusLine)
         }
         if let outputPreview {
-            lines.append("输出：\n\(outputPreview)")
+            lines.append(L10n.format("ui.output_value_301e2a77", outputPreview))
         }
         return lines.joined(separator: "\n")
     }
 
     private var fileChangeSummaryText: String {
-        let summary = filePaths.isEmpty ? (displayTitle.replacingOccurrences(of: "修改 ", with: "")) : Self.compactFileSummary(filePaths)
+        let summary = filePaths.isEmpty ? (displayTitle.replacingOccurrences(of: L10n.text("ui.modify"), with: "")) : Self.compactFileSummary(filePaths)
         guard let displayStatusText else {
-            return "文件变更：\(summary)"
+            return L10n.format("ui.file_changes_value", summary)
         }
-        return "文件变更：\(summary) \(displayStatusText)"
+        return L10n.format("ui.file_changes_value_value", summary, displayStatusText)
     }
 
     private var toolSummaryText: String {
         guard let displayStatusText else {
-            return "工具：\(displayTitle)"
+            return L10n.format("ui.tool_value", displayTitle)
         }
-        return "工具：\(displayTitle)\n状态：\(displayStatusText)"
+        return L10n.format("ui.tool_value_status_value", displayTitle, displayStatusText)
     }
 
     private var normalizedStatus: String {
@@ -1760,42 +1806,45 @@ struct ConversationActivityPayload: Codable, Hashable {
     private static func commandActionTitle(from actions: [CodexAppServerJSONValue]?) -> String? {
         for action in actions?.compactMap(\.objectValue) ?? [] {
             if let query = firstString(in: action, keys: ["query"])?.trimmedNonEmpty {
-                return "搜索 \(query)"
+                return L10n.format("ui.search_query", query)
             }
             let name = firstString(in: action, keys: ["name", "type", "kind"])?.trimmedNonEmpty
             let path = firstString(in: action, keys: ["path", "file", "filePath", "relativePath"])?.trimmedNonEmpty
+            // app-server 会把无法结构化解析的 shell 命令标记为 Unknown。
+            // 该值只描述协议解析结果，不是面向用户的动作名称；详细命令仍由 command 字段展示。
+            if name != nil, localizedActionVerb(name) == nil {
+                return L10n.text("ui.run_command")
+            }
             if let path {
-                let verb = localizedActionVerb(name)
+                let verb = localizedActionVerb(name) ?? L10n.text("ui.view")
                 return "\(verb) \(shortPath(path))"
             }
-            if let name {
-                return localizedActionVerb(name)
+            if let verb = localizedActionVerb(name) {
+                return verb
             }
         }
         return nil
     }
 
-    private static func localizedActionVerb(_ value: String?) -> String {
+    private static func localizedActionVerb(_ value: String?) -> String? {
         switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "read", "view", "open", "cat":
-            return "查看"
+            return L10n.text("ui.view")
         case "search", "grep", "rg", "find":
-            return "搜索"
+            return L10n.text("ui.search")
         case "list", "ls":
-            return "列出"
-        case let value? where !value.isEmpty:
-            return value
+            return L10n.text("ui.list")
         default:
-            return "查看"
+            return nil
         }
     }
 
     private static func toolTitle(from item: [String: CodexAppServerJSONValue], type: String) -> String {
         if type == "webSearch" {
             if let query = firstString(in: item, keys: ["query"])?.trimmedNonEmpty {
-                return "网络搜索：\(query)"
+                return L10n.format("ui.internet_search_value", query)
             }
-            return "网络搜索"
+            return L10n.text("ui.web_search")
         }
 
         let namespace = firstString(in: item, keys: ["server", "namespace"])?.trimmedNonEmpty
@@ -1804,45 +1853,45 @@ struct ConversationActivityPayload: Codable, Hashable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
             .replacingOccurrences(of: "-", with: "_") {
-        case "session_set_defaults": return "配置 Xcode 会话"
-        case "test_sim": return "运行模拟器测试"
-        case "test_device": return "运行真机测试"
-        case "build_sim": return "构建模拟器版本"
-        case "build_device": return "构建真机版本"
-        case "build_run_sim": return "构建并运行 App"
-        case "launch_app_sim": return "启动 App"
-        case "stop_app_sim": return "停止 App"
-        case "clean": return "清理构建产物"
-        case "screenshot": return "截取界面"
-        case "ui_describe_all": return "读取界面结构"
-        case "tap": return "点击界面"
-        case "swipe": return "滑动界面"
-        case "type_text": return "输入文本"
-        case "key_press": return "按下按键"
-        case "open", "navigate": return namespace?.lowercased() == "browser" ? "打开网页" : "打开内容"
-        case "click": return "点击页面"
-        case "find": return "查找页面内容"
-        case "search", "search_query": return "搜索网络"
-        case "view_image": return "查看图片"
-        case "imagegen": return "生成图片"
-        case "apply_patch": return "修改文件"
-        case "exec_command": return "运行命令"
-        case "wait": return "等待任务完成"
-        case "update_plan": return "更新计划"
-        case "request_user_input": return "请求补充信息"
-        case "read_mcp_resource": return "读取资源"
-        case "list_mcp_resources", "list_mcp_resource_templates": return "列出资源"
-        case "spawn_agent": return "启动子任务"
-        case "send_message": return "发送协作消息"
+        case "session_set_defaults": return L10n.text("ui.configure_an_xcode_session")
+        case "test_sim": return L10n.text("ui.run_emulator_tests")
+        case "test_device": return L10n.text("ui.run_real_device_tests")
+        case "build_sim": return L10n.text("ui.build_emulator_version")
+        case "build_device": return L10n.text("ui.build_a_real_device_version")
+        case "build_run_sim": return L10n.text("ui.build_and_run_the_app")
+        case "launch_app_sim": return L10n.text("ui.launch_the_app")
+        case "stop_app_sim": return L10n.text("ui.stop_app")
+        case "clean": return L10n.text("ui.clean_build_artifacts")
+        case "screenshot": return L10n.text("ui.interception_interface")
+        case "ui_describe_all": return L10n.text("ui.read_interface_structure")
+        case "tap": return L10n.text("ui.click_interface")
+        case "swipe": return L10n.text("ui.sliding_interface")
+        case "type_text": return L10n.text("ui.enter_text")
+        case "key_press": return L10n.text("ui.press_button")
+        case "open", "navigate": return namespace?.lowercased() == "browser" ? L10n.text("ui.open_web_page") : L10n.text("ui.open_content")
+        case "click": return L10n.text("ui.click_page")
+        case "find": return L10n.text("ui.find_page_content")
+        case "search", "search_query": return L10n.text("ui.search_the_web")
+        case "view_image": return L10n.text("ui.view_pictures")
+        case "imagegen": return L10n.text("ui.generate_pictures")
+        case "apply_patch": return L10n.text("ui.modify_files_action")
+        case "exec_command": return L10n.text("ui.run_command")
+        case "wait": return L10n.text("ui.wait_for_task_to_complete")
+        case "update_plan": return L10n.text("ui.update_plan")
+        case "request_user_input": return L10n.text("ui.request_additional_information")
+        case "read_mcp_resource": return L10n.text("ui.read_resources")
+        case "list_mcp_resources", "list_mcp_resource_templates": return L10n.text("ui.list_resources")
+        case "spawn_agent": return L10n.text("ui.start_subtask")
+        case "send_message": return L10n.text("ui.send_collaboration_message")
         default:
             break
         }
 
         switch namespace?.lowercased() {
-        case "xcodebuildmcp": return "运行 Xcode 工具"
-        case "browser": return "操作网页"
-        case "image_gen", "imagegen": return "生成图片"
-        default: return type == "collabAgentToolCall" ? "执行协作任务" : "调用工具"
+        case "xcodebuildmcp": return L10n.text("ui.run_xcode_tools")
+        case "browser": return L10n.text("ui.manipulate_the_web_page")
+        case "image_gen", "imagegen": return L10n.text("ui.generate_pictures")
+        default: return type == "collabAgentToolCall" ? L10n.text("ui.perform_collaborative_tasks") : L10n.text("ui.call_tool")
         }
     }
 

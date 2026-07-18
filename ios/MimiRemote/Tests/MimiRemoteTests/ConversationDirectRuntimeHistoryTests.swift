@@ -201,7 +201,7 @@ extension ConversationDataFlowTests {
         let page = try await pageTask.value
         XCTAssertEqual(page.messages.map(\.content), ["m1", "m2"])
         XCTAssertEqual(page.loadMode, .economy)
-        XCTAssertEqual(page.notice, "此会话包含较大的图片或工具输出，已使用省流模式加载。")
+        XCTAssertEqual(page.notice, L10n.text("ui.this_session_contains_large_images_or_tool_output"))
         XCTAssertTrue(page.hasMoreBefore)
     }
 
@@ -309,21 +309,21 @@ extension ConversationDataFlowTests {
         }
         XCTAssertEqual(commentary.itemID, "commentary_processed")
         XCTAssertEqual(commentary.kind, .commentary)
-        guard case .processGroup(let processGroup) = items[2] else {
+        guard case .message(let plan) = items[2] else {
+            return XCTFail("plan 应保留在服务端 source order 中")
+        }
+        XCTAssertEqual(plan.kind, .plan)
+        XCTAssertEqual(plan.content, "让子 agent 生成一个短笑话。")
+        guard case .processGroup(let processGroup) = items[3] else {
             return XCTFail("真实 reasoning 与后续命令应合并为可折叠阶段")
         }
         XCTAssertEqual(processGroup.header.itemID, "reasoning_processed")
         XCTAssertEqual(processGroup.activities.map(\.itemID), ["cmd_processed"])
-        guard case .message(let final) = items[3] else {
+        guard case .message(let final) = items[4] else {
             return XCTFail("最终 assistant 应保持独立展开")
         }
         XCTAssertEqual(final.role, .assistant)
         XCTAssertEqual(final.content, "程序员相亲，对方问：你会浪漫吗？")
-        guard case .message(let plan) = items[4] else {
-            return XCTFail("plan 应固定在最终 assistant 后")
-        }
-        XCTAssertEqual(plan.kind, .plan)
-        XCTAssertEqual(plan.content, "让子 agent 生成一个短笑话。")
     }
 
     func testDirectRuntimeDropsStaleReplayedApprovalForIdleThread() async throws {
@@ -1212,9 +1212,13 @@ extension ConversationDataFlowTests {
 
         let sent = await sendTask.value
         XCTAssertTrue(sent)
-        _ = try await waitForConversationMessages(in: conversationStore, sessionID: "thr_idle_history") {
-            $0.contains { $0.content == "已继续这个历史会话。" }
-        }
+        XCTAssertFalse(
+            conversationStore.messages(for: "thr_idle_history").contains {
+                $0.content == L10n.text("ui.this_historical_conversation_has_been_continued")
+            },
+            "恢复提示是本地生命周期反馈，不能混入服务端 transcript"
+        )
+        XCTAssertEqual(store.statusMessage, L10n.text("ui.this_historical_conversation_has_been_continued"))
     }
 
     func testStartTurnResumesThreadOnConnectionBeforeFirstTurnStart() async throws {
@@ -1384,11 +1388,18 @@ extension ConversationDataFlowTests {
         if case .processItemCompleted(let message, let context, _) = try XCTUnwrap(projector.project(toolCompleted)) {
             XCTAssertEqual(message.role, .system)
             XCTAssertEqual(message.kind, .commandSummary)
-            XCTAssertEqual(message.content, "工具：打开网页\n状态：已完成")
+            XCTAssertEqual(
+                message.content,
+                L10n.format(
+                    "ui.tool_value_status_value",
+                    L10n.text("ui.open_web_page"),
+                    L10n.text("ui.completed_status")
+                )
+            )
             XCTAssertEqual(message.activityPayload?.category, .toolCall)
-            XCTAssertEqual(message.activityPayload?.displayTitle, "打开网页")
+            XCTAssertEqual(message.activityPayload?.displayTitle, L10n.text("ui.open_web_page"))
             XCTAssertEqual(context?.tasks.first?.kind, "dynamic_tool")
-            XCTAssertEqual(context?.tasks.first?.title, "打开网页")
+            XCTAssertEqual(context?.tasks.first?.title, L10n.text("ui.open_web_page"))
             XCTAssertEqual(context?.tasks.first?.status, "completed")
         } else {
             XCTFail("Expected tool completed processItemCompleted")
@@ -1590,9 +1601,9 @@ extension ConversationDataFlowTests {
     }
 
     func testCodexUsageDisplaySummaryFormatsRateLimit() throws {
-        XCTAssertEqual(RateLimitSummary(remainingRequests: 18).compactText, "剩余 18 次")
-        XCTAssertEqual(RateLimitSummary(primaryUsedPercent: 72).compactText, "已用 72%")
-        XCTAssertEqual(RateLimitSummary(primaryUsedPercent: 100).compactText, "额度已用尽")
+        XCTAssertEqual(RateLimitSummary(remainingRequests: 18).compactText, L10n.plural("ui.times_remaining_count", count: 18))
+        XCTAssertEqual(RateLimitSummary(primaryUsedPercent: 72).compactText, L10n.format("ui.used_value", "72%"))
+        XCTAssertEqual(RateLimitSummary(primaryUsedPercent: 100).compactText, L10n.text("ui.quota_has_been_exhausted"))
         XCTAssertNil(CodexUsageDisplaySummary.make(rateLimit: nil))
         XCTAssertNil(CodexUsageDisplaySummary.make(rateLimit: RateLimitSummary(limitID: "codex")))
 
@@ -1607,10 +1618,9 @@ extension ConversationDataFlowTests {
             secondaryWindowDurationMins: 10_080
         )
         let display = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: summary, now: now))
-        XCTAssertEqual(display.title, "Codex 使用量")
-        XCTAssertEqual(display.primaryText, "已用 60%")
-        XCTAssertEqual(display.secondaryText.hasPrefix("预计 "), true)
-        XCTAssertEqual(display.secondaryText.hasSuffix(" 重置"), true)
+        XCTAssertEqual(display.title, L10n.text("ui.codex_usage"))
+        XCTAssertEqual(display.primaryText, L10n.format("ui.used_value", "60%"))
+        XCTAssertFalse(display.secondaryText.isEmpty)
         XCTAssertEqual(display.progress ?? -1, 0.6, accuracy: 0.0001)
         XCTAssertEqual(display.resetDate, Date(timeIntervalSince1970: TimeInterval(resetEpoch)))
         XCTAssertFalse(display.isNearLimit)
@@ -1620,30 +1630,33 @@ extension ConversationDataFlowTests {
         let fiveHourWindow = try XCTUnwrap(windowsDisplay.windows.first { $0.kind == .primary })
         let sevenDayWindow = try XCTUnwrap(windowsDisplay.windows.first { $0.kind == .secondary })
         XCTAssertEqual(windowsDisplay.displayName, "Codex")
-        XCTAssertEqual(windowsDisplay.creditText, "暂无余额信息")
+        XCTAssertEqual(windowsDisplay.creditText, L10n.text("ui.no_balance_information_yet"))
         XCTAssertTrue(windowsDisplay.hasLiveData)
-        XCTAssertEqual(windowsDisplay.windowSummaryText, "5h 和 7d 账号窗口")
+        XCTAssertEqual(
+            windowsDisplay.windowSummaryText,
+            L10n.format("ui.value_account_window", ["5h", "7d"].joined(separator: L10n.text("ui.and")))
+        )
         XCTAssertEqual(fiveHourWindow.label, "5h")
-        XCTAssertEqual(fiveHourWindow.title, "短窗口")
-        XCTAssertEqual(fiveHourWindow.primaryText, "已用 60%")
+        XCTAssertEqual(fiveHourWindow.title, L10n.text("ui.short_window"))
+        XCTAssertEqual(fiveHourWindow.primaryText, L10n.format("ui.used_value", "60%"))
         XCTAssertEqual(fiveHourWindow.progress ?? -1, 0.6, accuracy: 0.0001)
         XCTAssertEqual(fiveHourWindow.remainingProgress ?? -1, 0.4, accuracy: 0.0001)
         XCTAssertEqual(fiveHourWindow.remainingPercentText, "40%")
-        XCTAssertEqual(fiveHourWindow.remainingText, "剩余 40%")
+        XCTAssertEqual(fiveHourWindow.remainingText, L10n.format("ui.value_remaining", "40%"))
         XCTAssertEqual(fiveHourWindow.resetDate, Date(timeIntervalSince1970: TimeInterval(resetEpoch)))
-        XCTAssertEqual(fiveHourWindow.resetText.hasSuffix(" 重置"), true)
-        XCTAssertEqual(sevenDayWindow.primaryText, "已用 42%")
+        XCTAssertFalse(fiveHourWindow.resetText.isEmpty)
+        XCTAssertEqual(sevenDayWindow.primaryText, L10n.format("ui.used_value", "42%"))
         XCTAssertEqual(sevenDayWindow.label, "7d")
-        XCTAssertEqual(sevenDayWindow.title, "周窗口")
+        XCTAssertEqual(sevenDayWindow.title, L10n.text("ui.weekly_window"))
         XCTAssertEqual(sevenDayWindow.remainingProgress ?? -1, 0.58, accuracy: 0.0001)
-        XCTAssertEqual(sevenDayWindow.remainingText, "剩余 58%")
+        XCTAssertEqual(sevenDayWindow.remainingText, L10n.format("ui.value_remaining", "58%"))
         XCTAssertNil(sevenDayWindow.resetDate)
-        XCTAssertEqual(sevenDayWindow.resetText, "暂无重置时间")
+        XCTAssertEqual(sevenDayWindow.resetText, L10n.text("ui.no_reset_time_yet"))
 
         let pendingWindowsDisplay = CodexUsageWindowsDisplay.make(rateLimit: nil, now: now)
         XCTAssertFalse(pendingWindowsDisplay.hasLiveData)
         XCTAssertTrue(pendingWindowsDisplay.windows.isEmpty)
-        XCTAssertEqual(pendingWindowsDisplay.windowSummaryText, "尚未取得账号用量")
+        XCTAssertEqual(pendingWindowsDisplay.windowSummaryText, L10n.text("ui.account_usage_has_not_been_obtained_yet"))
 
         let claudeWindowsDisplay = CodexUsageWindowsDisplay.make(
             rateLimit: RateLimitSummary(
@@ -1671,7 +1684,7 @@ extension ConversationDataFlowTests {
             now: now,
             fallbackDisplayName: "Claude"
         )
-        XCTAssertEqual(unavailableClaude.creditText, "Headless 暂无额度百分比")
+        XCTAssertEqual(unavailableClaude.creditText, L10n.text("ui.headless_no_quota_percentage_yet"))
         XCTAssertTrue(unavailableClaude.windows.isEmpty)
 
         let boundedWindows = CodexUsageWindowsDisplay.make(
@@ -1681,16 +1694,16 @@ extension ConversationDataFlowTests {
         let boundedFiveHour = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .primary })
         let boundedSevenDay = try XCTUnwrap(boundedWindows.windows.first { $0.kind == .secondary })
         XCTAssertEqual(boundedFiveHour.remainingProgress ?? -1, 1, accuracy: 0.0001)
-        XCTAssertEqual(boundedFiveHour.remainingText, "剩余 100%")
+        XCTAssertEqual(boundedFiveHour.remainingText, L10n.format("ui.value_remaining", "100%"))
         XCTAssertEqual(boundedSevenDay.remainingProgress ?? -1, 0, accuracy: 0.0001)
-        XCTAssertEqual(boundedSevenDay.remainingText, "剩余 0%")
+        XCTAssertEqual(boundedSevenDay.remainingText, L10n.format("ui.value_remaining", "0%"))
 
         let fractionalWindows = CodexUsageWindowsDisplay.make(
             rateLimit: RateLimitSummary(primaryUsedPercent: 10.5),
             now: now
         )
         let fractionalFiveHour = try XCTUnwrap(fractionalWindows.windows.first { $0.kind == .primary })
-        XCTAssertEqual(fractionalFiveHour.remainingText, "剩余 89.5%")
+        XCTAssertEqual(fractionalFiveHour.remainingText, L10n.format("ui.value_remaining", "89.5%"))
 
         let weeklyOnly = CodexUsageWindowsDisplay.make(
             rateLimit: RateLimitSummary(
@@ -1702,8 +1715,8 @@ extension ConversationDataFlowTests {
         )
         XCTAssertEqual(weeklyOnly.windows.count, 1)
         XCTAssertEqual(weeklyOnly.windows.first?.label, "7d")
-        XCTAssertEqual(weeklyOnly.windows.first?.title, "周窗口")
-        XCTAssertEqual(weeklyOnly.windowSummaryText, "7d 账号窗口")
+        XCTAssertEqual(weeklyOnly.windows.first?.title, L10n.text("ui.weekly_window"))
+        XCTAssertEqual(weeklyOnly.windowSummaryText, L10n.format("ui.value_account_window", "7d"))
 
         let customAndUnknown = CodexUsageWindowsDisplay.make(
             rateLimit: RateLimitSummary(
@@ -1713,8 +1726,8 @@ extension ConversationDataFlowTests {
             ),
             now: now
         )
-        XCTAssertEqual(customAndUnknown.windows.map(\.label), ["90m", "窗口"])
-        XCTAssertEqual(customAndUnknown.windows.map(\.title), ["账号窗口", "账号窗口"])
+        XCTAssertEqual(customAndUnknown.windows.map(\.label), ["90m", L10n.text("ui.window")])
+        XCTAssertEqual(customAndUnknown.windows.map(\.title), [L10n.text("ui.account_window_title"), L10n.text("ui.account_window_title")])
 
         let eightyPercent = try XCTUnwrap(CodexUsageDisplaySummary.make(rateLimit: RateLimitSummary(primaryUsedPercent: 80), now: now))
         XCTAssertFalse(eightyPercent.isNearLimit)
@@ -1728,7 +1741,7 @@ extension ConversationDataFlowTests {
         XCTAssertTrue(exhaustedDisplay.isExhausted)
         let exhaustedNotice = try XCTUnwrap(CodexQuotaNotice.make(rateLimit: exhaustedLimit, errorMessage: nil, now: now))
         XCTAssertTrue(exhaustedNotice.blocksSending)
-        XCTAssertEqual(exhaustedNotice.title, "Codex 消息额度已用尽")
+        XCTAssertEqual(exhaustedNotice.title, L10n.text("ui.codex_message_quota_has_been_exhausted"))
 
         let secondaryResetEpoch: Int64 = 1_780_497_900
         let secondaryDriven = try XCTUnwrap(CodexUsageDisplaySummary.make(
@@ -1884,7 +1897,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(session.rateLimit?.primaryUsedPercent, 100)
         XCTAssertEqual(session.rateLimit?.primaryResetsAt, 1_780_494_300)
         XCTAssertTrue(try XCTUnwrap(session.rateLimit?.isExhausted))
-        XCTAssertEqual(session.rateLimit?.compactText, "额度已用尽")
+        XCTAssertEqual(session.rateLimit?.compactText, L10n.text("ui.quota_has_been_exhausted"))
     }
 
     func testQuotaNoticeRecognizesQuotaButIgnoresSkillBudgetWarning() {

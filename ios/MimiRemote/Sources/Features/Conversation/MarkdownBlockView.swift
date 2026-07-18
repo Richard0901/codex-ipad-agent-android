@@ -155,8 +155,8 @@ struct MarkdownBlockView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(style.codeForeground.opacity(0.72))
-                .help("复制代码")
-                .accessibilityLabel("复制代码")
+                .help(L10n.text("ui.copy_code"))
+                .accessibilityLabel(L10n.text("ui.copy_code"))
             }
 
             ScrollView(.horizontal, showsIndicators: true) {
@@ -179,7 +179,7 @@ struct MarkdownBlockView: View {
                 Image(systemName: "list.clipboard")
                     .font(style.captionFont.weight(.semibold))
                     .foregroundStyle(style.linkColor)
-                Text("计划")
+                Text(L10n.text("ui.plan"))
                     .font(style.captionFont.weight(.semibold))
                     .foregroundStyle(style.secondaryColor)
                 if !isComplete {
@@ -405,7 +405,7 @@ struct ConversationImagePreview: View {
             } else if isLoadingLocalImage {
                 loadingPlaceholder
             } else {
-                fallback("图片数据无法解码", detail: "data:image/...")
+                fallback(L10n.text("ui.image_data_cannot_be_decoded"), detail: "data:image/...")
             }
         case .remoteURL(let url):
             AsyncImage(url: url) { phase in
@@ -415,9 +415,9 @@ struct ConversationImagePreview: View {
                 case .success(let image):
                     imageView(image)
                 case .failure:
-                    fallback("图片加载失败", detail: url.absoluteString)
+                    fallback(L10n.text("ui.image_loading_failed"), detail: url.absoluteString)
                 @unknown default:
-                    fallback("图片加载失败", detail: url.absoluteString)
+                    fallback(L10n.text("ui.image_loading_failed"), detail: url.absoluteString)
                 }
             }
         case .localPath(let path):
@@ -428,7 +428,7 @@ struct ConversationImagePreview: View {
         case .historyMedia(let id):
             historyMediaContent(id: id)
         case .unsupported(let value):
-            fallback("暂不支持这个图片地址", detail: compactSource(value))
+            fallback(L10n.text("ui.this_image_address_is_not_supported_yet"), detail: compactSource(value))
         }
     }
 
@@ -479,11 +479,11 @@ struct ConversationImagePreview: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(localFileURL == nil)
-                .accessibilityLabel("预览图片")
+                .accessibilityLabel(L10n.text("ui.preview_picture"))
             } else if isLoadingLocalImage {
                 loadingPlaceholder
             } else {
-                fallback(loadError ?? "图片尚未加载", detail: URL(fileURLWithPath: path).lastPathComponent)
+                fallback(loadError ?? L10n.text("ui.image_not_loaded_yet"), detail: URL(fileURLWithPath: path).lastPathComponent)
             }
         }
     }
@@ -498,7 +498,7 @@ struct ConversationImagePreview: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(localFileURL == nil)
-                .accessibilityLabel("预览历史图片")
+                .accessibilityLabel(L10n.text("ui.preview_historical_pictures"))
             } else if isLoadingLocalImage {
                 loadingPlaceholder
             } else {
@@ -507,10 +507,10 @@ struct ConversationImagePreview: View {
                         await loadHistoryMedia(id: id)
                     }
                 } label: {
-                    fallback(loadError == nil ? "历史图片未加载" : "历史图片加载失败", detail: loadError ?? "点按加载")
+                    fallback(loadError == nil ? L10n.text("ui.historical_images_not_loaded") : L10n.text("ui.failed_to_load_historical_images"), detail: loadError ?? L10n.text("ui.click_to_load"))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("加载历史图片")
+                .accessibilityLabel(L10n.text("ui.load_historical_images"))
             }
         }
     }
@@ -543,7 +543,7 @@ struct ConversationImagePreview: View {
         HStack(spacing: 8) {
             ProgressView()
                 .controlSize(.small)
-            Text("图片加载中")
+            Text(L10n.text("ui.picture_loading"))
                 .font(style.captionFont)
         }
         .foregroundStyle(style.secondaryColor)
@@ -578,7 +578,7 @@ struct ConversationImagePreview: View {
     private func loadLocalImage(path: String) async {
         let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !targetPath.isEmpty else {
-            loadError = "本机路径为空，无法加载图片。"
+            loadError = L10n.text("ui.the_local_path_is_empty_and_the_image")
             return
         }
 
@@ -596,7 +596,7 @@ struct ConversationImagePreview: View {
                 return
             }
             guard let image = UIImage(contentsOfFile: url.path) else {
-                loadError = "文件已读取，但无法按图片解码。"
+                loadError = L10n.text("ui.the_file_was_read_but_could_not_be")
                 return
             }
             localFileURL = url
@@ -610,7 +610,7 @@ struct ConversationImagePreview: View {
     private func loadHistoryMedia(id: String) async {
         let targetID = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !targetID.isEmpty else {
-            loadError = "历史图片 ID 为空，无法加载。"
+            loadError = L10n.text("ui.the_historical_image_id_is_empty_and_cannot")
             return
         }
 
@@ -627,7 +627,7 @@ struct ConversationImagePreview: View {
                 return
             }
             guard let image = UIImage(contentsOfFile: url.path) else {
-                loadError = "历史图片已读取，但无法按图片解码。"
+                loadError = L10n.text("ui.historical_pictures_were_read_but_could_not_be")
                 return
             }
             localFileURL = url
@@ -641,23 +641,23 @@ struct ConversationImagePreview: View {
 
     private func userFacingPreviewError(_ error: Error) -> String {
         if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
-            return "当前 agentd 版本还不支持文件预览，请升级 agentd。"
+            return L10n.text("ui.the_current_agentd_version_does_not_support_file")
         }
         if case AgentAPIError.server(let status, _) = error, status == 403 {
-            return "该文件不在授权范围内或不可访问。"
+            return L10n.text("ui.the_file_is_not_within_authorization_or_is")
         }
         if case AgentAPIError.server(let status, _) = error, status == 413 {
-            return "文件过大，暂不支持预览。"
+            return L10n.text("ui.the_file_is_too_large_and_preview_is")
         }
         return error.localizedDescription
     }
 
     private func userFacingHistoryMediaError(_ error: Error) -> String {
         if case AgentAPIError.server(let status, _) = error, status == 404 {
-            return "历史图片缓存已过期，请刷新会话后重试。"
+            return L10n.text("ui.the_historical_image_cache_has_expired_please_refresh")
         }
         if case AgentAPIError.server(let status, _) = error, status == 405 {
-            return "当前 agentd 版本还不支持历史图片按需加载，请升级 agentd。"
+            return L10n.text("ui.the_current_agentd_version_does_not_support_on")
         }
         return userFacingPreviewError(error)
     }

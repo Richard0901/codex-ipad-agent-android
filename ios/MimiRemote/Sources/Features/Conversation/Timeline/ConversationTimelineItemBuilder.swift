@@ -2,43 +2,14 @@ import Foundation
 
 struct ConversationTimelineItemBuilder {
     static func items(from messages: [ConversationMessage]) -> [ConversationTimelineItem] {
-        let completedAssistantByTurnID = completedAssistantMessagesByTurnID(in: messages)
-        let completedTurnIDs = Set(completedAssistantByTurnID.keys)
-        let planMessagesByTurnID = planMessagesByTurnID(in: messages, completedTurnIDs: completedTurnIDs)
-        let lateProcessMessagesByTurnID = lateProcessMessagesByTurnID(
-            in: messages,
-            completedAssistantByTurnID: completedAssistantByTurnID
-        )
-        let lateProcessMessageIDs = Set(lateProcessMessagesByTurnID.values.flatMap { $0.map(\.id) })
-        let pinnedPlanMessageIDs = Set(planMessagesByTurnID.values.flatMap { $0.map(\.id) })
-        var insertedLateProcessTurnIDs = Set<TurnID>()
-        var insertedPlanTurnIDs = Set<TurnID>()
+        let completedTurnIDs = completedTurnIDs(in: messages)
         var items: [ConversationTimelineItem] = []
         var index = messages.startIndex
 
         while index < messages.endIndex {
             let message = messages[index]
-            if lateProcessMessageIDs.contains(message.id) || pinnedPlanMessageIDs.contains(message.id) {
-                index = messages.index(after: index)
-                continue
-            }
-            if let turnID = message.turnID,
-               isCompletedAssistantMessage(message),
-               let lateProcessMessages = lateProcessMessagesByTurnID[turnID],
-               !insertedLateProcessTurnIDs.contains(turnID) {
-                // app-server 可能在最终回答后补到 diff；只把迟到部分归位，不能打散 commentary 边界。
-                items.append(contentsOf: activityItems(from: lateProcessMessages, turnCompleted: true))
-                insertedLateProcessTurnIDs.insert(turnID)
-            }
             guard isActivityMessage(message) else {
                 items.append(.message(message))
-                if let turnID = message.turnID,
-                   isCompletedAssistantMessage(message),
-                   let plans = planMessagesByTurnID[turnID],
-                   !insertedPlanTurnIDs.contains(turnID) {
-                    items.append(contentsOf: plans.map(ConversationTimelineItem.message))
-                    insertedPlanTurnIDs.insert(turnID)
-                }
                 index = messages.index(after: index)
                 continue
             }
@@ -52,10 +23,9 @@ struct ConversationTimelineItemBuilder {
             }
             let turnCompleted = message.turnID.map { completedTurnIDs.contains($0) }
                 ?? (fallbackCompletedAssistant(for: activityMessages, nextIndex: index, messages: messages) != nil)
-            let nextMessage = messages[safe: index]
-            if !isProcessBatchSummarizedByCommentary(activityMessages, nextMessage: nextMessage) {
-                items.append(contentsOf: activityItems(from: activityMessages, turnCompleted: turnCompleted))
-            }
+            // 时间线只折叠相邻过程项，不跨 commentary、plan 或 final 搬运内容。
+            // 输入顺序由上游 canonical timeline 决定，视图投影不能再次改写语义顺序。
+            items.append(contentsOf: activityItems(from: activityMessages, turnCompleted: turnCompleted))
         }
 
         return items
@@ -79,11 +49,11 @@ struct ConversationTimelineItemBuilder {
         let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         switch message.kind {
         case .approval:
-            return content.hasPrefix("审批已批准") || content.hasPrefix("已批准") ||
-                content.hasPrefix("审批已拒绝") || content.hasPrefix("已拒绝")
+            return content.hasPrefix(L10n.text("ui.approval_approved")) || content.hasPrefix(L10n.text("ui.approved")) ||
+                content.hasPrefix(L10n.text("ui.approval_rejected")) || content.hasPrefix(L10n.text("ui.rejected"))
         case .userInput:
-            return content.hasPrefix("补充信息已提交") || content.hasPrefix("引导输入已提交") ||
-                content.hasPrefix("已跳过补充信息") || content.hasPrefix("已跳过引导输入")
+            return content.hasPrefix(L10n.text("ui.additional_information_has_been_submitted")) || content.hasPrefix(L10n.text("ui.boot_input_submitted")) ||
+                content.hasPrefix(L10n.text("ui.additional_information_skipped")) || content.hasPrefix(L10n.text("ui.boot_input_skipped"))
         case .message, .commentary, .plan, .reasoningSummary, .commandSummary, .fileChangeSummary, .error:
             return false
         }
@@ -93,9 +63,9 @@ struct ConversationTimelineItemBuilder {
         guard message.activityPayload?.category == .runCommand else {
             return false
         }
-        return message.activityPayload?.displayTitle.hasPrefix("查看 ") == true ||
-            message.activityPayload?.displayTitle.hasPrefix("列出 ") == true ||
-            message.activityPayload?.displayTitle.hasPrefix("搜索 ") == true
+        return message.activityPayload?.displayTitle.hasPrefix(L10n.text("ui.view_f9c527c2")) == true ||
+            message.activityPayload?.displayTitle.hasPrefix(L10n.text("ui.list_e89ea827")) == true ||
+            message.activityPayload?.displayTitle.hasPrefix(L10n.text("ui.search_45a71f26")) == true
     }
 
     private static func belongsToSameActivitySequence(
@@ -112,74 +82,25 @@ struct ConversationTimelineItemBuilder {
         return message.sendStatus == .confirmed || message.sendStatus == .sent
     }
 
-    private static func completedAssistantMessagesByTurnID(
+    private static func completedTurnIDs(
         in messages: [ConversationMessage]
-    ) -> [TurnID: ConversationMessage] {
-        var result: [TurnID: ConversationMessage] = [:]
-        for message in messages {
-            guard let turnID = message.turnID, !turnID.isEmpty, isCompletedAssistantMessage(message) else {
+    ) -> Set<TurnID> {
+        let messagesByTurnID = Dictionary(grouping: messages.compactMap { message -> (TurnID, ConversationMessage)? in
+            guard let turnID = message.turnID, !turnID.isEmpty else { return nil }
+            return (turnID, message)
+        }, by: { $0.0 })
+        var result = Set<TurnID>()
+        for (turnID, entries) in messagesByTurnID {
+            let turnMessages = entries.map(\.1)
+            if turnMessages.contains(where: { $0.turnLifecycle?.isTerminal == true }) {
+                result.insert(turnID)
                 continue
             }
-            result[turnID] = result[turnID] ?? message
-        }
-        return result
-    }
-
-    private static func lateProcessMessagesByTurnID(
-        in messages: [ConversationMessage],
-        completedAssistantByTurnID: [TurnID: ConversationMessage]
-    ) -> [TurnID: [ConversationMessage]] {
-        let assistantIndexByTurnID: [TurnID: Int] = Dictionary(uniqueKeysWithValues: messages.indices.compactMap { index -> (TurnID, Int)? in
-            let message = messages[index]
-            guard let turnID = message.turnID,
-                  completedAssistantByTurnID[turnID]?.id == message.id else {
-                return nil
+            // 旧 gateway 没有可靠 lifecycle 时才回退到 final；显式 inProgress 不能被提前收口。
+            if turnMessages.allSatisfy({ $0.turnLifecycle == nil || $0.turnLifecycle == .unknown }),
+               turnMessages.contains(where: isCompletedAssistantMessage) {
+                result.insert(turnID)
             }
-            return (turnID, index)
-        })
-        var result: [TurnID: [ConversationMessage]] = [:]
-        for index in messages.indices {
-            let message = messages[index]
-            guard let turnID = message.turnID,
-                  let assistantIndex = assistantIndexByTurnID[turnID],
-                  index > assistantIndex,
-                  isActivityMessage(message) else {
-                continue
-            }
-            result[turnID, default: []].append(message)
-        }
-        return result
-    }
-
-    private static func isProcessBatchSummarizedByCommentary(
-        _ processMessages: [ConversationMessage],
-        nextMessage: ConversationMessage?
-    ) -> Bool {
-        guard let turnID = sharedTurnID(in: processMessages),
-              let nextMessage,
-              nextMessage.role == .assistant,
-              nextMessage.kind == .commentary,
-              nextMessage.turnID == turnID else {
-            return false
-        }
-        // commentary 已经把刚才的内部推理与工具结果整理成面向用户的检查点；
-        // 数据仍保留在 ConversationStore，只是不重复占据主时间线。
-        return true
-    }
-
-    private static func planMessagesByTurnID(
-        in messages: [ConversationMessage],
-        completedTurnIDs: Set<TurnID>
-    ) -> [TurnID: [ConversationMessage]] {
-        var result: [TurnID: [ConversationMessage]] = [:]
-        for message in messages {
-            guard let turnID = message.turnID,
-                  completedTurnIDs.contains(turnID),
-                  message.role == .system,
-                  message.kind == .plan else {
-                continue
-            }
-            result[turnID, default: []].append(message)
         }
         return result
     }

@@ -80,8 +80,8 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(response.worktrees.first?.blockers, [
             WorktreeCleanupBlocker(rawValue: "git_dirty")
         ])
-        XCTAssertEqual(response.worktrees.first?.blockers.first?.message, "包含未提交改动")
-        XCTAssertEqual(WorktreeCleanupBlocker(rawValue: "future_guard").message, "agentd 返回了新的保护原因")
+        XCTAssertEqual(response.worktrees.first?.blockers.first?.message, L10n.text("ui.contains_uncommitted_changes"))
+        XCTAssertEqual(WorktreeCleanupBlocker(rawValue: "future_guard").message, L10n.text("ui.agentd_returned_a_new_protection_reason"))
         XCTAssertTrue(response.candidatePaths.isEmpty)
         XCTAssertTrue(response.deletedPaths.isEmpty)
         XCTAssertNil(response.failedPath)
@@ -116,7 +116,12 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertTrue(response.hasPartialFailure)
         XCTAssertEqual(
             response.partialFailureMessage,
-            "已删除 1 个 Worktree，但在 /tmp/worktree-b 失败：git worktree remove 失败。请重新生成清理预览。"
+            L10n.format(
+                "ui.worktree_cleanup_partial_failure",
+                L10n.plural("ui.worktrees_deleted_count", count: 1),
+                "/tmp/worktree-b",
+                "git worktree remove 失败"
+            )
         )
     }
 
@@ -1163,10 +1168,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
         let compacted = CodexAppServerNotification(method: "thread/compacted", params: .object([
             "threadId": .string("thread-1"), "turnId": .string("turn-1")
         ]))
-        guard case .messageCompleted(let compactedMessage, _) = projector.project(compacted) else {
-            return XCTFail("expected compaction message")
-        }
-        XCTAssertEqual(compactedMessage.content, "上下文已压缩")
+        XCTAssertNil(projector.project(compacted), "compaction 只更新模型上下文，不能写入可见 transcript")
 
         let named = CodexAppServerNotification(method: "thread/name/updated", params: .object([
             "threadId": .string("thread-1"), "threadName": .string("新名称")
@@ -1213,12 +1215,30 @@ final class DoctorDiagnosticsTests: XCTestCase {
         XCTAssertEqual(document.report.version, "1.4.0")
         XCTAssertEqual(document.report.listen, "127.0.0.1:8787")
         XCTAssertEqual(document.report.checks.count, 3)
-        XCTAssertEqual(document.report.checks[0].displayName, "访问令牌")
-        XCTAssertNil(document.report.checks[0].normalizedFix)
+        XCTAssertEqual(document.report.checks[0].displayName, L10n.text("ui.access_token"))
+        XCTAssertEqual(document.report.checks[0].displayMessage, L10n.text("ui.doctor_access_token_ready"))
+        XCTAssertNil(document.report.checks[0].displayFix)
         XCTAssertTrue(document.report.checks[1].isWarning)
-        XCTAssertEqual(document.report.checks[2].normalizedFix, "安装 Codex CLI")
+        XCTAssertEqual(document.report.checks[2].displayMessage, L10n.text("ui.doctor_codex_cli_needs_attention"))
+        XCTAssertEqual(document.report.checks[2].displayFix, L10n.text("ui.doctor_fix_codex"))
         XCTAssertTrue(document.rawJSON.contains("\n"))
         XCTAssertTrue(document.rawJSON.contains(#""version" : "1.4.0""#))
+    }
+
+    func testUnknownDoctorCheckUsesLocalizedSummaryAndKeepsRawDetails() {
+        let check = DoctorDiagnosticCheck(
+            name: "future-check",
+            ok: false,
+            level: "warning",
+            message: "服务端新增的诊断详情：/private/path",
+            fix: "运行 future-fix --repair"
+        )
+
+        XCTAssertEqual(check.displayMessage, L10n.text("ui.doctor_check_warning"))
+        XCTAssertEqual(check.displayFix, L10n.text("ui.doctor_fix_generic"))
+        XCTAssertTrue(check.hasRawDiagnosticDetails)
+        XCTAssertEqual(check.message, "服务端新增的诊断详情：/private/path")
+        XCTAssertEqual(check.fix, "运行 future-fix --repair")
     }
 
     func testRejectsNonSuccessHTTPResponseWithServerMessage() throws {

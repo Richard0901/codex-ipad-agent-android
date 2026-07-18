@@ -95,11 +95,11 @@ struct ConversationProcessGrouper {
         let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         switch message.kind {
         case .approval:
-            return content.hasPrefix("审批已批准") || content.hasPrefix("已批准") ||
-                content.hasPrefix("审批已拒绝") || content.hasPrefix("已拒绝")
+            return content.hasPrefix(L10n.text("ui.approval_approved")) || content.hasPrefix(L10n.text("ui.approved")) ||
+                content.hasPrefix(L10n.text("ui.approval_rejected")) || content.hasPrefix(L10n.text("ui.rejected"))
         case .userInput:
-            return content.hasPrefix("补充信息已提交") || content.hasPrefix("引导输入已提交") ||
-                content.hasPrefix("已跳过补充信息") || content.hasPrefix("已跳过引导输入")
+            return content.hasPrefix(L10n.text("ui.additional_information_has_been_submitted")) || content.hasPrefix(L10n.text("ui.boot_input_submitted")) ||
+                content.hasPrefix(L10n.text("ui.additional_information_skipped")) || content.hasPrefix(L10n.text("ui.boot_input_skipped"))
         case .message, .commentary, .plan, .reasoningSummary, .commandSummary, .fileChangeSummary, .error:
             return false
         }

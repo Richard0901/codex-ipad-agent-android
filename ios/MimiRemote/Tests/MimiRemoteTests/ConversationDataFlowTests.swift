@@ -719,7 +719,7 @@ final class ConversationDataFlowTests: XCTestCase {
         XCTAssertEqual(assistant.content, "第一段第二段")
         XCTAssertEqual(assistant.createdAt, startedAt)
         XCTAssertEqual(assistant.updatedAt, latestAt)
-        XCTAssertTrue(assistant.timestampCaptionText.contains("最近"))
+        XCTAssertTrue(assistant.timestampCaptionText.contains(L10n.text("ui.recently")))
     }
 
     func testHistoryHydrationKeepsLiveActivityPayloadWhenSnapshotLacksPayload() throws {
@@ -781,7 +781,7 @@ final class ConversationDataFlowTests: XCTestCase {
 
         let message = try XCTUnwrap(store.messages(for: sessionID).first)
         XCTAssertEqual(message.activityPayload, payload)
-        XCTAssertEqual(message.activityPayload?.displayTitle, "搜索 ConversationStore")
+        XCTAssertEqual(message.activityPayload?.displayTitle, L10n.format("ui.search_query", "ConversationStore"))
         XCTAssertEqual(message.content, payload.summaryText)
     }
 
@@ -795,11 +795,18 @@ final class ConversationDataFlowTests: XCTestCase {
         ]
         let failedPayload = try XCTUnwrap(ConversationActivityPayload(item: failedTool))
 
-        XCTAssertEqual(failedPayload.displayTitle, "运行模拟器测试")
+        XCTAssertEqual(failedPayload.displayTitle, L10n.text("ui.run_emulator_tests"))
         XCTAssertEqual(failedPayload.toolName, "xcodebuildmcp.test_sim", "底层工具标识仍保留给诊断数据")
-        XCTAssertEqual(failedPayload.displayStatusText, "失败")
+        XCTAssertEqual(failedPayload.displayStatusText, L10n.text("ui.failed_status"))
         XCTAssertTrue(failedPayload.isFailure)
-        XCTAssertEqual(failedPayload.summaryText, "工具：运行模拟器测试\n状态：失败")
+        XCTAssertEqual(
+            failedPayload.summaryText,
+            L10n.format(
+                "ui.tool_value_status_value",
+                L10n.text("ui.run_emulator_tests"),
+                L10n.text("ui.failed_status")
+            )
+        )
 
         let futureStatus: [String: CodexAppServerJSONValue] = [
             "type": .string("dynamicToolCall"),
@@ -809,13 +816,34 @@ final class ConversationDataFlowTests: XCTestCase {
         ]
         let futurePayload = try XCTUnwrap(ConversationActivityPayload(item: futureStatus))
 
-        XCTAssertEqual(futurePayload.displayTitle, "调用工具")
+        XCTAssertEqual(futurePayload.displayTitle, L10n.text("ui.call_tool"))
         XCTAssertNil(futurePayload.displayStatusText)
         XCTAssertFalse(futurePayload.summaryText.lowercased().contains("unknown"))
         XCTAssertEqual(
             ConversationActivityPayload.plainProgressText("**Planning release build**\n`ENABLE_TESTABILITY=YES`"),
             "Planning release build\nENABLE_TESTABILITY=YES"
         )
+    }
+
+    func testUnknownCommandActionUsesGenericTitleButKeepsCommandDetails() throws {
+        let command = "/bin/zsh -lc 'ssh example.test run diagnostics'"
+        let item: [String: CodexAppServerJSONValue] = [
+            "type": .string("commandExecution"),
+            "command": .string(command),
+            "cwd": .string("/tmp/diagnostics"),
+            "status": .string("completed"),
+            "commandActions": .array([.object([
+                "type": .string("unknown"),
+                "command": .string(command)
+            ])])
+        ]
+
+        let payload = try XCTUnwrap(ConversationActivityPayload(item: item))
+
+        XCTAssertEqual(payload.displayTitle, L10n.text("ui.run_command"))
+        XCTAssertEqual(payload.command, command, "完整命令仍保留在展开详情与诊断数据中")
+        XCTAssertFalse(payload.displayTitle.lowercased().contains("unknown"))
+        XCTAssertTrue(payload.summaryText.contains(command))
     }
 
     func testFileChangeProgressUsesCompactFilenameButKeepsFullPath() throws {
@@ -827,9 +855,9 @@ final class ConversationDataFlowTests: XCTestCase {
         ]
         let payload = try XCTUnwrap(ConversationActivityPayload(item: item))
 
-        XCTAssertEqual(payload.displayTitle, "修改 MeView.swift")
+        XCTAssertEqual(payload.displayTitle, L10n.format("ui.modify_value", "MeView.swift"))
         XCTAssertEqual(payload.filePaths, [path])
-        XCTAssertEqual(payload.displayStatusText, "已完成")
+        XCTAssertEqual(payload.displayStatusText, L10n.text("ui.completed_status"))
     }
 
     func testSessionDisplayStatusUsesForegroundAndGoalProgress() {
@@ -856,11 +884,11 @@ final class ConversationDataFlowTests: XCTestCase {
             goal: goal
         )
 
-        XCTAssertEqual(session.displayStatus(foregroundActivity: .receivingAssistant).title, "正在回复")
+        XCTAssertEqual(session.displayStatus(foregroundActivity: .receivingAssistant).title, L10n.text("ui.replying"))
         XCTAssertEqual(goal.budgetPercentText, "25%")
         XCTAssertEqual(try XCTUnwrap(goal.budgetProgressFraction), 0.25, accuracy: 0.001)
         XCTAssertTrue(session.statusBadges(foregroundActivity: .receivingAssistant).contains { badge in
-            badge.title == "目标 运行中 25%"
+            badge.title == L10n.format("ui.target_value", goal.sidebarProgressText)
         })
 
         let approvalSession = AgentSession(
@@ -877,7 +905,7 @@ final class ConversationDataFlowTests: XCTestCase {
             pendingApproval: ApprovalSummary(id: "approval-1", title: "写入文件", kind: "command", count: 1)
         )
 
-        XCTAssertEqual(approvalSession.displayStatus(foregroundActivity: .receivingAssistant).title, "待审批")
+        XCTAssertEqual(approvalSession.displayStatus(foregroundActivity: .receivingAssistant).title, L10n.text("ui.pending_approval"))
     }
 
     func testSessionListSeparatesActiveLifecycleFromHistory() {
@@ -1082,7 +1110,7 @@ final class ConversationDataFlowTests: XCTestCase {
         }
     }
 
-    func testTimelineBuilderPlacesLateProcessMessagesBeforeTheirCompletedAssistant() throws {
+    func testTimelineBuilderKeepsLateProcessMessagesInSourceOrder() throws {
         let base = Date(timeIntervalSince1970: 1_700)
         let user = ConversationMessage(
             stableID: "user-late-process",
@@ -1117,15 +1145,15 @@ final class ConversationDataFlowTests: XCTestCase {
         } else {
             XCTFail("用户消息应保持在首位")
         }
-        guard case .activity(let visibleDiff) = items[1] else {
-            return XCTFail("迟到的过程消息应按 turnID 归到最终回复之前")
-        }
-        XCTAssertEqual(visibleDiff.content, "文件变更：README.md modified")
-        if case .message(let final) = items[2] {
+        if case .message(let final) = items[1] {
             XCTAssertEqual(final.content, "最终回答仍然完整展示。")
         } else {
             XCTFail("最终 assistant 消息仍应独立展示")
         }
+        guard case .activity(let visibleDiff) = items[2] else {
+            return XCTFail("迟到的过程消息必须保留首次出现槽位，不能跨 final 搬运")
+        }
+        XCTAssertEqual(visibleDiff.content, "文件变更：README.md modified")
     }
 
     func testTimelineBuilderCollapsesProcessMessagesWhileAssistantIsStreaming() {

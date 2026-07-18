@@ -10,11 +10,12 @@ extension ConversationDataFlowTests {
     func testSessionInspectorSectionsCollapseDetailsLogsAndDiagnostics() {
         let descriptors = SessionInspectorSectionDescriptor.all
 
-        XCTAssertEqual(descriptors.map(\.title), ["概览", "变更", "活动"])
+        XCTAssertEqual(
+            descriptors.map(\.title),
+            [L10n.text("ui.overview"), L10n.text("ui.change"), L10n.text("ui.activities")]
+        )
         XCTAssertEqual(descriptors.map(\.id), ["overview", "changes", "activity"])
-        XCTAssertFalse(descriptors.contains { $0.title == "诊断" })
-        XCTAssertFalse(descriptors.contains { $0.title == "详情" })
-        XCTAssertFalse(descriptors.contains { $0.title == "日志" })
+        XCTAssertEqual(descriptors.count, 3)
     }
 
     func testHistoryPagingStatePrunesWhenSessionLeavesList() async {

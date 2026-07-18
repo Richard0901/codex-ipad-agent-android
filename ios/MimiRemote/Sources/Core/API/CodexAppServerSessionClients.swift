@@ -754,7 +754,7 @@ final class CodexAppServerSessionWebSocketClient: SessionWebSocketClient {
     @discardableResult
     func sendTurn(_ payload: CodexAppServerTurnPayload, clientMessageID: ClientMessageID?) -> Bool {
         guard let sessionID else {
-            onSendFailure?(clientMessageID, "direct WebSocket 未连接")
+            onSendFailure?(clientMessageID, L10n.text("ui.direct_websocket_not_connected"))
             return false
         }
         guard !payload.isEmpty else {
@@ -780,7 +780,7 @@ final class CodexAppServerSessionWebSocketClient: SessionWebSocketClient {
     @discardableResult
     func sendGuidance(_ payload: CodexAppServerTurnPayload, clientMessageID: ClientMessageID?, expectedTurnID: TurnID) -> Bool {
         guard let sessionID else {
-            onSendFailure?(clientMessageID, "direct WebSocket 未连接")
+            onSendFailure?(clientMessageID, L10n.text("ui.direct_websocket_not_connected"))
             return false
         }
         guard !payload.isEmpty else {
@@ -811,7 +811,7 @@ final class CodexAppServerSessionWebSocketClient: SessionWebSocketClient {
     @discardableResult
     func sendCtrlC() -> Bool {
         guard let sessionID else {
-            onControlFailure?("direct WebSocket 未连接")
+            onControlFailure?(L10n.text("ui.direct_websocket_not_connected"))
             return false
         }
         let failureHandler = onControlFailure
@@ -830,7 +830,7 @@ final class CodexAppServerSessionWebSocketClient: SessionWebSocketClient {
     @discardableResult
     func sendApprovalDecision(approvalID: String, decision: String, message: String?) -> Bool {
         guard let sessionID else {
-            onApprovalDecisionFailure?(approvalID, "direct WebSocket 未连接")
+            onApprovalDecisionFailure?(approvalID, L10n.text("ui.direct_websocket_not_connected"))
             return false
         }
         let failureHandler = onApprovalDecisionFailure
@@ -849,7 +849,7 @@ final class CodexAppServerSessionWebSocketClient: SessionWebSocketClient {
     @discardableResult
     func sendUserInputResponse(requestID: String, answers: [String: [String]]) -> Bool {
         guard let sessionID else {
-            onUserInputResponseFailure?(requestID, "direct WebSocket 未连接")
+            onUserInputResponseFailure?(requestID, L10n.text("ui.direct_websocket_not_connected"))
             return false
         }
         let failureHandler = onUserInputResponseFailure

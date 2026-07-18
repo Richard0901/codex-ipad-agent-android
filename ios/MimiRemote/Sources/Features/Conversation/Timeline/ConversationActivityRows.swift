@@ -92,8 +92,8 @@ struct ConversationActivityRow: View, Equatable {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(activityTitle)
-            .accessibilityValue(isExpanded ? "已展开" : "已收起")
-            .accessibilityHint(isExpanded ? "收起当前过程详情" : "展开当前过程详情")
+            .accessibilityValue(isExpanded ? L10n.text("ui.expanded") : L10n.text("ui.collected"))
+            .accessibilityHint(isExpanded ? L10n.text("ui.collapse_current_process_details") : L10n.text("ui.expand_current_process_details"))
         } else {
             rowContent
         }
@@ -151,22 +151,22 @@ struct ConversationActivityRow: View, Equatable {
         if let payload = message.activityPayload {
             VStack(alignment: .leading, spacing: 4) {
                 if let command = payload.command?.conversationActivityTrimmedNonEmpty {
-                    activityDetailLine("命令", value: command, monospaced: true)
+                    activityDetailLine(L10n.text("ui.command"), value: command, monospaced: true)
                 }
                 if let cwd = payload.cwd?.conversationActivityTrimmedNonEmpty {
-                    activityDetailLine("目录", value: cwd, monospaced: true)
+                    activityDetailLine(L10n.text("ui.directory"), value: cwd, monospaced: true)
                 }
                 if !payload.filePaths.isEmpty {
-                    activityDetailLine("文件", value: payload.filePaths.joined(separator: "\n"), monospaced: true)
+                    activityDetailLine(L10n.text("ui.file"), value: payload.filePaths.joined(separator: "\n"), monospaced: true)
                 }
                 let status = [
                     payload.displayStatusText,
-                    payload.exitCode.map { "退出码 \($0)" }
+                    payload.exitCode.map { L10n.format("ui.exit_code_value", $0) }
                 ]
                     .compactMap { $0 }
                     .joined(separator: " · ")
                 if !status.isEmpty {
-                    activityDetailLine("状态", value: status)
+                    activityDetailLine(L10n.text("ui.status"), value: status)
                 }
                 if let output = payload.outputPreview?.conversationActivityTrimmedNonEmpty {
                     Text(output)
@@ -225,19 +225,19 @@ struct ConversationActivityRow: View, Equatable {
         case .commentary:
             return message.content
         case .commandSummary:
-            return message.content.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "运行命令"
+            return message.content.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? L10n.text("ui.run_command")
         case .fileChangeSummary:
-            return message.content.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "文件变更"
+            return message.content.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? L10n.text("ui.file_changes")
         case .approval:
             if isApprovedInteraction {
-                return "审批已批准"
+                return L10n.text("ui.approval_approved")
             }
             if isDeclinedInteraction {
-                return "审批已拒绝"
+                return L10n.text("ui.approval_rejected")
             }
-            return "审批状态"
+            return L10n.text("ui.approval_status")
         case .userInput:
-            return isSkippedInteraction ? "已跳过补充信息" : "补充信息已提交"
+            return isSkippedInteraction ? L10n.text("ui.additional_information_skipped") : L10n.text("ui.additional_information_has_been_submitted")
         default:
             return message.content
         }
@@ -252,11 +252,11 @@ struct ConversationActivityRow: View, Equatable {
             return payload.filePaths.isEmpty ? payload.displayStatusText : payload.filePaths.prefix(4).joined(separator: ", ")
         case .runCommand:
             if let exitCode = payload.exitCode, exitCode != 0 {
-                return "退出码 \(exitCode)"
+                return L10n.format("ui.exit_code_value", exitCode)
             }
             return payload.cwd
         case .toolCall:
-            return payload.displayStatusText == "已完成" ? nil : payload.displayStatusText
+            return payload.displayStatusText == L10n.text("ui.completed_status") ? nil : payload.displayStatusText
         case .thinking, .plan, .error:
             return payload.subtitle.map(ConversationActivityPayload.plainProgressText)
         }
@@ -325,17 +325,17 @@ struct ConversationActivityRow: View, Equatable {
 
     private var isApprovedInteraction: Bool {
         message.kind == .approval &&
-            (message.content.hasPrefix("审批已批准") || message.content.hasPrefix("已批准"))
+            (message.content.hasPrefix(L10n.text("ui.approval_approved")) || message.content.hasPrefix(L10n.text("ui.approved")))
     }
 
     private var isDeclinedInteraction: Bool {
         message.kind == .approval &&
-            (message.content.hasPrefix("审批已拒绝") || message.content.hasPrefix("已拒绝"))
+            (message.content.hasPrefix(L10n.text("ui.approval_rejected")) || message.content.hasPrefix(L10n.text("ui.rejected")))
     }
 
     private var isSkippedInteraction: Bool {
         message.kind == .userInput &&
-            (message.content.hasPrefix("已跳过补充信息") || message.content.hasPrefix("已跳过引导输入"))
+            (message.content.hasPrefix(L10n.text("ui.additional_information_skipped")) || message.content.hasPrefix(L10n.text("ui.boot_input_skipped")))
     }
 
     private var tokens: ThemeTokens {

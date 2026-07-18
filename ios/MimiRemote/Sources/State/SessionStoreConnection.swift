@@ -22,7 +22,7 @@ extension SessionStore {
         guard !isNetworkUnavailable else {
             networkSuspendedSessionID = session.id
             setWebSocketStatus(.disconnected)
-            setStatusMessage("网络不可用，恢复后自动重连")
+            setStatusMessage(L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
             return
         }
         // allowNonRunning：非运行会话的订阅同样有价值——thread/resume 会带回权威状态
@@ -113,7 +113,7 @@ extension SessionStore {
                     }
                 }
                 self?.clearForegroundActivity(sessionID: session.id)
-                self?.setErrorMessage("发送失败：\(message)")
+                self?.setErrorMessage(L10n.format("ui.sending_failed_value", message))
             }
         }
         socket.onApprovalDecisionFailure = { [weak self] approvalID, message in
@@ -122,7 +122,7 @@ extension SessionStore {
                     return
                 }
                 self?.clearPendingApprovalDecision(sessionID: session.id, approvalID: approvalID)
-                self?.setErrorMessage("审批发送失败：\(message)")
+                self?.setErrorMessage(L10n.format("ui.approval_sending_failed_value", message))
             }
         }
         socket.onUserInputResponseFailure = { [weak self] requestID, message in
@@ -134,7 +134,7 @@ extension SessionStore {
                 if let request {
                     self?.restoreUserInputRequestAfterFailure(request, sessionID: session.id)
                 }
-                self?.setErrorMessage("补充信息发送失败：\(message)")
+                self?.setErrorMessage(L10n.format("ui.failed_to_send_supplementary_information_value", message))
             }
         }
         socket.onControlFailure = { [weak self] message in
@@ -142,7 +142,7 @@ extension SessionStore {
                 guard self?.isCurrentWebSocketConnection(sessionID: session.id, generation: connectionGeneration) == true else {
                     return
                 }
-                self?.setErrorMessage("控制指令发送失败：\(message)")
+                self?.setErrorMessage(L10n.format("ui.failed_to_send_control_command_value", message))
             }
         }
         webSocket = socket
@@ -181,7 +181,7 @@ extension SessionStore {
             return nil
         }
         guard !isNetworkUnavailable else {
-            setErrorMessage("网络不可用，恢复后将自动重连")
+            setErrorMessage(L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect"))
             return nil
         }
         let shouldReconnect: Bool
@@ -195,14 +195,14 @@ extension SessionStore {
             connectWebSocket(session, allowNonRunning: allowNonRunning)
         }
         guard let webSocket, connectedSessionID == session.id else {
-            setErrorMessage("WebSocket 正在重新接入，请稍后再发送")
+            setErrorMessage(L10n.text("ui.websocket_is_reconnecting_please_try_again_later"))
             return nil
         }
         guard webSocketStatus == .connected else {
             if case .terminated(let reason) = webSocketStatus {
                 setErrorMessage(reason.message)
             } else {
-                setErrorMessage("WebSocket 正在连接，请稍后再发送")
+                setErrorMessage(L10n.text("ui.websocket_is_connecting_please_wait_and_send_again"))
             }
             return nil
         }
@@ -224,7 +224,7 @@ extension SessionStore {
         case .failed(let message):
             if isNetworkUnavailable {
                 suspendWebSocketForNetworkLoss(sessionID: sessionID)
-                setStatusMessage("网络不可用，恢复后自动重连")
+                setStatusMessage(L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
                 return
             }
             let policyRejected = Self.isDeterministicGatewayPolicyFailure(message)
@@ -235,7 +235,7 @@ extension SessionStore {
             }
             markDispatchingQueuedTurnsNeedsConfirmation(
                 sessionID: sessionID,
-                message: "连接已中断，发送结果需要确认"
+                message: L10n.text("ui.the_connection_has_been_interrupted_sending_results_requires")
             )
             conversationStore.markSendingUserMessagesFailed(sessionID: sessionID)
             clearPendingApprovalDecisions(sessionID: sessionID)
@@ -245,14 +245,14 @@ extension SessionStore {
                 scheduleWebSocketReconnect(sessionID: sessionID, reason: message)
             } else {
                 setWebSocketStatus(.failed(message))
-                setErrorMessage(policyRejected ? "连接被服务器策略拒绝，已停止自动重连：\(message)" : message)
+                setErrorMessage(policyRejected ? L10n.format("ui.the_connection_was_rejected_by_server_policy_and", message) : message)
             }
         case .terminated(let reason):
             terminateConnection(reason)
         case .disconnected:
             if isNetworkUnavailable {
                 suspendWebSocketForNetworkLoss(sessionID: sessionID)
-                setStatusMessage("网络不可用，恢复后自动重连")
+                setStatusMessage(L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
                 return
             }
             let canReconnect = shouldAutoReconnectWebSocket(sessionID: sessionID)
@@ -262,13 +262,13 @@ extension SessionStore {
             }
             markDispatchingQueuedTurnsNeedsConfirmation(
                 sessionID: sessionID,
-                message: "连接已中断，发送结果需要确认"
+                message: L10n.text("ui.the_connection_has_been_interrupted_sending_results_requires")
             )
             conversationStore.markSendingUserMessagesFailed(sessionID: sessionID)
             clearPendingApprovalDecisions(sessionID: sessionID)
             clearForegroundActivity(sessionID: sessionID)
             if canReconnect {
-                scheduleWebSocketReconnect(sessionID: sessionID, reason: "连接已断开")
+                scheduleWebSocketReconnect(sessionID: sessionID, reason: L10n.text("ui.the_connection_has_been_lost"))
             } else {
                 setWebSocketStatus(.disconnected)
             }
@@ -301,7 +301,7 @@ extension SessionStore {
         if let connectedSessionID {
             markDispatchingQueuedTurnsNeedsConfirmation(
                 sessionID: connectedSessionID,
-                message: "连接凭据已失效，发送结果需要确认"
+                message: L10n.text("ui.the_connection_credentials_have_expired_confirmation_is_required")
             )
         }
         stopAllQueuedSessionMonitoring()
@@ -337,7 +337,7 @@ extension SessionStore {
         if let previousSessionID {
             markDispatchingQueuedTurnsNeedsConfirmation(
                 sessionID: previousSessionID,
-                message: "连接已中断，发送结果需要确认"
+                message: L10n.text("ui.the_connection_has_been_interrupted_sending_results_requires")
             )
             conversationStore.markSendingUserMessagesFailed(sessionID: previousSessionID)
         }
@@ -387,7 +387,7 @@ extension SessionStore {
         }
         guard !isNetworkUnavailable else {
             suspendWebSocketForNetworkLoss(sessionID: sessionID)
-            setStatusMessage("网络不可用，恢复后自动重连")
+            setStatusMessage(L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
             return
         }
 
@@ -396,8 +396,8 @@ extension SessionStore {
         webSocketReconnectAttemptBySessionID[sessionID] = attempt
         let delay = webSocketReconnectDelayNanoseconds(attempt)
         setWebSocketStatus(.connecting)
-        setErrorMessage("WebSocket 断开，正在自动重连：\(reason)")
-        setStatusMessage("WebSocket 第 \(attempt) 次重连")
+        setErrorMessage(L10n.format("ui.websocket_disconnected_and_reconnecting_automatically_value", reason))
+        setStatusMessage(L10n.format("ui.websocket_value_th_reconnection", attempt))
         let reconnectSleep = webSocketReconnectSleep
 
         // 重连任务只服务当前选中的会话；切项目/停止/返回列表都会取消它。
@@ -473,7 +473,7 @@ extension SessionStore {
             if terminateConnectionIfCredentialsInvalid(error) {
                 return nil
             }
-            setStatusMessage("重连前快照刷新失败：\(error.localizedDescription)")
+            setStatusMessage(L10n.format("ui.snapshot_refresh_failed_before_reconnection_value", error.localizedDescription))
             return current
         }
     }
@@ -640,7 +640,7 @@ extension SessionStore {
         do {
             // 运行态通知不持久化：它只是实时提示，不应该在会话列表状态里留下“待处理任务”的假象。
             guard let session = sessionsByID[notification.sessionID] else {
-                setStatusMessage("通知调度失败：找不到对应会话")
+                setStatusMessage(L10n.text("ui.notification_scheduling_failed_the_corresponding_session_cannot_be"))
                 return
             }
             let route = SessionNotificationRoute.current(
@@ -650,7 +650,7 @@ extension SessionStore {
             )
             try await sessionReminderScheduler.notify(notification, route: route)
         } catch {
-            setStatusMessage("通知调度失败：\(error.localizedDescription)")
+            setStatusMessage(L10n.format("ui.notification_scheduling_failed_value", error.localizedDescription))
         }
     }
 
@@ -752,6 +752,12 @@ extension SessionStore {
 
     func applyMessageMutation(_ mutation: EventReducerMessageMutation) {
         switch mutation {
+        case .turnLifecycle(let lifecycle, let metadata, let fallbackSessionID):
+            conversationStore.updateTurnLifecycle(
+                lifecycle,
+                metadata: metadata,
+                fallbackSessionID: fallbackSessionID
+            )
         case .assistantDelta(let delta, let metadata, let fallbackSessionID):
             conversationStore.applyAssistantDelta(delta, metadata: metadata, fallbackSessionID: fallbackSessionID)
         case .completed(let message, let metadata, let fallbackSessionID):
@@ -810,8 +816,8 @@ extension SessionStore {
             return SessionRuntimeNotification(
                 id: "approval:\(sessionID):\(request.id)",
                 sessionID: sessionID,
-                title: "等待审批",
-                body: "\(sessionDisplayTitle(sessionID: sessionID))：\(request.title)",
+                title: L10n.text("ui.waiting_for_approval"),
+                body: L10n.format("ui.labeled_value", sessionDisplayTitle(sessionID: sessionID), request.title),
                 kind: .approval
             )
         case .userInputRequest(let request, let metadata):
@@ -819,8 +825,8 @@ extension SessionStore {
             return SessionRuntimeNotification(
                 id: "user-input:\(sessionID):\(request.id)",
                 sessionID: sessionID,
-                title: "等待补充信息",
-                body: "\(sessionDisplayTitle(sessionID: sessionID))：\(request.title)",
+                title: L10n.text("ui.waiting_for_additional_information"),
+                body: L10n.format("ui.labeled_value", sessionDisplayTitle(sessionID: sessionID), request.title),
                 kind: .approval
             )
         case .turnCompleted(let metadata):
@@ -833,7 +839,7 @@ extension SessionStore {
             return SessionRuntimeNotification(
                 id: "completed:\(sessionID):\(token)",
                 sessionID: sessionID,
-                title: "会话已完成",
+                title: L10n.text("ui.session_completed"),
                 body: sessionDisplayTitle(sessionID: sessionID),
                 kind: .completed
             )
@@ -843,7 +849,7 @@ extension SessionStore {
             return SessionRuntimeNotification(
                 id: "failed:\(sessionID):\(token)",
                 sessionID: sessionID,
-                title: "会话失败",
+                title: L10n.text("ui.session_failed"),
                 body: sessionDisplayTitle(sessionID: sessionID),
                 kind: .failed
             )
@@ -852,7 +858,7 @@ extension SessionStore {
             return SessionRuntimeNotification(
                 id: "failed:\(sessionID):\(payload.message)",
                 sessionID: sessionID,
-                title: "会话错误",
+                title: L10n.text("ui.session_error"),
                 body: payload.message,
                 kind: .failed
             )
@@ -866,7 +872,7 @@ extension SessionStore {
            !title.isEmpty {
             return title
         }
-        return "当前会话"
+        return L10n.text("ui.current_session")
     }
 
     func recordEventWatermark(_ metadata: AgentEventMetadata, fallbackSessionID: SessionID) {
@@ -1249,7 +1255,7 @@ extension SessionStore {
             return .available
         } catch let error as AgentAPIError {
             if case let .server(status, _) = error, (400..<500).contains(status) {
-                return .unavailable("“\(workspace.name)”已不在允许范围或已被删除，可重试或从当前设备移除")
+                return .unavailable(L10n.format("ui.value_is_no_longer_allowed_or_has_been", workspace.name))
             }
             return .indeterminate
         } catch {
@@ -1265,12 +1271,12 @@ extension SessionStore {
             registerSessionListCooldown(policyFailure, for: workspace)
             if sessions(forProjectID: workspace.id).isEmpty {
                 // 首屏还没有可展示数据时保留一个友好错误标记，让 bootstrap 按 cooldown 继续自愈。
-                let message = "会话列表刷新过快，将在 \(policyFailure.retryAfterSeconds) 秒后自动重试。"
+                let message = L10n.plural("ui.session_list_retry_seconds_count", count: policyFailure.retryAfterSeconds)
                 setStatusMessage(message)
                 setErrorMessage(message)
             } else {
                 // 已有列表时继续展示旧数据，限流只是后台同步延迟，不应升级成红色全局错误。
-                setStatusMessage("会话列表刷新过快，已保留现有会话，稍后自动重试。")
+                setStatusMessage(L10n.text("ui.the_session_list_refreshed_too_quickly_existing_sessions"))
                 setErrorMessage(nil)
             }
             return

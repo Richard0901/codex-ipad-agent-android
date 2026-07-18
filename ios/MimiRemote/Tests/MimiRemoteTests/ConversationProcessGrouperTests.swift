@@ -174,7 +174,7 @@ final class ConversationProcessGrouperTests: XCTestCase {
         XCTAssertEqual(group.activities.map(\.stableID), ["command-input", "submitted-input"])
     }
 
-    func testCommentaryReplacesCompletedInternalBatchAndKeepsOnlyTrailingProcess() throws {
+    func testCommentaryKeepsAdjacentProcessBatchesInSourceOrder() throws {
         let firstReasoning = makeReasoning(id: "reasoning-first", turnID: "turn-real", text: "先检查登录链路")
         let firstCommand = makeActivity(
             id: "command-first",
@@ -218,16 +218,65 @@ final class ConversationProcessGrouperTests: XCTestCase {
             trailingCommand
         ])
 
-        XCTAssertEqual(items.count, 3)
-        guard case .message(let firstVisible) = items[0],
-              case .message(let secondVisible) = items[1] else {
-            return XCTFail("commentary 应替代已经总结过的内部过程批次")
+        XCTAssertEqual(items.count, 5)
+        let firstGroup = try processGroup(in: items, at: 0)
+        XCTAssertEqual(firstGroup.title, "先检查登录链路")
+        XCTAssertEqual(firstGroup.activities.map(\.stableID), ["command-first"])
+        guard case .message(let firstVisible) = items[1],
+              case .message(let secondVisible) = items[3] else {
+            return XCTFail("commentary 应保持正文，不能隐藏或替代相邻过程组")
         }
         XCTAssertEqual(firstVisible.kind, .commentary)
         XCTAssertEqual(secondVisible.kind, .commentary)
-        let trailingGroup = try processGroup(in: items, at: 2)
+        let secondGroup = try processGroup(in: items, at: 2)
+        XCTAssertEqual(secondGroup.title, "检查私钥配置")
+        XCTAssertEqual(secondGroup.activities.map(\.stableID), ["command-second"])
+        let trailingGroup = try processGroup(in: items, at: 4)
         XCTAssertEqual(trailingGroup.title, "Planning credential validation")
         XCTAssertEqual(trailingGroup.activities.map(\.stableID), ["command-trailing"])
+    }
+
+    func testBuilderDoesNotMoveTrailingProcessAcrossFinalAssistant() throws {
+        let turnID = "turn-final-boundary"
+        let firstReasoning = makeReasoning(id: "reasoning-before-final", turnID: turnID, text: "完成主任务")
+        let firstCommand = makeActivity(
+            id: "command-before-final",
+            turnID: turnID,
+            kind: .commandSummary,
+            payload: ConversationActivityPayload(
+                category: .runCommand,
+                displayTitle: "运行主测试",
+                status: "completed"
+            )
+        )
+        let final = makeAssistant(id: "assistant-final-boundary", turnID: turnID)
+        let trailingReasoning = makeReasoning(id: "reasoning-after-final", turnID: turnID, text: "收集补充诊断")
+        let trailingCommand = makeActivity(
+            id: "command-after-final",
+            turnID: turnID,
+            kind: .commandSummary,
+            payload: ConversationActivityPayload(
+                category: .runCommand,
+                displayTitle: "读取补充日志",
+                status: "completed"
+            )
+        )
+
+        let items = ConversationTimelineItemBuilder.items(from: [
+            firstReasoning,
+            firstCommand,
+            final,
+            trailingReasoning,
+            trailingCommand
+        ])
+
+        XCTAssertEqual(items.count, 3)
+        XCTAssertEqual(try processGroup(in: items, at: 0).activities.map(\.stableID), ["command-before-final"])
+        guard case .message(let visibleFinal) = items[1] else {
+            return XCTFail("最终回答应保持原始位置")
+        }
+        XCTAssertEqual(visibleFinal.stableID, "assistant-final-boundary")
+        XCTAssertEqual(try processGroup(in: items, at: 2).activities.map(\.stableID), ["command-after-final"])
     }
 
     func testReasoningSummaryDeltaCarriesThinkingPayload() throws {

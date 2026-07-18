@@ -787,7 +787,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(sockets[0].sentTurns.count, 1)
         XCTAssertEqual(sockets[0].sentTurns.first?.payload.textPrompt, "排队下一轮")
         XCTAssertTrue(sockets[0].sentGuidance.isEmpty)
-        XCTAssertEqual(store.errorMessage, "引导对话失败：当前会话没有活跃 turn")
+        XCTAssertEqual(store.errorMessage, L10n.text("ui.failed_to_guide_conversation_there_is_no_active"))
     }
 
     func testSendCtrlCIgnoresRunningSessionWithoutActiveTurn() async throws {
@@ -824,7 +824,7 @@ extension ConversationDataFlowTests {
         store.sendCtrlC()
 
         XCTAssertEqual(sockets[0].sentCtrlCCount, 0)
-        XCTAssertEqual(store.statusMessage, "当前没有可中断的活动回合")
+        XCTAssertEqual(store.statusMessage, L10n.text("ui.there_are_currently_no_active_rounds_to_interrupt"))
         XCTAssertNil(store.errorMessage)
     }
 
@@ -1894,8 +1894,8 @@ extension ConversationDataFlowTests {
 
         let pendingApproval = try XCTUnwrap(store.selectedSession?.pendingApproval)
         XCTAssertEqual(store.selectedSession?.status, "waiting_for_approval")
-        XCTAssertEqual(pendingApproval.title, "Agent 请求执行命令：go test ./ios/MimiRemote")
-        XCTAssertTrue(conversationStore.messages(for: sessionID).contains { $0.kind == .approval && $0.content.contains("等待审批") })
+        XCTAssertEqual(pendingApproval.title, L10n.format("ui.agent_requests_execution_command_value", "go test ./ios/MimiRemote"))
+        XCTAssertTrue(conversationStore.messages(for: sessionID).contains { $0.kind == .approval && $0.content.contains(L10n.text("ui.waiting_for_approval")) })
 
         store.decideApproval(pendingApproval, accept: true)
 
@@ -2025,4 +2025,3 @@ extension ConversationDataFlowTests {
     }
 
 }
-

@@ -130,19 +130,19 @@ enum CodexAppServerConnectionError: LocalizedError, CredentialInvalidatingError 
     var errorDescription: String? {
         switch self {
         case .disconnected:
-            return "app-server WebSocket 未连接"
+            return L10n.text("ui.app_server_websocket_not_connected")
         case .notInitialized:
-            return "app-server 尚未完成 initialize/initialized"
+            return L10n.text("ui.app_server_has_not_yet_completed_initialize_initialized")
         case .duplicateRequestID(let id):
-            return "JSON-RPC request id 重复：\(id)"
+            return L10n.format("ui.duplicate_json_rpc_request_id_value", id)
         case .timeout(let method, let id):
-            return "app-server 请求超时：\(method)#\(id)"
+            return L10n.format("ui.app_server_request_timeout_value_value", method, id)
         case .appServer(let error):
             return error.localizedDescription
         case .decoding(let error):
-            return "app-server 消息解析失败：\(error.localizedDescription)"
+            return L10n.format("ui.app_server_message_parsing_failed_value", error.localizedDescription)
         case .transport(let error):
-            return "app-server WebSocket 传输失败：\(error.localizedDescription)"
+            return L10n.format("ui.app_server_websocket_transfer_failed_value", error.localizedDescription)
         }
     }
 }

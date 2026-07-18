@@ -30,17 +30,17 @@ enum AgentAPIError: LocalizedError, CredentialInvalidatingError {
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint:
-            return "连接地址无效。请输入 Mac 助手地址，例如 http://100.64.0.1:8787；地址中不要包含路径、账号或查询参数。"
+            return L10n.text("ui.the_connection_address_is_invalid_please_enter_the")
         case .insecurePublicHTTPEndpoint(let host):
-            return "已阻止公网 HTTP 地址 \(host)。为避免访问码和 Codex 内容被明文传输，请改用 HTTPS，或在 Mac 运行 agentd pair 后扫描 Tailscale 二维码。"
+            return L10n.format("ui.the_public_http_address_value_has_been_blocked", host)
         case .invalidResponse:
-            return "agentd 返回了无效响应"
+            return L10n.text("ui.agentd_returned_an_invalid_response")
         case .credentialsInvalid:
             return ConnectionTerminationStatus.credentialsInvalid.message
         case .server(let status, let message):
-            return "HTTP \(status)：\(message)"
+            return L10n.format("ui.http_error_status_message", status, message)
         case .decoding(let error):
-            return "解析响应失败：\(error.localizedDescription)"
+            return L10n.format("ui.failed_to_parse_response_value", error.localizedDescription)
         }
     }
 
@@ -93,31 +93,31 @@ struct EndpointTransportAssessment: Equatable {
     var title: String {
         switch status {
         case .empty:
-            return "等待输入连接地址"
+            return L10n.text("ui.waiting_for_input_of_connection_address")
         case .invalid:
-            return "连接地址格式无效"
+            return L10n.text("ui.the_connection_address_format_is_invalid")
         case .allowedPrivateHTTP:
-            return "私网 HTTP 地址可连接"
+            return L10n.text("ui.private_network_http_address_can_be_connected")
         case .allowedHTTPS:
-            return "HTTPS 地址可连接"
+            return L10n.text("ui.https_address_connectable")
         case .blockedPublicHTTP:
-            return "已阻止公网 HTTP"
+            return L10n.text("ui.public_http_blocked")
         }
     }
 
     var guidance: String {
         switch status {
         case .empty:
-            return "推荐扫描 Mac 上 agentd pair 生成的 Tailscale 二维码。"
+            return L10n.text("ui.it_is_recommended_to_scan_the_tailscale_qr")
         case .invalid:
-            return "请输入主机和端口，例如 http://100.64.0.1:8787；不要附加路径、账号或查询参数。"
+            return L10n.text("ui.please_enter_the_host_and_port_for_example")
         case .allowedPrivateHTTP:
-            return "HTTP 仅允许 loopback、Tailscale、局域网私有地址和 .local 主机；不要把 agentd 端口映射到公网。"
+            return L10n.text("ui.http_only_allows_loopback_tailscale_lan_private_addresses")
         case .allowedHTTPS:
-            return "公网域名只允许通过 HTTPS 连接。"
+            return L10n.text("ui.public_domain_names_only_allow_connections_via_https")
         case .blockedPublicHTTP:
-            let displayHost = host.map { "（\($0)）" } ?? ""
-            return "公网 HTTP\(displayHost) 会明文传输访问码和 Codex 内容。请改用 HTTPS，或在 Mac 运行 agentd pair 后扫描 Tailscale 二维码。"
+            let displayHost = host.map { L10n.format("ui.host_in_parentheses", $0) } ?? ""
+            return L10n.format("ui.public_network_http_value_will_transmit_the_access", displayHost)
         }
     }
 }
@@ -196,7 +196,7 @@ enum EndpointTransportPolicy {
             }
             return endpoint
         case .blockedPublicHTTP:
-            throw AgentAPIError.insecurePublicHTTPEndpoint(host: assessment.host ?? "未知主机")
+            throw AgentAPIError.insecurePublicHTTPEndpoint(host: assessment.host ?? L10n.text("ui.unknown_host"))
         case .empty, .invalid:
             throw AgentAPIError.invalidEndpoint
         }
@@ -508,7 +508,7 @@ struct AgentAPIClient {
            let error = object["error"] as? String {
             return error
         }
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "未知错误"
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? L10n.text("ui.unknown_error")
     }
 
     private func makePath(_ path: String, query: [String: String?]) -> String {
@@ -561,7 +561,7 @@ struct AgentAPIClient {
             if let date = DateParsers.iso8601.date(from: raw) {
                 return date
             }
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "日期格式无效：\(raw)")
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: L10n.format("ui.invalid_date_format_value", raw))
         }
         return decoder
     }()

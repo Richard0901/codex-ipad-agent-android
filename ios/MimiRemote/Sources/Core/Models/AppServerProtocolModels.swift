@@ -22,7 +22,7 @@ enum CodexAppServerRequestID: Codable, Hashable, CustomStringConvertible {
         } else if let value = try? container.decode(String.self) {
             self = .string(value)
         } else {
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "JSON-RPC id 必须是 string、number 或 null")
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: L10n.text("ui.json_rpc_id_must_be_string_number_or"))
         }
     }
 
@@ -130,7 +130,7 @@ struct CodexAppServerError: Codable, Hashable, LocalizedError {
     let data: CodexAppServerJSONValue?
 
     var errorDescription: String? {
-        "app-server 错误 \(code)：\(message)"
+        L10n.format("ui.app_server_error_value_value", code, message)
     }
 }
 
@@ -200,7 +200,7 @@ extension CodexAppServerMessage: Decodable {
         guard container.contains(.id) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.id,
-                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "JSON-RPC 响应缺少 id")
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: L10n.text("ui.json_rpc_response_missing_id"))
             )
         }
         self = .response(CodexAppServerResponse(
@@ -233,11 +233,11 @@ enum CodexAppServerRequestBuilderError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .projectNotAllowlisted(let id):
-            return "项目不在远程 allowlist 中：\(id)"
+            return L10n.format("ui.item_not_in_remote_allowlist_value", id)
         case .pathNotAllowlisted(let path):
-            return "工作目录不在远程 allowlist 中：\(path)"
+            return L10n.format("ui.working_directory_is_not_in_remote_allowlist_value", path)
         case .unsafeParameter(let reason):
-            return "app-server 请求参数不安全：\(reason)"
+            return L10n.format("ui.app_server_request_parameters_are_unsafe_value", reason)
         }
     }
 }
@@ -273,13 +273,13 @@ enum CodexAppServerReviewTarget: Hashable {
         case .baseBranch(let branch):
             let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalized.isEmpty else {
-                throw CodexAppServerRequestBuilderError.unsafeParameter("review base branch 不能为空")
+                throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.review_base_branch_cannot_be_empty"))
             }
             return .baseBranch(normalized)
         case .commit(let sha, let title):
             let normalizedSHA = sha.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalizedSHA.isEmpty else {
-                throw CodexAppServerRequestBuilderError.unsafeParameter("review commit sha 不能为空")
+                throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.review_commit_sha_cannot_be_empty"))
             }
             return .commit(
                 sha: normalizedSHA,
@@ -287,7 +287,7 @@ enum CodexAppServerReviewTarget: Hashable {
             )
         case .custom:
             // custom 是自由提示词，应继续走 turn/start 的统一沙盒与审批约束。
-            throw CodexAppServerRequestBuilderError.unsafeParameter("远程 Review 不允许 custom target")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.remote_review_does_not_allow_custom_targets"))
         }
     }
 
@@ -298,7 +298,7 @@ enum CodexAppServerReviewTarget: Hashable {
         case .baseBranch(let branch):
             let normalized = branch.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalized.isEmpty else {
-                throw CodexAppServerRequestBuilderError.unsafeParameter("review base branch 不能为空")
+                throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.review_base_branch_cannot_be_empty"))
             }
             return .object([
                 "type": .string("baseBranch"),
@@ -307,7 +307,7 @@ enum CodexAppServerReviewTarget: Hashable {
         case .commit(let sha, let title):
             let normalizedSHA = sha.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalizedSHA.isEmpty else {
-                throw CodexAppServerRequestBuilderError.unsafeParameter("review commit sha 不能为空")
+                throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.review_commit_sha_cannot_be_empty"))
             }
             return CodexAppServerJSONValue.objectValue([
                 "type": .string("commit"),
@@ -317,7 +317,7 @@ enum CodexAppServerReviewTarget: Hashable {
         case .custom(let instructions):
             let normalized = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalized.isEmpty else {
-                throw CodexAppServerRequestBuilderError.unsafeParameter("review instructions 不能为空")
+                throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.review_instructions_cannot_be_empty"))
             }
             return .object([
                 "type": .string("custom"),
@@ -362,7 +362,7 @@ struct CodexAppServerRequestBuilder {
     ) throws -> CodexAppServerRequestSpec {
         let searchTerm = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !searchTerm.isEmpty else {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("thread/search 搜索词不能为空")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.thread_search_search_term_cannot_be_empty"))
         }
         // thread/search 本身不接收 cwd。iOS 只发送搜索词和分页字段，目录授权与结果裁剪仍由
         // 既有 agentd gateway 策略负责，避免客户端借搜索接口注入任意工作目录。
@@ -545,10 +545,10 @@ struct CodexAppServerRequestBuilder {
     func threadSetName(threadID: String, name: String) throws -> CodexAppServerRequestSpec {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("会话名称不能为空")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.session_name_cannot_be_empty"))
         }
         guard normalized.utf8.count <= 256 else {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("会话名称不能超过 256 bytes")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.session_name_cannot_exceed_256_bytes"))
         }
         return CodexAppServerRequestSpec(method: "thread/name/set", params: .object([
             "threadId": .string(threadID),
@@ -575,7 +575,7 @@ struct CodexAppServerRequestBuilder {
     ) throws -> CodexAppServerRequestSpec {
         guard delivery != .detached else {
             // Gateway 第一批只允许原 thread 内 review，避免创建尚未登记授权的新 thread。
-            throw CodexAppServerRequestBuilderError.unsafeParameter("远程 Review 只允许 inline")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.remote_review_only_allows_inline"))
         }
         let normalizedTarget = try target.validatedInlineTarget()
         // review target 使用官方当前的 discriminated union，避免继续传旧版自由 prompt。
@@ -673,7 +673,7 @@ struct CodexAppServerRequestBuilder {
     func validateRemoteSafeParams(_ params: CodexAppServerJSONValue, projectPath: String) throws {
         let path = try allowlistedPath(projectPath)
         guard let object = params.objectValue else {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("params 必须是 object")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.params_must_be_object"))
         }
         try validateRemoteSafeParams(object.mapValues { Optional($0) }, projectPath: path)
     }
@@ -706,10 +706,10 @@ struct CodexAppServerRequestBuilder {
 
     private func validateRemoteSafeParams(_ params: [String: CodexAppServerJSONValue?], projectPath: String) throws {
         if let cwd = params["cwd"]??.stringValue, cwd != projectPath {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("cwd 必须来自项目 allowlist")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.cwd_must_be_from_project_allowlist"))
         }
         if normalizedDangerToken(params["approvalPolicy"]??.stringValue) == "never" {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("approvalPolicy=never 被禁止")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.approvalpolicy_never_is_prohibited"))
         }
         try validateNoDangerousConfig(params["config"] ?? nil)
         guard let sandbox = params["sandboxPolicy"]??.objectValue else {
@@ -717,15 +717,15 @@ struct CodexAppServerRequestBuilder {
         }
         // 默认允许用户批准下的最高文件系统权限，但仍不默认打开网络访问。
         if sandbox["networkAccess"]?.boolValue == true {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("远程默认禁止网络访问")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.remote_network_access_is_prohibited_by_default"))
         }
         let writableRoots = sandbox["writableRoots"]?.arrayValue?.compactMap(\.stringValue) ?? []
         if writableRoots.contains(where: { $0 != projectPath }) {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("writableRoots 只能包含当前 allowlist 项目")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.writableroots_can_only_contain_the_current_allowlist_items"))
         }
         let inputPaths = try collectWorkspaceInputPaths(params["input"] ?? nil)
         if inputPaths.contains(where: { !isPathInAllowlist($0) }) {
-            throw CodexAppServerRequestBuilderError.unsafeParameter("结构化输入路径必须来自当前 allowlist 项目")
+            throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.structured_input_paths_must_come_from_the_current"))
         }
     }
 
@@ -744,33 +744,33 @@ struct CodexAppServerRequestBuilder {
         var paths: [String] = []
         for item in items {
             guard let object = item.objectValue else {
-                throw CodexAppServerRequestBuilderError.unsafeParameter("turn/start.input item 必须是 object")
+                throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.turn_start_input_item_must_be_object"))
             }
             let type = object["type"]?.stringValue ?? ""
             switch type {
             case "localImage", "mention":
                 guard let path = object["path"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("turn/start.input.\(type).path 不能为空")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.format("ui.turn_start_input_value_path_cannot_be_empty", type))
                 }
                 paths.append(path)
             case "skill":
                 // Skill 可能来自用户级 / 管理员级 skill root 或插件缓存，不一定在当前项目 allowlist 内。
                 // 这里只校验字段完整性；skill root 的来源可信度由 agentd capabilities / app-server 负责。
                 guard let path = object["path"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("turn/start.input.skill.path 不能为空")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.turn_start_input_skill_path_cannot_be_empty"))
                 }
             case "image":
                 let url = object["url"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !url.isEmpty else {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("turn/start.input.image.url 不能为空")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.turn_start_input_image_url_cannot_be_empty"))
                 }
                 if url.lowercased().hasPrefix("file:") {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("image.url 不允许 file URL，请使用 localImage.path")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.image_url_does_not_allow_file_urls_please"))
                 }
             case "text":
                 continue
             default:
-                throw CodexAppServerRequestBuilderError.unsafeParameter("turn/start.input 类型不支持：\(type)")
+                throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.format("ui.turn_start_input_type_is_not_supported_value", type))
             }
         }
         return paths
@@ -794,19 +794,19 @@ struct CodexAppServerRequestBuilder {
             for (key, child) in object {
                 let normalizedKey = normalizedDangerToken(key)
                 if normalizedKey == "dangerfullaccess" {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("config 不允许 dangerFullAccess")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.config_does_not_allow_dangerfullaccess"))
                 }
                 if normalizedKey == "approvalpolicy",
                    normalizedDangerToken(child.stringValue) == "never" {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("config 不允许 approvalPolicy=never")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.config_does_not_allow_approvalpolicy_never"))
                 }
                 if normalizedKey == "sandbox" || normalizedKey == "sandboxmode" || (parentKey == "sandboxpolicy" && normalizedKey == "type"),
                    normalizedDangerToken(child.stringValue) == "dangerfullaccess" {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("config 不允许 dangerFullAccess")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.config_does_not_allow_dangerfullaccess"))
                 }
                 if normalizedKey == "networkaccess",
                    child.boolValue == true || child.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true" {
-                    throw CodexAppServerRequestBuilderError.unsafeParameter("config 不允许 networkAccess=true")
+                    throw CodexAppServerRequestBuilderError.unsafeParameter(L10n.text("ui.config_does_not_allow_networkaccess_true"))
                 }
                 try validateNoDangerousConfig(child, parentKey: normalizedKey)
             }

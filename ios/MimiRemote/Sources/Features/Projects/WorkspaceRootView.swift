@@ -18,9 +18,9 @@ enum WorkspaceSessionRuntimeChoice: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .codex:
-            return "新建 Codex 会话"
+            return L10n.text("ui.create_a_new_codex_session")
         case .claude:
-            return "新建 Claude Code 会话"
+            return L10n.text("ui.create_a_new_claude_code_session")
         }
     }
 
@@ -131,14 +131,14 @@ struct WorkspaceRootView: View {
 
     private func navigationContent(tokens: ThemeTokens) -> some View {
         workspaceBrowser(tokens: tokens)
-            .navigationTitle("工作区")
+            .navigationTitle(L10n.text("ui.workspace"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         isPresentingOpenWorkspace = true
                     } label: {
-                        Label("打开目录", systemImage: "folder.badge.plus")
+                        Label(L10n.text("ui.open_directory"), systemImage: "folder.badge.plus")
                     }
                     .buttonStyle(.glassProminent)
                     .tint(tokens.primaryAction)
@@ -168,7 +168,7 @@ struct WorkspaceRootView: View {
                             await refreshWorkspaceContent(projectID: selectedProject.id)
                         }
                 } else {
-                    ContentUnavailableView("请选择工作区", systemImage: "folder")
+                    ContentUnavailableView(L10n.text("ui.please_select_a_workspace"), systemImage: "folder")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -183,7 +183,7 @@ struct WorkspaceRootView: View {
             Divider()
                 .overlay(tokens.border.opacity(0.7))
 
-            ProgressView("正在加载工作区")
+            ProgressView(L10n.text("ui.loading_workspace"))
                 .font(themeStore.uiFont(.callout, weight: .medium))
                 .foregroundStyle(tokens.secondaryText)
                 .tint(tokens.primaryAction)
@@ -232,7 +232,7 @@ struct WorkspaceRootView: View {
                         isPresentingOpenWorkspace = true
                     }
                 } label: {
-                    Label(isFailure ? "重新加载" : "打开目录", systemImage: isFailure ? "arrow.clockwise" : "folder.badge.plus")
+                    Label(isFailure ? L10n.text("ui.reload") : L10n.text("ui.open_directory"), systemImage: isFailure ? "arrow.clockwise" : "folder.badge.plus")
                         .font(themeStore.uiFont(.callout, weight: .semibold))
                         .padding(.horizontal, 4)
                 }
@@ -262,7 +262,7 @@ struct WorkspaceRootView: View {
                         if catalogState == .loading && sessionStore.sidebarProjects.isEmpty {
                             ForEach(0..<4, id: \.self) { index in
                                 WorkspaceLibraryCard(
-                                    project: AgentProject(id: "loading-\(index)", name: "正在加载工作区", path: "/Users/you/code/project"),
+                                    project: AgentProject(id: "loading-\(index)", name: L10n.text("ui.loading_workspace"), path: "/Users/you/code/project"),
                                     sessionCount: 0,
                                     worktreeCount: 0,
                                     isUnavailable: false,
@@ -315,7 +315,7 @@ struct WorkspaceRootView: View {
                 }
             }
         }
-        .accessibilityLabel("工作区列表")
+        .accessibilityLabel(L10n.text("ui.workspace_list"))
     }
 
     private func workspaceDetail(project: AgentProject) -> some View {
@@ -352,8 +352,8 @@ struct WorkspaceRootView: View {
     }
 
     private var emptyWorkspaceTitle: String {
-        if case .failed = catalogState { return "无法加载工作区" }
-        return "还没有工作区"
+        if case .failed = catalogState { return L10n.text("ui.unable_to_load_workspace") }
+        return L10n.text("ui.no_workspace_yet")
     }
 
     private var emptyWorkspaceSymbol: String {
@@ -363,7 +363,7 @@ struct WorkspaceRootView: View {
 
     private var emptyWorkspaceMessage: String {
         if case .failed(let message) = catalogState { return message }
-        return "打开目录后，可以在这里浏览项目和创建会话。"
+        return L10n.text("ui.once_the_directory_is_open_you_can_browse")
     }
 
     private func synchronizeSelection() {
@@ -515,7 +515,7 @@ private struct WorkspaceLibraryCard: View {
                             .foregroundStyle(isSelected ? tokens.primaryAction : tokens.tertiaryText)
 
                         Label(
-                            isUnavailable ? "需重试" : "可访问",
+                            isUnavailable ? L10n.text("ui.need_to_retry_915015f1") : L10n.text("ui.accessible"),
                             systemImage: isUnavailable ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
                         )
                         .font(themeStore.uiFont(.caption2, weight: .semibold))
@@ -525,7 +525,7 @@ private struct WorkspaceLibraryCard: View {
                 }
 
                 HStack(spacing: 8) {
-                    metric("\(sessionCount)", title: "会话", systemImage: "bubble.left.and.bubble.right")
+                    metric("\(sessionCount)", title: L10n.text("ui.session"), systemImage: "bubble.left.and.bubble.right")
                     metric("\(worktreeCount)", title: "Worktree", systemImage: "arrow.triangle.branch")
                 }
             }
@@ -542,7 +542,14 @@ private struct WorkspaceLibraryCard: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "工作区 \(project.name)，\(sessionCount) 个会话，\(worktreeCount) 个 Worktree，\(isUnavailable ? "需要重试" : "可访问")\(isSelected ? "，已选择" : "")"
+            L10n.format(
+                "ui.workspace_summary",
+                project.name,
+                L10n.plural("ui.sessions_count", count: sessionCount),
+                L10n.plural("ui.worktrees_count", count: worktreeCount),
+                isUnavailable ? L10n.text("ui.need_to_retry") : L10n.text("ui.accessible"),
+                isSelected ? L10n.text("ui.selected_b4f8bea5") : ""
+            )
         )
     }
 
@@ -610,7 +617,7 @@ private struct WorkspaceDetailView: View {
 
     private func workspaceActions(tokens: ThemeTokens) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("快捷操作")
+            Text(L10n.text("ui.quick_operation"))
                 .font(themeStore.uiFont(.subheadline, weight: .semibold))
                 .foregroundStyle(tokens.primaryText)
 
@@ -619,7 +626,7 @@ private struct WorkspaceDetailView: View {
                 ForEach(WorkspaceSessionRuntimeChoice.available(claudeChannelAvailable: claudeChannelAvailable)) { choice in
                     actionButton(
                         title: choice.title,
-                        subtitle: choice == .codex ? "使用默认运行时开始" : "使用 Claude Code 运行时开始",
+                        subtitle: choice == .codex ? L10n.text("ui.start_using_the_default_runtime") : L10n.text("ui.get_started_with_the_claude_code_runtime"),
                         systemImage: choice.systemImage,
                         emphasis: choice == .codex ? .primary : .accented,
                         tokens: tokens
@@ -633,8 +640,8 @@ private struct WorkspaceDetailView: View {
             // 导航和侧栏可见性属于辅助操作，降低视觉权重但保留完整 44pt 以上触控区域。
             LazyVGrid(columns: actionColumns, spacing: 12) {
                 actionButton(
-                    title: "在会话中打开",
-                    subtitle: "查看该工作区的全部会话",
+                    title: L10n.text("ui.open_in_session"),
+                    subtitle: L10n.text("ui.view_all_sessions_for_this_workspace"),
                     systemImage: "bubble.left.and.bubble.right",
                     emphasis: .secondary,
                     tokens: tokens,
@@ -642,8 +649,8 @@ private struct WorkspaceDetailView: View {
                 )
 
                 actionButton(
-                    title: isShownInSessions ? "从会话侧栏隐藏" : "显示在会话侧栏",
-                    subtitle: isShownInSessions ? "当前可从会话侧栏进入" : "方便从会话侧栏快速进入",
+                    title: isShownInSessions ? L10n.text("ui.hide_from_conversation_sidebar") : L10n.text("ui.show_in_conversation_sidebar"),
+                    subtitle: isShownInSessions ? L10n.text("ui.currently_accessible_from_the_conversation_sidebar") : L10n.text("ui.convenient_for_quick_access_from_the_session_sidebar"),
                     systemImage: isShownInSessions ? "eye.slash" : "eye",
                     emphasis: .secondary,
                     tokens: tokens,
@@ -758,7 +765,7 @@ private struct WorkspaceDetailView: View {
     private func recentSessionsSection(tokens: ThemeTokens) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("最近会话")
+                Text(L10n.text("ui.recent_conversations"))
                     .font(themeStore.uiFont(.headline, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
                 Spacer()
@@ -770,30 +777,30 @@ private struct WorkspaceDetailView: View {
                         } else {
                             Image(systemName: "arrow.clockwise")
                         }
-                        Text(sessionLoadState.isLoading ? "加载中" : "刷新")
+                        Text(sessionLoadState.isLoading ? L10n.text("ui.loading") : L10n.text("ui.refresh"))
                     }
                     .font(themeStore.uiFont(.caption, weight: .medium))
                     .foregroundStyle(tokens.primaryAction)
                 }
                 .buttonStyle(.plain)
                 .disabled(sessionLoadState.isLoading)
-                .accessibilityLabel(sessionLoadState.isLoading ? "正在加载最近会话" : "刷新最近会话")
+                .accessibilityLabel(sessionLoadState.isLoading ? L10n.text("ui.loading_recent_conversations") : L10n.text("ui.refresh_recent_conversations"))
             }
 
             if recentSessions.isEmpty, sessionLoadState.isLoading {
                 recentSessionPlaceholders(tokens: tokens)
             } else if recentSessions.isEmpty, case .failed(let message) = sessionLoadState {
                 ContentUnavailableView {
-                    Label("无法加载会话", systemImage: "exclamationmark.triangle")
+                    Label(L10n.text("ui.unable_to_load_session"), systemImage: "exclamationmark.triangle")
                 } description: {
                     Text(message)
                 } actions: {
-                    Button("重新加载", action: onRefreshSessions)
+                    Button(L10n.text("ui.reload"), action: onRefreshSessions)
                 }
                 .frame(maxWidth: .infinity, minHeight: 150)
                 .background(tokens.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else if recentSessions.isEmpty {
-                ContentUnavailableView("还没有会话", systemImage: "bubble.left.and.bubble.right", description: Text("在这个工作区新建会话后，会显示在这里。"))
+                ContentUnavailableView(L10n.text("ui.no_sessions_yet"), systemImage: "bubble.left.and.bubble.right", description: Text(L10n.text("ui.after_a_new_session_is_created_in_this")))
                     .frame(maxWidth: .infinity, minHeight: 150)
                     .background(tokens.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
@@ -857,7 +864,7 @@ private struct WorkspaceDetailView: View {
         }
         .redacted(reason: .placeholder)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("正在加载最近会话")
+        .accessibilityLabel(L10n.text("ui.loading_recent_conversations"))
     }
 
     private func recentSessionRow(_ session: AgentSession, tokens: ThemeTokens) -> some View {
@@ -917,15 +924,15 @@ private struct WorkspaceDetailView: View {
 
     private static let sessionTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "HH:mm"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate("Hm")
         return formatter
     }()
 
     private static let sessionDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "M月d日"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate("Md")
         return formatter
     }()
 }

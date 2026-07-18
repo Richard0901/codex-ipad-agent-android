@@ -24,10 +24,10 @@ struct DiffPanelView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Git 变更")
+                    Text(L10n.text("ui.git_changes"))
                         .font(themeStore.uiFont(.caption, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
-                    Text(sessionStore.selectedGitStatusPath ?? "未选择工作区")
+                    Text(sessionStore.selectedGitStatusPath ?? L10n.text("ui.no_workspace_selected"))
                         .font(themeStore.codeFont(.caption2))
                         .foregroundStyle(tokens.secondaryText)
                         .lineLimit(1)
@@ -44,7 +44,7 @@ struct DiffPanelView: View {
                         await sessionStore.refreshSelectedPullRequestStatus()
                     }
                 } label: {
-                    Label("刷新 Git 状态", systemImage: "arrow.clockwise")
+                    Label(L10n.text("ui.refresh_git_status"), systemImage: "arrow.clockwise")
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
@@ -62,7 +62,7 @@ struct DiffPanelView: View {
                     gitStatusContent(tokens: tokens)
 
                     if !fileChangeItems.isEmpty {
-                        Text("运行时摘要")
+                        Text(L10n.text("ui.runtime_summary"))
                             .font(themeStore.uiFont(.caption, weight: .semibold))
                             .foregroundStyle(tokens.tertiaryText)
                             .padding(.top, 4)
@@ -100,51 +100,51 @@ struct DiffPanelView: View {
             }
             updateCommitMessageSuggestion(force: false)
         }
-        .confirmationDialog("提交并推送？", isPresented: $isShowingQuickPublishConfirmation, titleVisibility: .visible) {
-            Button(sessionStore.selectedGitStatus?.hasChanges == true ? "提交并推送" : "推送当前分支") {
+        .confirmationDialog(L10n.text("ui.submit_and_push_74661f7a"), isPresented: $isShowingQuickPublishConfirmation, titleVisibility: .visible) {
+            Button(sessionStore.selectedGitStatus?.hasChanges == true ? L10n.text("ui.submit_and_push") : L10n.text("ui.push_current_branch")) {
                 let message = quickPublishMessage
                 Task {
                     _ = await sessionStore.quickPublishSelectedGitChanges(message: message)
                 }
             }
-            Button("取消", role: .cancel) {}
+            Button(L10n.text("ui.cancel"), role: .cancel) {}
         } message: {
             Text(quickPublishConfirmationMessage)
         }
-        .confirmationDialog("发布 TestFlight？", isPresented: $isShowingTestFlightConfirmation, titleVisibility: .visible) {
-            Button("在主机发布 TestFlight") {
+        .confirmationDialog(L10n.text("ui.publish_testflight_05d22e53"), isPresented: $isShowingTestFlightConfirmation, titleVisibility: .visible) {
+            Button(L10n.text("ui.publish_testflight_on_host")) {
                 let whatToTest = testFlightWhatToTest
                 Task {
                     _ = await sessionStore.startSelectedGitTestFlightRelease(whatToTest: whatToTest)
                 }
             }
-            Button("取消", role: .cancel) {}
+            Button(L10n.text("ui.cancel"), role: .cancel) {}
         } message: {
-            Text("将在主机执行已通过预检的 git testflight-push。它会核对远端 commit，并使用主机本地的签名与 App Store Connect 配置完成内部发布。")
+            Text(L10n.text("ui.a_preflighted_git_testflight_push_will_be_executed"))
         }
-        .confirmationDialog("撤销工作区改动？", isPresented: $isShowingRevertConfirmation, titleVisibility: .visible) {
+        .confirmationDialog(L10n.text("ui.undo_workspace_changes"), isPresented: $isShowingRevertConfirmation, titleVisibility: .visible) {
             if let file = pendingRevertFile {
-                Button("撤销 \(file.path)", role: .destructive) {
+                Button(L10n.format("ui.undo_value", file.path), role: .destructive) {
                     let path = file.path
                     pendingRevertFile = nil
                     Task { await sessionStore.performSelectedGitAction(.revert, files: [path]) }
                 }
             }
-            Button("取消", role: .cancel) {
+            Button(L10n.text("ui.cancel"), role: .cancel) {
                 pendingRevertFile = nil
             }
         } message: {
-            Text("这会丢弃该已跟踪文件的未暂存改动，未跟踪文件不会被删除。")
+            Text(L10n.text("ui.this_discards_unstaged_changes_to_the_tracked_file"))
         }
-        .confirmationDialog("撤销这个 hunk？", isPresented: $isShowingRevertHunkConfirmation, titleVisibility: .visible) {
+        .confirmationDialog(L10n.text("ui.undo_this_hunk"), isPresented: $isShowingRevertHunkConfirmation, titleVisibility: .visible) {
             if let patch = pendingRevertHunkPatch {
-                Button("撤销 hunk", role: .destructive) {
+                Button(L10n.text("ui.undo_hunk"), role: .destructive) {
                     pendingRevertHunkPatch = nil
                     pendingRevertHunkTitle = ""
                     Task { await sessionStore.performSelectedGitPatchAction(.revertPatch, patch: patch) }
                 }
             }
-            Button("取消", role: .cancel) {
+            Button(L10n.text("ui.cancel"), role: .cancel) {
                 pendingRevertHunkPatch = nil
                 pendingRevertHunkTitle = ""
             }
@@ -158,7 +158,7 @@ struct DiffPanelView: View {
         if let error = sessionStore.selectedGitStatusErrorMessage {
             InspectorSummaryCard(
                 symbolName: "exclamationmark.triangle",
-                title: "Git 状态不可用",
+                title: L10n.text("ui.git_status_is_unavailable"),
                 subtitle: error,
                 tint: tokens.warning,
                 lineLimit: nil
@@ -167,7 +167,7 @@ struct DiffPanelView: View {
             if let actionError = sessionStore.selectedGitActionErrorMessage {
                 InspectorSummaryCard(
                     symbolName: "exclamationmark.triangle",
-                    title: "Git 动作失败",
+                    title: L10n.text("ui.git_action_failed"),
                     subtitle: actionError,
                     tint: tokens.warning,
                     lineLimit: nil
@@ -176,7 +176,7 @@ struct DiffPanelView: View {
 
             if let status = sessionStore.selectedGitStatus {
                 if !status.isRepository {
-                    ContentUnavailableView("当前工作区不是 Git 仓库", systemImage: "folder")
+                    ContentUnavailableView(L10n.text("ui.the_current_workspace_is_not_a_git_repository"), systemImage: "folder")
                         .font(themeStore.uiFont(.caption))
                         .padding(.top, 48)
                 } else {
@@ -230,7 +230,7 @@ struct DiffPanelView: View {
                         }
                     )
                     if !status.hasChanges && fileChangeItems.isEmpty {
-                        ContentUnavailableView("暂无文件变更", systemImage: "doc.text.magnifyingglass")
+                        ContentUnavailableView(L10n.text("ui.no_file_changes_yet"), systemImage: "doc.text.magnifyingglass")
                             .font(themeStore.uiFont(.caption))
                             .padding(.vertical, 16)
                     }
@@ -253,7 +253,7 @@ struct DiffPanelView: View {
                     if let diffStat = nonEmpty(status.diffStat) {
                         InspectorSummaryCard(
                             symbolName: "chart.bar.doc.horizontal",
-                            title: "Diff 统计",
+                            title: L10n.text("ui.diff_statistics"),
                             subtitle: diffStat,
                             tint: tokens.accent,
                             lineLimit: nil
@@ -274,10 +274,10 @@ struct DiffPanelView: View {
                             }
                         )
                         GitDiffBlock(
-                            title: "已暂存 diff",
+                            title: L10n.text("ui.diff_staged"),
                             text: stagedDiff,
                             isWorking: gitControlIsWorking,
-                            primaryActionTitle: "取消暂存 hunk",
+                            primaryActionTitle: L10n.text("ui.cancel_temporary_storage_hunk"),
                             primaryActionSystemImage: "minus.square",
                             primaryActionTint: tokens.accent,
                             onPrimaryAction: { hunk in
@@ -289,16 +289,16 @@ struct DiffPanelView: View {
                     }
                     if let unstagedDiff = nonEmpty(status.unstagedDiff) {
                         GitDiffBlock(
-                            title: "未暂存 diff",
+                            title: L10n.text("ui.diff_not_staged"),
                             text: unstagedDiff,
                             isWorking: gitControlIsWorking,
-                            primaryActionTitle: "暂存 hunk",
+                            primaryActionTitle: L10n.text("ui.temporary_hunk"),
                             primaryActionSystemImage: "plus.square",
                             primaryActionTint: tokens.accent,
                             onPrimaryAction: { hunk in
                                 Task { await sessionStore.performSelectedGitPatchAction(.stagePatch, patch: hunk.patch) }
                             },
-                            destructiveActionTitle: "撤销 hunk",
+                            destructiveActionTitle: L10n.text("ui.undo_hunk"),
                             destructiveActionSystemImage: "arrow.counterclockwise",
                             destructiveActionTint: tokens.warning,
                             onDestructiveAction: { hunk in
@@ -313,7 +313,7 @@ struct DiffPanelView: View {
                     if status.truncated == true, let note = status.truncatedNote {
                         InspectorSummaryCard(
                             symbolName: "scissors",
-                            title: "输出已截断",
+                            title: L10n.text("ui.output_is_truncated"),
                             subtitle: note,
                             tint: tokens.warning,
                             lineLimit: nil
@@ -321,12 +321,12 @@ struct DiffPanelView: View {
                     }
                 }
             } else if sessionStore.isRefreshingGitStatus {
-                ProgressView("正在读取 Git 状态")
+                ProgressView(L10n.text("ui.reading_git_status"))
                     .font(themeStore.uiFont(.caption))
                     .frame(maxWidth: .infinity)
                     .padding(.top, 48)
             } else {
-                ContentUnavailableView("暂无 Git 状态", systemImage: "arrow.clockwise")
+                ContentUnavailableView(L10n.text("ui.no_git_status_yet"), systemImage: "arrow.clockwise")
                     .font(themeStore.uiFont(.caption))
                     .padding(.top, 48)
             }
@@ -397,34 +397,38 @@ struct DiffPanelView: View {
                 .joined(separator: " ")
             return "- `\(comment.hunkTitle)`: \(body)"
         }
-        return "### 审查备注\n\n" + items.joined(separator: "\n")
+        return L10n.text("ui.review_notes") + items.joined(separator: "\n")
     }
 
     private func gitSummaryTitle(_ status: GitStatusResponse) -> String {
         if let branch = nonEmpty(status.branch) {
-            return "Git 状态 · \(branch)"
+            return L10n.format("ui.git_status_value", branch)
         }
         if let head = nonEmpty(status.head) {
-            return "Git 状态 · \(head)"
+            return L10n.format("ui.git_status_value", head)
         }
-        return "Git 状态"
+        return L10n.text("ui.git_status")
     }
 
     private func gitSummarySubtitle(_ status: GitStatusResponse) -> String {
         if let statusText = nonEmpty(status.statusText) {
             return statusText
         }
-        return "工作区干净"
+        return L10n.text("ui.clean_work_area")
     }
 
     private var quickPublishConfirmationMessage: String {
         guard let status = sessionStore.selectedGitStatus else {
-            return "将普通推送当前分支，不会执行 force push。"
+            return L10n.text("ui.the_current_branch_will_be_pushed_normally_and")
         }
         if status.hasChanges {
-            return "将暂存当前工作区的 \(status.files.count) 个文件，使用“\(quickPublishMessage)”提交，然后普通推送到 origin/\(status.branch ?? "当前分支")。"
+            return L10n.format(
+                "ui.counts_joined",
+                L10n.plural("ui.files_staged_count", count: status.files.count),
+                L10n.format("ui.commit_and_push_without_force", quickPublishMessage, status.branch ?? L10n.text("ui.current_branch"))
+            )
         }
-        return "当前工作区没有待提交变更，将普通推送到 origin/\(status.branch ?? "当前分支")，不会执行 force push。"
+        return L10n.format("ui.there_are_no_changes_to_be_submitted_in", status.branch ?? L10n.text("ui.current_branch"))
     }
 
     private var testFlightWhatToTest: String {
@@ -437,7 +441,7 @@ struct DiffPanelView: View {
 
     private var quickPublishMessage: String {
         let current = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        return current.isEmpty ? "chore: 同步当前分支" : current
+        return current.isEmpty ? L10n.text("ui.chore_synchronize_the_current_branch") : current
     }
 
     private func updateCommitMessageSuggestion(force: Bool) {
@@ -477,11 +481,11 @@ struct DiffPanelItem: Identifiable {
     var id: String { fileKey }
 
     var title: String {
-        count > 1 ? "文件变更 x\(count)" : "文件变更"
+        count > 0 ? L10n.plural("ui.files_changed_count", count: count) : L10n.text("ui.file_changes")
     }
 
     var displaySubtitle: String {
-        let suffix = wasCollapsed ? "\n\n已折叠长 diff，仅展示尾部摘要。" : ""
+        let suffix = wasCollapsed ? L10n.text("ui.long_diffs_have_been_collapsed_showing_only_the") : ""
         return latestContent + suffix
     }
 
@@ -497,7 +501,7 @@ struct DiffPanelItem: Identifiable {
 
     static func fileKey(from message: ConversationMessage) -> String {
         let content = message.content
-            .replacingOccurrences(of: "文件变更：", with: "")
+            .replacingOccurrences(of: L10n.text("ui.file_changes_766e4292"), with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let firstToken = content.split(separator: " ", maxSplits: 1).first.map(String.init)
         return firstToken?.isEmpty == false ? firstToken! : message.stableID ?? message.id.uuidString
@@ -593,7 +597,7 @@ private struct GitFileStatusList: View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         VStack(alignment: .leading, spacing: 8) {
-            Label("文件", systemImage: "doc.on.doc")
+            Label(L10n.text("ui.file"), systemImage: "doc.on.doc")
                 .font(themeStore.uiFont(.caption, weight: .semibold))
                 .foregroundStyle(tokens.primaryText)
 
@@ -656,17 +660,17 @@ private struct GitFileStatusRow: View {
 
             HStack(spacing: 4) {
                 if file.unstaged || file.untracked {
-                    gitActionButton(title: "暂存", systemImage: "plus.square", tint: tokens.accent) {
+                    gitActionButton(title: L10n.text("ui.temporary_storage"), systemImage: "plus.square", tint: tokens.accent) {
                         onStage(file)
                     }
                 }
                 if file.staged {
-                    gitActionButton(title: "取消暂存", systemImage: "minus.square", tint: tokens.accent) {
+                    gitActionButton(title: L10n.text("ui.unstage"), systemImage: "minus.square", tint: tokens.accent) {
                         onUnstage(file)
                     }
                 }
                 if file.unstaged && !file.untracked {
-                    gitActionButton(title: "撤销", systemImage: "arrow.counterclockwise", tint: tokens.warning) {
+                    gitActionButton(title: L10n.text("ui.cancel_9fcefd8d"), systemImage: "arrow.counterclockwise", tint: tokens.warning) {
                         onRevert(file)
                     }
                 }
@@ -678,18 +682,18 @@ private struct GitFileStatusRow: View {
 
     private var statusLabel: String {
         if file.untracked {
-            return "未跟踪"
+            return L10n.text("ui.not_tracked")
         }
         if file.staged && file.unstaged {
-            return "已暂存，还有工作区改动"
+            return L10n.text("ui.temporarily_saved_there_are_still_workspace_changes")
         }
         if file.staged {
-            return "已暂存"
+            return L10n.text("ui.temporarily_saved")
         }
         if file.unstaged {
-            return "工作区改动"
+            return L10n.text("ui.workspace_changes")
         }
-        return "无变更"
+        return L10n.text("ui.no_changes")
     }
 
     private func gitActionButton(title: String, systemImage: String, tint: Color, action: @escaping () -> Void) -> some View {
@@ -717,7 +721,7 @@ private struct GitCommitBox: View {
         let canCommit = !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isWorking
 
         HStack(alignment: .top, spacing: 8) {
-            TextField("提交说明", text: $message, axis: .vertical)
+            TextField(L10n.text("ui.submission_instructions"), text: $message, axis: .vertical)
                 .font(themeStore.uiFont(.caption))
                 .textFieldStyle(.plain)
                 .lineLimit(1...3)
@@ -729,14 +733,14 @@ private struct GitCommitBox: View {
                 }
 
             Button(action: onCommit) {
-                Label("提交", systemImage: "checkmark.circle")
+                Label(L10n.text("ui.submit"), systemImage: "checkmark.circle")
                     .labelStyle(.iconOnly)
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(.borderless)
             .foregroundStyle(canCommit ? tokens.success : tokens.tertiaryText)
             .disabled(!canCommit)
-            .help("提交已暂存变更")
+            .help(L10n.text("ui.commit_staged_changes"))
         }
         .padding(10)
         .background(tokens.success.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -770,7 +774,7 @@ private struct GitPublishBox: View {
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Label("发布分支", systemImage: "arrow.up.circle")
+                Label(L10n.text("ui.release_branch"), systemImage: "arrow.up.circle")
                     .font(themeStore.uiFont(.caption, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
                 Spacer()
@@ -779,26 +783,26 @@ private struct GitPublishBox: View {
                         .controlSize(.small)
                 }
                 Button(action: onRefreshPullRequestStatus) {
-                    Label("刷新 PR 状态", systemImage: "arrow.triangle.2.circlepath")
+                    Label(L10n.text("ui.refresh_pr_status"), systemImage: "arrow.triangle.2.circlepath")
                         .labelStyle(.iconOnly)
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(canPublish && !isWorking ? tokens.accent : tokens.tertiaryText)
                 .disabled(!canPublish || isWorking)
-                .help("刷新 PR 状态")
+                .help(L10n.text("ui.refresh_pr_status"))
                 Button(action: onPush) {
-                    Label("Push", systemImage: "arrow.up.circle")
+                    Label(L10n.text("ui.push"), systemImage: "arrow.up.circle")
                         .labelStyle(.iconOnly)
                         .frame(width: 30, height: 30)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(canPublish && !isWorking ? tokens.accent : tokens.tertiaryText)
                 .disabled(!canPublish || isWorking)
-                .help("Push 当前分支")
+                .help(L10n.text("ui.push_the_current_branch"))
             }
 
-            TextField("PR 标题", text: $title)
+            TextField(L10n.text("ui.pr_title"), text: $title)
                 .font(themeStore.uiFont(.caption))
                 .textFieldStyle(.plain)
                 .padding(9)
@@ -808,7 +812,7 @@ private struct GitPublishBox: View {
                         .strokeBorder(tokens.border, lineWidth: 1)
                 }
 
-            TextField("PR 描述", text: $prBody, axis: .vertical)
+            TextField(L10n.text("ui.pr_description"), text: $prBody, axis: .vertical)
                 .font(themeStore.uiFont(.caption))
                 .textFieldStyle(.plain)
                 .lineLimit(2...5)
@@ -821,7 +825,7 @@ private struct GitPublishBox: View {
 
             HStack(spacing: 8) {
                 Button(action: onCreatePullRequest) {
-                    Label("创建草稿 PR", systemImage: "arrow.triangle.pull")
+                    Label(L10n.text("ui.create_a_draft_pr"), systemImage: "arrow.triangle.pull")
                         .font(themeStore.uiFont(.caption, weight: .semibold))
                 }
                 .buttonStyle(.borderless)
@@ -829,13 +833,19 @@ private struct GitPublishBox: View {
                 .disabled(!canCreatePR)
                 Spacer()
                 if let pullRequestURL, let url = URL(string: pullRequestURL) {
-                    Link("打开 PR", destination: url)
+                    Link(L10n.text("ui.open_pr"), destination: url)
                         .font(themeStore.uiFont(.caption, weight: .semibold))
                 }
             }
             if reviewCommentCount > 0 {
                 Button(action: onAppendReviewNotes) {
-                    Label("追加 \(reviewCommentCount) 条审查备注", systemImage: "text.badge.plus")
+                    Label(
+                        L10n.format(
+                            "ui.add_review_comments",
+                            L10n.plural("ui.review_comments_count", count: reviewCommentCount)
+                        ),
+                        systemImage: "text.badge.plus"
+                    )
                         .font(themeStore.uiFont(.caption, weight: .semibold))
                 }
                 .buttonStyle(.borderless)
@@ -875,12 +885,12 @@ private struct GitPublishBox: View {
                 }
                 .padding(.top, 2)
             } else {
-                Text("当前分支暂无 PR")
+                Text(L10n.text("ui.there_is_no_pr_for_the_current_branch"))
                     .font(themeStore.uiFont(.caption2))
                     .foregroundStyle(tokens.secondaryText)
             }
         } else if let error = pullRequestStatusError?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
-            Text("PR 状态不可用：\(error)")
+            Text(L10n.format("ui.pr_status_unavailable_value", error))
                 .font(themeStore.uiFont(.caption2))
                 .foregroundStyle(tokens.warning)
                 .lineLimit(2)
@@ -911,7 +921,7 @@ private struct GitPublishBox: View {
         if let merge = status.mergeStateStatus?.trimmingCharacters(in: .whitespacesAndNewlines), !merge.isEmpty {
             parts.append(merge)
         }
-        return parts.isEmpty ? "状态已读取" : parts.joined(separator: " · ")
+        return parts.isEmpty ? L10n.text("ui.status_read") : parts.joined(separator: " · ")
     }
 }
 
@@ -1048,13 +1058,13 @@ private struct GitPatchHunkRow: View {
                 Button {
                     isAddingReviewComment.toggle()
                 } label: {
-                    Label(reviewComments.isEmpty ? "添加审查备注" : "审查备注 \(reviewComments.count)", systemImage: reviewComments.isEmpty ? "text.badge.plus" : "text.bubble")
+                    Label(reviewComments.isEmpty ? L10n.text("ui.add_review_notes") : L10n.plural("ui.review_comments_count", count: reviewComments.count), systemImage: reviewComments.isEmpty ? "text.badge.plus" : "text.bubble")
                         .labelStyle(.iconOnly)
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(reviewComments.isEmpty ? tokens.accent : tokens.success)
-                .help(reviewComments.isEmpty ? "添加审查备注" : "查看/添加审查备注")
+                .help(reviewComments.isEmpty ? L10n.text("ui.add_review_notes") : L10n.text("ui.view_add_review_notes"))
 
                 if let primaryActionTitle, let onPrimaryAction {
                     hunkActionButton(
@@ -1100,7 +1110,7 @@ private struct GitPatchHunkRow: View {
             }
             if isAddingReviewComment {
                 HStack(alignment: .top, spacing: 8) {
-                    TextField("审查备注", text: $reviewCommentDraft, axis: .vertical)
+                    TextField(L10n.text("ui.review_notes_fd0eac2c"), text: $reviewCommentDraft, axis: .vertical)
                         .font(themeStore.uiFont(.caption))
                         .textFieldStyle(.plain)
                         .lineLimit(2...4)
@@ -1116,7 +1126,7 @@ private struct GitPatchHunkRow: View {
                         reviewCommentDraft = ""
                         isAddingReviewComment = false
                     } label: {
-                        Label("保存备注", systemImage: "checkmark.circle")
+                        Label(L10n.text("ui.save_notes"), systemImage: "checkmark.circle")
                             .labelStyle(.iconOnly)
                             .frame(width: 30, height: 30)
                     }

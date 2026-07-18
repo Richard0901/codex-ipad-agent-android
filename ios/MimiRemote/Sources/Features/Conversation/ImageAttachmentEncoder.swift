@@ -19,15 +19,15 @@ enum ImageAttachmentEncodingError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptyData:
-            return "图片内容为空"
+            return L10n.text("ui.image_content_is_empty")
         case .inputTooLarge:
-            return "原始图片超过 50 MB，请先裁剪后再试"
+            return L10n.text("ui.the_original_image_exceeds_50_mb_please_crop")
         case .unsupportedImage:
-            return "图片格式无法读取"
+            return L10n.text("ui.image_format_cannot_be_read")
         case .jpegEncodingFailed:
-            return "图片压缩失败"
+            return L10n.text("ui.image_compression_failed")
         case .outputTooLarge:
-            return "图片压缩后仍超过 2 MB，请先裁剪后再试"
+            return L10n.text("ui.the_image_still_exceeds_2_mb_after_compression")
         }
     }
 }

@@ -29,9 +29,9 @@ enum GPT56ModelGridCatalog {
 
     static func effortTitle(_ effort: CodexAppServerReasoningEffort) -> String {
         switch effort {
-        case .medium: return "中"
-        case .high: return "高"
-        case .xhigh: return "最高"
+        case .medium: return L10n.text("ui.in")
+        case .high: return L10n.text("ui.high")
+        case .xhigh: return L10n.text("ui.highest")
         default: return effort.rawValue
         }
     }
@@ -96,7 +96,7 @@ struct ModelReasoningGridPicker: View {
                 Button {
                     onSelectModelOnly(nil)
                 } label: {
-                    Label("默认模型", systemImage: "arrow.uturn.backward")
+                    Label(L10n.text("ui.default_model"), systemImage: "arrow.uturn.backward")
                 }
                 ForEach(visibleAllModels) { option in
                     Button {
@@ -107,12 +107,12 @@ struct ModelReasoningGridPicker: View {
                 }
                 Divider()
                 Button(action: onRefresh) {
-                    Label(isRefreshing ? "刷新中" : "刷新模型列表", systemImage: "arrow.clockwise")
+                    Label(isRefreshing ? L10n.text("ui.refreshing") : L10n.text("ui.refresh_model_list"), systemImage: "arrow.clockwise")
                 }
                 .disabled(isRefreshing)
             } label: {
                 HStack(spacing: 4) {
-                    Text("全部模型")
+                    Text(L10n.text("ui.all_models"))
                     Image(systemName: "chevron.up.chevron.down")
                         .font(themeStore.uiFont(size: 9, weight: .bold))
                 }
@@ -130,14 +130,14 @@ struct ModelReasoningGridPicker: View {
             }
             .menuStyle(.button)
             .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-            .accessibilityLabel("全部模型")
+            .accessibilityLabel(L10n.text("ui.all_models"))
 
             Spacer(minLength: 12)
 
             Toggle(isOn: fastModeBinding) {
                 HStack(spacing: 5) {
                     Image(systemName: isFastMode ? "bolt.fill" : "bolt")
-                    Text("快速")
+                    Text(L10n.text("ui.fast"))
                 }
                 .font(themeStore.uiFont(.caption, weight: .semibold))
                 .foregroundStyle(isFastMode ? Color.white : tokens.accent)
@@ -159,9 +159,9 @@ struct ModelReasoningGridPicker: View {
             }
             .toggleStyle(.button)
             .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-            .accessibilityLabel("快速模式")
-            .accessibilityValue(isFastMode ? "已开启" : "已关闭")
-            .accessibilityHint("开启后下一轮使用优先服务速度")
+            .accessibilityLabel(L10n.text("ui.quick_mode"))
+            .accessibilityValue(isFastMode ? L10n.text("ui.already_turned_on") : L10n.text("ui.closed"))
+            .accessibilityHint(L10n.text("ui.after_turning_it_on_the_priority_service_speed"))
         }
         .frame(height: 44)
     }
@@ -279,9 +279,9 @@ struct ModelReasoningGridPicker: View {
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .disabled(!supported)
-        .accessibilityLabel("\(GPT56ModelGridCatalog.shortTitle(for: option.model))，推理强度\(GPT56ModelGridCatalog.effortTitle(effort))")
-        .accessibilityValue(selected ? "已选择" : "未选择")
-        .accessibilityHint("双击选择；也可在九宫格中拖动")
+        .accessibilityLabel(L10n.format("ui.value_reasoning_strength_value", GPT56ModelGridCatalog.shortTitle(for: option.model), GPT56ModelGridCatalog.effortTitle(effort)))
+        .accessibilityValue(selected ? L10n.text("ui.selected") : L10n.text("ui.not_selected"))
+        .accessibilityHint(L10n.text("ui.double_click_to_select_you_can_also_drag"))
     }
 
     private func gridLines(size: CGSize, tokens: ThemeTokens) -> some View {

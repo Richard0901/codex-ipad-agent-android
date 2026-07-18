@@ -40,27 +40,27 @@ struct VoiceMicButton: View {
         .disabled(isPreparing || isTranscribing)
         .accessibilityLabel(accessibilityTitle)
         .accessibilityValue(accessibilityValue)
-        .accessibilityHint(isRecording ? "点按停止录音并开始转写" : "点按开始录音")
+        .accessibilityHint(isRecording ? L10n.text("ui.tap_to_stop_recording_and_start_transcribing") : L10n.text("ui.click_to_start_recording"))
     }
 
     private var accessibilityTitle: String {
         if isRecording {
-            return "停止录音"
+            return L10n.text("ui.stop_recording")
         }
         if isPreparing {
-            return "正在准备麦克风"
+            return L10n.text("ui.preparing_microphone")
         }
-        return isTranscribing ? "正在转写语音" : "开始语音输入"
+        return isTranscribing ? L10n.text("ui.transcribing_speech") : L10n.text("ui.start_voice_input")
     }
 
     private var accessibilityValue: String {
         if isRecording {
-            return "正在录音"
+            return L10n.text("ui.recording")
         }
         if isPreparing {
-            return "正在准备"
+            return L10n.text("ui.preparing")
         }
-        return isTranscribing ? "正在转写" : "未开始"
+        return isTranscribing ? L10n.text("ui.transcribing") : L10n.text("ui.not_started")
     }
 }
 
@@ -283,20 +283,20 @@ struct ManualSkillInputSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Skill 名称", text: $name)
+                TextField(L10n.text("ui.skill_name"), text: $name)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                TextField("allowlist 内的路径", text: $path)
+                TextField(L10n.text("ui.path_within_allowlist"), text: $path)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             }
-            .navigationTitle("手动添加 Skill")
+            .navigationTitle(L10n.text("ui.add_skills_manually"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("添加") {
+                    Button(L10n.text("ui.add")) {
                         if let input {
                             onAdd(input)
                             dismiss()
@@ -337,19 +337,19 @@ struct AdvancedTurnOptionsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("模型") {
-                    TextField("Runtime Provider", text: optionalStringBinding(\.runtimeProvider))
-                    TextField("Model", text: optionalStringBinding(\.model))
-                    TextField("Model Provider", text: optionalStringBinding(\.modelProvider))
-                    TextField("Service Name", text: optionalStringBinding(\.serviceName))
+                Section(L10n.text("ui.model")) {
+                    TextField(L10n.text("ui.runtime_provider"), text: optionalStringBinding(\.runtimeProvider))
+                    TextField(L10n.text("ui.model"), text: optionalStringBinding(\.model))
+                    TextField(L10n.text("ui.model_provider"), text: optionalStringBinding(\.modelProvider))
+                    TextField(L10n.text("ui.service_name"), text: optionalStringBinding(\.serviceName))
                 }
 
-                Section("线程来源") {
-                    TextField("Session Start Source", text: optionalStringBinding(\.sessionStartSource))
-                    TextField("Thread Source", text: optionalStringBinding(\.threadSource))
+                Section(L10n.text("ui.thread_source")) {
+                    TextField(L10n.text("ui.session_start_source"), text: optionalStringBinding(\.sessionStartSource))
+                    TextField(L10n.text("ui.thread_source"), text: optionalStringBinding(\.threadSource))
                 }
 
-                Section("指令") {
+                Section(L10n.text("ui.instructions")) {
                     TextEditor(text: optionalStringBinding(\.baseInstructions))
                         .frame(minHeight: 90)
                     TextEditor(text: optionalStringBinding(\.developerInstructions))
@@ -372,16 +372,16 @@ struct AdvancedTurnOptionsSheet: View {
                     }
                 }
             }
-            .navigationTitle("高级选项")
+            .navigationTitle(L10n.text("ui.advanced_options"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .destructiveAction) {
-                    Button("清空") { clearAdvancedOptions() }
+                    Button(L10n.text("ui.clear")) { clearAdvancedOptions() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("应用") { apply() }
+                    Button(L10n.text("ui.application")) { apply() }
                 }
             }
         }
@@ -430,7 +430,7 @@ struct AdvancedTurnOptionsSheet: View {
         }
         let value = try JSONDecoder().decode(CodexAppServerJSONValue.self, from: Data(trimmed.utf8))
         if requireObject, value.objectValue == nil {
-            throw AdvancedTurnOptionsError.invalidJSON(label + " 必须是 JSON object")
+            throw AdvancedTurnOptionsError.invalidJSON(label + L10n.text("ui.must_be_a_json_object"))
         }
         return value
     }
@@ -500,15 +500,15 @@ final class VoiceInputController: NSObject, ObservableObject {
                     return
                 }
                 if granted {
-                    noticeMessage = "麦克风已开启，请再按住说话"
+                    noticeMessage = L10n.text("ui.the_microphone_is_on_please_press_and_hold")
                 } else {
-                    errorMessage = "麦克风权限未开启，请在系统设置中允许"
+                    errorMessage = L10n.text("ui.microphone_permission_is_not_enabled_please_allow_it")
                 }
                 finish(fileURL: nil)
             }
             return
         case .denied:
-            errorMessage = "麦克风权限未开启，请在系统设置中允许"
+            errorMessage = L10n.text("ui.microphone_permission_is_not_enabled_please_allow_it")
             finish(fileURL: nil)
             return
         case .granted:
@@ -524,7 +524,7 @@ final class VoiceInputController: NSObject, ObservableObject {
                 guard startRequestID == requestID else {
                     return
                 }
-                errorMessage = "麦克风权限未开启"
+                errorMessage = L10n.text("ui.microphone_permission_is_not_enabled")
                 finish(fileURL: nil)
                 return
             }
@@ -756,7 +756,7 @@ enum VoiceInputError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .recordingFailed:
-            return "录音启动失败"
+            return L10n.text("ui.recording_startup_failed")
         }
     }
 }

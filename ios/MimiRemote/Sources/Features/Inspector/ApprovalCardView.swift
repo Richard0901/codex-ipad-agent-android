@@ -19,7 +19,7 @@ struct ApprovalCardView: View {
                 }
 
                 if sessionStore.selectedSession?.pendingApproval == nil && approvalMessages.isEmpty {
-                    ContentUnavailableView("暂无审批", systemImage: "checkmark.seal")
+                    ContentUnavailableView(L10n.text("ui.no_approval_yet"), systemImage: "checkmark.seal")
                         .font(themeStore.uiFont(.caption))
                         .padding(.top, 48)
                 }
@@ -31,12 +31,12 @@ struct ApprovalCardView: View {
 
     private func title(for message: ConversationMessage) -> String {
         if isApproved(message) {
-            return "审批已批准"
+            return L10n.text("ui.approval_approved")
         }
         if isDeclined(message) {
-            return "审批已拒绝"
+            return L10n.text("ui.approval_rejected")
         }
-        return "审批记录"
+        return L10n.text("ui.approval_records")
     }
 
     private func symbolName(for message: ConversationMessage) -> String {
@@ -60,11 +60,11 @@ struct ApprovalCardView: View {
     }
 
     private func isApproved(_ message: ConversationMessage) -> Bool {
-        message.content.hasPrefix("审批已批准") || message.content.hasPrefix("已批准")
+        message.content.hasPrefix(L10n.text("ui.approval_approved")) || message.content.hasPrefix(L10n.text("ui.approved"))
     }
 
     private func isDeclined(_ message: ConversationMessage) -> Bool {
-        message.content.hasPrefix("审批已拒绝") || message.content.hasPrefix("已拒绝")
+        message.content.hasPrefix(L10n.text("ui.approval_rejected")) || message.content.hasPrefix(L10n.text("ui.rejected"))
     }
 
     private var approvalMessages: [ConversationMessage] {

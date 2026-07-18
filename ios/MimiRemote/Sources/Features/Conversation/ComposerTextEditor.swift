@@ -110,7 +110,7 @@ struct ComposerTextView: UIViewRepresentable {
         textView.smartInsertDeleteType = .no
         textView.autocorrectionType = .no
         textView.spellCheckingType = .no
-        textView.accessibilityLabel = "输入任务或后续指令"
+        textView.accessibilityLabel = L10n.text("ui.enter_tasks_or_follow_up_instructions")
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return textView
     }
@@ -358,11 +358,11 @@ final class CommandSubmitTextView: UITextView {
 
     override var keyCommands: [UIKeyCommand]? {
         let submit = UIKeyCommand(
-            title: "发送",
+            title: L10n.text("ui.send"),
             action: #selector(handleCommandReturn),
             input: "\r",
             modifierFlags: .command,
-            discoverabilityTitle: "发送"
+            discoverabilityTitle: L10n.text("ui.send")
         )
         return (super.keyCommands ?? []) + [
             submit,

@@ -154,7 +154,7 @@ struct ConversationView: View {
     }
 
     private func errorChip(_ message: String) -> some View {
-        Label("错误：\(message)", systemImage: "exclamationmark.triangle")
+        Label(L10n.format("ui.error_value", message), systemImage: "exclamationmark.triangle")
             .foregroundStyle(.red)
             .font(themeStore.uiFont(.caption, weight: .medium))
             .lineLimit(2)
@@ -192,9 +192,9 @@ struct ConversationView: View {
 
     private func statusText(_ status: AgentSessionDisplayStatus, runtimeDisplay: RuntimeActivityDisplay?) -> String {
         if let runtimeDisplay {
-            return "当前：\(status.title) · \(runtimeDisplay.detailText)"
+            return L10n.format("ui.current_value_value", status.title, runtimeDisplay.detailText)
         }
-        return "当前：\(status.title)"
+        return L10n.format("ui.current_value", status.title)
     }
 
     private func historySavingsBanner(_ notice: HistorySavingsNotice) -> some View {
@@ -287,7 +287,7 @@ struct ConversationView: View {
                     await sessionStore.refreshSelectedUsage()
                 }
             } label: {
-                Label("刷新状态", systemImage: "arrow.clockwise")
+                Label(L10n.text("ui.refresh_status"), systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
@@ -297,7 +297,7 @@ struct ConversationView: View {
                 Button {
                     sessionStore.dismissErrorMessage()
                 } label: {
-                    Label("关闭", systemImage: "xmark.circle")
+                    Label(L10n.text("ui.close"), systemImage: "xmark.circle")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -315,7 +315,7 @@ struct ConversationView: View {
                         await sessionStore.loadSummaryHistoryForSelectedSession()
                     }
                 } label: {
-                    Label("只看缩略版", systemImage: "text.justify")
+                    Label(L10n.text("ui.view_abbreviated_version_only"), systemImage: "text.justify")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -327,7 +327,7 @@ struct ConversationView: View {
                         await sessionStore.loadFullHistoryForSelectedSession()
                     }
                 } label: {
-                    Label("重试完整历史", systemImage: "arrow.clockwise")
+                    Label(L10n.text("ui.retry_full_history"), systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -338,7 +338,7 @@ struct ConversationView: View {
                         await sessionStore.loadSummaryHistoryForSelectedSession()
                     }
                 } label: {
-                    Label("只看缩略版", systemImage: "text.justify")
+                    Label(L10n.text("ui.view_abbreviated_version_only"), systemImage: "text.justify")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -346,7 +346,7 @@ struct ConversationView: View {
 
             case .loadingSummary:
                 Button {} label: {
-                    Label("正在加载", systemImage: "hourglass")
+                    Label(L10n.text("ui.loading_3667cb10"), systemImage: "hourglass")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -358,7 +358,7 @@ struct ConversationView: View {
                         await sessionStore.loadFullHistoryForSelectedSession()
                     }
                 } label: {
-                    Label("加载完整历史", systemImage: "arrow.down.circle")
+                    Label(L10n.text("ui.load_full_history"), systemImage: "arrow.down.circle")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -367,7 +367,7 @@ struct ConversationView: View {
                 Button {
                     sessionStore.dismissSelectedHistorySavingsNotice()
                 } label: {
-                    Label("关闭", systemImage: "xmark.circle")
+                    Label(L10n.text("ui.close"), systemImage: "xmark.circle")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -378,7 +378,7 @@ struct ConversationView: View {
                         await sessionStore.loadSummaryHistoryForSelectedSession()
                     }
                 } label: {
-                    Label("重试缩略版", systemImage: "arrow.clockwise")
+                    Label(L10n.text("ui.try_again_abbreviated_version"), systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -387,7 +387,7 @@ struct ConversationView: View {
                 Button {
                     sessionStore.dismissSelectedHistorySavingsNotice()
                 } label: {
-                    Label("关闭", systemImage: "xmark.circle")
+                    Label(L10n.text("ui.close"), systemImage: "xmark.circle")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

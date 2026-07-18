@@ -23,12 +23,23 @@ else
 fi
 
 echo "==> Go gateway conversation regressions"
-go test ./internal/httpapi
+if command -v go >/dev/null 2>&1; then
+  go_bin="$(command -v go)"
+elif [[ -x /usr/local/go/bin/go ]]; then
+  # 从 Xcode/Codex 启动的非交互 shell 可能没有加载 /usr/local/go/bin。
+  go_bin="/usr/local/go/bin/go"
+else
+  echo "未找到 Go，请安装 Go 或将 go 加入 PATH" >&2
+  exit 1
+fi
+"$go_bin" test ./internal/httpapi
 
 echo "==> iOS conversation regressions"
 # 这些测试组覆盖 Mimi Remote 对话请求链路和发布安全边界：
 # - CodexAppServerProtocolTests：JSON-RPC payload、collaborationMode、目标/steer 协议。
 # - ConversationDataFlowTests：Composer、SessionStore、direct app-server、断线/重试/滚动状态。
+# - ConversationProcessGrouperTests：过程组边界、commentary 前后保留和 source order。
+# - ConversationSnapshotTests：过程组折叠与 commentary 邻接的关键视觉回归。
 # - MarkdownRenderingTests：proposed_plan 流式和完整渲染。
 # - PairingLinkTests：Endpoint allowlist、ATS 对应的 HTTP/HTTPS 传输策略。
 # - DoctorDiagnosticsTests：结构化 Doctor 响应、HTTP 错误和向后兼容。
@@ -36,8 +47,13 @@ xcodebuild test -quiet \
   -project ios/MimiRemote/MimiRemote.xcodeproj \
   -scheme MimiRemote \
   -destination "$resolved_destination" \
+  -testLanguage zh-Hans \
+  -testRegion CN \
   -only-testing:MimiRemoteTests/CodexAppServerProtocolTests \
   -only-testing:MimiRemoteTests/ConversationDataFlowTests \
+  -only-testing:MimiRemoteTests/ConversationProcessGrouperTests \
+  -only-testing:MimiRemoteTests/ConversationSnapshotTests/testCommentaryAndTrailingProcessRendering \
+  -only-testing:MimiRemoteTests/ConversationSnapshotTests/testExpandedProcessGroupRendering \
   -only-testing:MimiRemoteTests/MarkdownRenderingTests \
   -only-testing:MimiRemoteTests/PairingLinkTests \
   -only-testing:MimiRemoteTests/DoctorDiagnosticsTests

@@ -432,7 +432,7 @@ struct ConversationTimelineView: View {
                         .controlSize(.small)
                         .tint(workbenchSecondaryText)
                 } else {
-                    Label("加载更早消息", systemImage: "clock.arrow.circlepath")
+                    Label(L10n.text("ui.load_older_messages"), systemImage: "clock.arrow.circlepath")
                 }
             }
             .font(themeStore.uiFont(.caption, weight: .medium))
@@ -465,7 +465,7 @@ struct ConversationTimelineView: View {
     }
 
     private var returnToTailAccessibilityLabel: String {
-        hasUnseenTailMessage ? "回到底部查看新消息" : "回到最新消息"
+        hasUnseenTailMessage ? L10n.text("ui.return_to_the_bottom_to_view_new_messages") : L10n.text("ui.back_to_latest_news")
     }
 
     private var emptyState: some View {
@@ -479,10 +479,10 @@ struct ConversationTimelineView: View {
                 .background(tokens.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
             VStack(spacing: 6) {
-                Text("开始这次会话")
+                Text(L10n.text("ui.start_this_conversation"))
                     .font(themeStore.uiFont(.headline, weight: .semibold))
                     .foregroundStyle(workbenchPrimaryText)
-                Text("在下方输入任务，Mimi Remote 会保留当前工作区与会话上下文。")
+                Text(L10n.text("ui.enter_your_tasks_below_and_mimi_remote_retains"))
                     .font(themeStore.uiFont(.callout))
                     .foregroundStyle(workbenchSecondaryText)
                     .multilineTextAlignment(.center)
@@ -504,15 +504,15 @@ struct ConversationTimelineView: View {
     @ViewBuilder
     private func timelineEmptyState(isHistoryLoading: Bool) -> some View {
         if isHistoryLoading {
-            ProgressView("正在加载会话记录")
-                .accessibilityLabel("正在加载会话记录")
+            ProgressView(L10n.text("ui.loading_session_records"))
+                .accessibilityLabel(L10n.text("ui.loading_session_records"))
         } else if let error = sessionStore.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
             ContentUnavailableView {
-                Label("会话记录加载失败", systemImage: "exclamationmark.triangle")
+                Label(L10n.text("ui.session_record_loading_failed"), systemImage: "exclamationmark.triangle")
             } description: {
                 Text(error)
             } actions: {
-                Button("重试") {
+                Button(L10n.text("ui.try_again")) {
                     Task { await sessionStore.refreshCurrentContext() }
                 }
                 .buttonStyle(.bordered)

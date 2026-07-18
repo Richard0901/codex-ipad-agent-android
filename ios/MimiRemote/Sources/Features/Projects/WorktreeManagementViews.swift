@@ -52,9 +52,9 @@ struct WorktreeManagerSheet: View {
                         Task { await loadCleanupPreview() }
                     } label: {
                         if isLoadingCleanupPreview {
-                            Label("正在评估清理候选", systemImage: "hourglass")
+                            Label(L10n.text("ui.evaluating_cleanup_candidates"), systemImage: "hourglass")
                         } else {
-                            Label("清理候选", systemImage: "sparkles")
+                            Label(L10n.text("ui.cleanup_candidates"), systemImage: "sparkles")
                         }
                     }
                     .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isDeletingWorktree || sessionStore.isPruningWorktrees || isLoadingCleanupPreview)
@@ -63,9 +63,9 @@ struct WorktreeManagerSheet: View {
                         Task { await sessionStore.pruneMissingManagedWorktrees() }
                     } label: {
                         if sessionStore.isPruningWorktrees {
-                            Label("正在清理", systemImage: "hourglass")
+                            Label(L10n.text("ui.cleaning_up"), systemImage: "hourglass")
                         } else {
-                            Label("清理丢失登记", systemImage: "checklist.unchecked")
+                            Label(L10n.text("ui.clear_lost_registration"), systemImage: "checklist.unchecked")
                         }
                     }
                     .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isDeletingWorktree || sessionStore.isPruningWorktrees)
@@ -76,26 +76,26 @@ struct WorktreeManagerSheet: View {
                             .foregroundStyle(.red)
                     }
                 } footer: {
-                    Text("“清理候选”会先按服务端固定保留策略预览，只有无 blocker 的候选可确认删除；“清理丢失登记”只移除不存在的 registry 记录。")
+                    Text(L10n.text("ui.clean_candidates_will_first_be_previewed_according_to"))
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Git Worktree")
+            .navigationTitle(L10n.text("ui.git_worktree"))
             .navigationBarTitleDisplayMode(.inline)
             .scrollContentBackground(.hidden)
             .background(tokens.background)
             .overlay {
                 if worktrees.isEmpty && !sessionStore.isRefreshingWorktrees {
                     ContentUnavailableView(
-                        "没有 Git Worktree",
+                        L10n.text("ui.no_git_worktree"),
                         systemImage: "square.stack.3d.up",
-                        description: Text("当前项目没有已管理的 Git Worktree。")
+                        description: Text(L10n.text("ui.there_are_no_managed_git_worktrees_for_the"))
                     )
                 }
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") {
+                    Button(L10n.text("ui.close")) {
                         dismiss()
                     }
                 }
@@ -110,7 +110,7 @@ struct WorktreeManagerSheet: View {
                         }
                     }
                     .disabled(sessionStore.isRefreshingWorktrees || sessionStore.isPruningWorktrees)
-                    .accessibilityLabel("刷新 Git Worktree")
+                    .accessibilityLabel(L10n.text("ui.refresh_git_worktree"))
                 }
             }
         }
@@ -123,7 +123,7 @@ struct WorktreeManagerSheet: View {
                 rootProjectID: rootProjectID
             )
         }
-        .confirmationDialog("删除 Git Worktree？", isPresented: Binding(
+        .confirmationDialog(L10n.text("ui.delete_git_worktree"), isPresented: Binding(
             get: { pendingDelete != nil },
             set: { isPresented in
                 if !isPresented {
@@ -132,17 +132,17 @@ struct WorktreeManagerSheet: View {
             }
         ), titleVisibility: .visible) {
             if let item = pendingDelete {
-                Button("删除 \(item.workspace.name)", role: .destructive) {
+                Button(L10n.format("ui.delete_value", item.workspace.name), role: .destructive) {
                     let target = item
                     pendingDelete = nil
                     Task { await sessionStore.deleteManagedWorktree(target, force: false) }
                 }
             }
-            Button("取消", role: .cancel) {
+            Button(L10n.text("ui.cancel"), role: .cancel) {
                 pendingDelete = nil
             }
         } message: {
-            Text("删除仍会由 agentd 检查运行中会话和 Git 状态；存在未提交改动时不会强制绕过保护。")
+            Text(L10n.text("ui.deletions_will_still_be_checked_by_agentd_against"))
         }
     }
 
@@ -164,7 +164,7 @@ struct WorktreeManagerSheet: View {
 
     private func userFacingCleanupError(_ error: Error) -> String {
         if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
-            return "当前 agentd 版本还不支持清理预览，请先升级 Mac 端 agentd。"
+            return L10n.text("ui.the_current_agentd_version_does_not_support_clean")
         }
         return error.localizedDescription
     }
@@ -225,19 +225,19 @@ struct WorktreeCleanupPreviewSheet: View {
 
         NavigationStack {
             List {
-                Section("保留策略") {
-                    LabeledContent("自动删除", value: preview.policy.autoDelete ? "开启" : "关闭")
-                    LabeledContent("候选时间", value: "超过 \(preview.policy.candidateAfterDays) 天未使用")
-                    LabeledContent("每个项目至少保留", value: "最近 \(preview.policy.keepLatestPerProject) 个")
-                    LabeledContent("评估时间", value: preview.generatedAt.formatted(date: .abbreviated, time: .shortened))
+                Section(L10n.text("ui.retention_policy")) {
+                    LabeledContent(L10n.text("ui.automatically_delete"), value: preview.policy.autoDelete ? L10n.text("ui.turn_on") : L10n.text("ui.close"))
+                    LabeledContent(L10n.text("ui.candidate_time"), value: L10n.plural("ui.days_unused_count", count: preview.policy.candidateAfterDays))
+                    LabeledContent(L10n.text("ui.each_project_retains_at_least"), value: L10n.format("ui.recent_value", preview.policy.keepLatestPerProject))
+                    LabeledContent(L10n.text("ui.assessment_time"), value: preview.generatedAt.formatted(date: .abbreviated, time: .shortened))
                 }
 
                 Section {
                     if projectItems.isEmpty {
                         ContentUnavailableView(
-                            "没有可评估的 Worktree",
+                            L10n.text("ui.no_evaluable_worktree"),
                             systemImage: "checkmark.shield",
-                            description: Text("当前项目没有进入清理策略评估的已管理 Worktree。")
+                            description: Text(L10n.text("ui.the_current_project_has_no_managed_worktrees_that"))
                         )
                     } else {
                         ForEach(projectItems) { item in
@@ -252,13 +252,13 @@ struct WorktreeCleanupPreviewSheet: View {
                         }
                     }
                 } header: {
-                    Text("候选与保护原因")
+                    Text(L10n.text("ui.candidates_and_conservation_reasons"))
                 } footer: {
-                    Text("只有服务端 dry-run 同时标记为 eligible 的路径可以选择；有 blocker 的 Worktree 不会被提交到删除接口。")
+                    Text(L10n.text("ui.only_paths_that_are_dry_run_on_the"))
                 }
 
                 if let executionError {
-                    Section("清理结果") {
+                    Section(L10n.text("ui.clean_results")) {
                         Label(executionError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                     }
@@ -269,39 +269,39 @@ struct WorktreeCleanupPreviewSheet: View {
                         isShowingDestructiveConfirmation = true
                     } label: {
                         if isExecuting {
-                            Label("正在重新检查并清理", systemImage: "hourglass")
+                            Label(L10n.text("ui.rechecking_and_cleaning"), systemImage: "hourglass")
                         } else {
-                            Label("删除选中的 \(selectedPaths.count) 个 Worktree", systemImage: "trash")
+                            Label(L10n.plural("ui.worktrees_to_delete_count", count: selectedPaths.count), systemImage: "trash")
                         }
                     }
                     .disabled(selectedPaths.isEmpty || isExecuting)
                 } footer: {
-                    Text("执行时 agentd 会重新计算 blocker；策略变化、运行中会话、未提交改动或未知 Git 状态都会阻止删除。")
+                    Text(L10n.text("ui.agentd_will_recalculate_the_blocker_when_executed_policy"))
                 }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(tokens.background)
-            .navigationTitle("清理 Worktree")
+            .navigationTitle(L10n.text("ui.clean_up_worktree"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                    Button(L10n.text("ui.close")) { dismiss() }
                         .disabled(isExecuting)
                 }
             }
         }
         .confirmationDialog(
-            "确认删除 \(selectedPaths.count) 个 Worktree？",
+            L10n.plural("ui.confirm_delete_worktrees_count", count: selectedPaths.count),
             isPresented: $isShowingDestructiveConfirmation,
             titleVisibility: .visible
         ) {
-            Button("确认删除", role: .destructive) {
+            Button(L10n.text("ui.confirm_deletion"), role: .destructive) {
                 Task { await executeCleanup() }
             }
-            Button("取消", role: .cancel) {}
+            Button(L10n.text("ui.cancel"), role: .cancel) {}
         } message: {
-            Text("这会删除对应 Git checkout。客户端不会发送 force；agentd 仍会对当前候选和所有 blocker 做最终检查。")
+            Text(L10n.text("ui.this_will_delete_the_corresponding_git_checkout_the"))
         }
     }
 
@@ -342,7 +342,7 @@ struct WorktreeCleanupPreviewSheet: View {
             guard !response.deletedPaths.isEmpty else {
                 preview = response
                 selectedPaths = []
-                executionError = "agentd 重新检查后没有删除任何 Worktree，请关闭后重新生成预览。"
+                executionError = L10n.text("ui.agentd_did_not_delete_any_worktree_after_rechecking")
                 return
             }
             dismiss()
@@ -386,7 +386,7 @@ struct WorktreeCleanupPreviewRow: View {
                         .truncationMode(.middle)
                     cleanupDates
                     if isSelectable {
-                        Label("符合清理策略", systemImage: "checkmark.shield")
+                        Label(L10n.text("ui.comply_with_cleanup_strategy"), systemImage: "checkmark.shield")
                             .font(themeStore.uiFont(size: 12, weight: .medium))
                             .foregroundStyle(tokens.success)
                     } else {
@@ -405,10 +405,10 @@ struct WorktreeCleanupPreviewRow: View {
     private var cleanupDates: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let createdAt = item.createdAt {
-                Text("创建：\(createdAt.formatted(date: .abbreviated, time: .omitted))")
+                Text(L10n.format("ui.create_value", createdAt.formatted(date: .abbreviated, time: .omitted)))
             }
             if let lastUsedAt = item.lastUsedAt {
-                Text("最近使用：\(lastUsedAt.formatted(date: .abbreviated, time: .shortened))")
+                Text(L10n.format("ui.recently_used_value", lastUsedAt.formatted(date: .abbreviated, time: .shortened)))
             }
         }
         .font(themeStore.uiFont(size: 11))
@@ -418,7 +418,7 @@ struct WorktreeCleanupPreviewRow: View {
     @ViewBuilder
     private var blockers: some View {
         if item.blockers.isEmpty {
-            Label("服务端未判定为可清理", systemImage: "shield")
+            Label(L10n.text("ui.the_server_is_not_determined_to_be_cleanable"), systemImage: "shield")
                 .font(themeStore.uiFont(size: 12, weight: .medium))
                 .foregroundStyle(.orange)
         } else {
@@ -439,10 +439,10 @@ struct WorktreeCleanupPreviewRow: View {
 
     private var accessibilityLabel: String {
         if isSelectable {
-            return "\(item.workspace.name)，可清理，\(isSelected ? "已选择" : "未选择")"
+            return L10n.format("ui.value_cleanable_value", item.workspace.name, isSelected ? L10n.text("ui.selected") : L10n.text("ui.not_selected"))
         }
-        let reasons = item.blockers.map(\.message).joined(separator: "，")
-        return "\(item.workspace.name)，不可清理，\(reasons)"
+        let reasons = item.blockers.map(\.message).joined(separator: L10n.text("ui.list_separator"))
+        return L10n.format("ui.value_cannot_be_cleaned_value", item.workspace.name, reasons)
     }
 }
 
@@ -479,16 +479,16 @@ struct CreateWorktreeSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    LabeledContent("项目") {
+                    LabeledContent(L10n.text("ui.project")) {
                         Text(project.name)
                             .foregroundStyle(tokens.secondaryText)
                             .lineLimit(1)
                     }
-                    TextField("名称", text: $name)
+                    TextField(L10n.text("ui.name"), text: $name)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                     HStack(spacing: 8) {
-                        TextField("Base", text: $base)
+                        TextField(L10n.text("ui.base_branch"), text: $base)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                         if sessionStore.isRefreshingWorktreeBranches && baseBranchItems.isEmpty {
@@ -509,10 +509,10 @@ struct CreateWorktreeSheet: View {
                                     .foregroundStyle(tokens.secondaryText)
                                     .frame(width: 28, height: 28)
                             }
-                            .accessibilityLabel("选择 Base")
+                            .accessibilityLabel(L10n.text("ui.select_base"))
                         }
                     }
-                    TextField("分支", text: $branch)
+                    TextField(L10n.text("ui.branch"), text: $branch)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
@@ -535,11 +535,11 @@ struct CreateWorktreeSheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(tokens.background)
-            .navigationTitle("新建 Git Worktree")
+            .navigationTitle(L10n.text("ui.create_a_new_git_worktree"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") {
+                    Button(L10n.text("ui.cancel")) {
                         dismiss()
                     }
                 }
@@ -560,7 +560,7 @@ struct CreateWorktreeSheet: View {
                         if sessionStore.isCreatingWorktree {
                             ProgressView()
                         } else {
-                            Text("创建")
+                            Text(L10n.text("ui.create"))
                         }
                     }
                     .disabled(!canCreate)
@@ -595,10 +595,10 @@ struct CreateWorktreeSheet: View {
 
     private func branchMenuTitle(_ item: WorktreeBranchItem) -> String {
         if item.isCurrent {
-            return "\(item.name) · 当前"
+            return L10n.format("ui.value_current", item.name)
         }
         if item.isDefault {
-            return "\(item.name) · 默认"
+            return L10n.format("ui.value_default", item.name)
         }
         return item.name
     }
@@ -637,7 +637,7 @@ struct WorktreeManagerRow: View {
                 }
                 Spacer(minLength: 8)
                 if isRunning {
-                    Text("运行中")
+                    Text(L10n.text("ui.running"))
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
                         .foregroundStyle(tokens.primaryAction)
                 }
@@ -655,18 +655,18 @@ struct WorktreeManagerRow: View {
                         .font(themeStore.uiFont(size: 11, weight: .medium))
                         .foregroundStyle(tokens.secondaryText)
                         .lineLimit(1)
-                    Label("base \(item.worktree.base)", systemImage: "arrow.triangle.branch")
+                    Label(L10n.format("ui.base_named", item.worktree.base), systemImage: "arrow.triangle.branch")
                         .font(themeStore.uiFont(size: 11, weight: .regular))
                         .foregroundStyle(tokens.tertiaryText)
                         .lineLimit(1)
                 }
                 Spacer()
                 Button(action: onOpen) {
-                    Label("打开", systemImage: "arrow.up.forward.square")
+                    Label(L10n.text("ui.open"), systemImage: "arrow.up.forward.square")
                 }
                 .buttonStyle(.borderless)
                 Button(role: .destructive, action: onDelete) {
-                    Label("删除", systemImage: "trash")
+                    Label(L10n.text("ui.delete"), systemImage: "trash")
                 }
                 .buttonStyle(.borderless)
                 .disabled(isRunning || isBusy)
@@ -691,15 +691,15 @@ struct WorktreeManagerRow: View {
     private var worktreeStatusItems: [String] {
         var items: [String] = []
         if item.worktree.gitState == "unknown" {
-            items.append("Git 状态未知")
+            items.append(L10n.text("ui.git_status_unknown"))
         } else if item.worktree.dirty || item.worktree.gitState == "dirty" {
-            items.append("未提交")
+            items.append(L10n.text("ui.not_submitted"))
         }
         if item.worktree.ahead > 0 {
-            items.append("领先 \(item.worktree.ahead)")
+            items.append(L10n.format("ui.leading_value", item.worktree.ahead))
         }
         if item.worktree.behind > 0 {
-            items.append("落后 \(item.worktree.behind)")
+            items.append(L10n.format("ui.behind_value", item.worktree.behind))
         }
         if let upstream = item.worktree.upstream?.trimmingCharacters(in: .whitespacesAndNewlines), !upstream.isEmpty {
             items.append(upstream)

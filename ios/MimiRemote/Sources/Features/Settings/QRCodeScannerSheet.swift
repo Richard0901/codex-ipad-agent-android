@@ -17,11 +17,11 @@ enum QRCodeScannerFailure: Equatable {
     var message: String {
         switch self {
         case .permissionDenied:
-            return "Mimi 没有相机权限，无法扫描 Mac 上的配对二维码。"
+            return L10n.text("ui.mimi_doesn_t_have_camera_permissions_and_can")
         case .permissionRestricted:
-            return "当前设备限制了相机访问，无法扫描 Mac 上的配对二维码。"
+            return L10n.text("ui.the_current_device_restricts_camera_access_and_cannot")
         case .cameraUnavailable:
-            return "当前设备没有可用于扫描二维码的相机。"
+            return L10n.text("ui.the_current_device_does_not_have_a_camera")
         case .configurationFailed(let reason):
             return reason
         case .rejectedCode(let reason):
@@ -68,11 +68,11 @@ struct QRCodeScannerSheet: View {
                 }
             }
             .ignoresSafeArea(edges: .bottom)
-            .navigationTitle("扫描配对二维码")
+            .navigationTitle(L10n.text("ui.scan_the_pairing_qr_code"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("关闭") {
+                    Button(L10n.text("ui.close")) {
                         // 明确只改父页面持有的扫码展示状态，不能用嵌套环境 dismiss 误关设置页。
                         dismissScanner()
                     }
@@ -106,13 +106,13 @@ struct QRCodeScannerSheet: View {
 
             if !isCameraReady {
                 scannerStatusCard(
-                    title: "正在启动相机",
-                    message: "如果系统弹出权限请求，请允许相机访问，用来扫描 Mac 上的配对二维码。",
+                    title: L10n.text("ui.starting_camera"),
+                    message: L10n.text("ui.if_a_permission_request_pops_up_allow_camera"),
                     showsProgress: true
                 )
             } else if let completionMessage {
                 scannerStatusCard(
-                    title: "连接成功",
+                    title: L10n.text("ui.connection_successful"),
                     message: completionMessage,
                     systemImage: "checkmark.circle.fill"
                 )
@@ -120,8 +120,8 @@ struct QRCodeScannerSheet: View {
                 .accessibilityIdentifier("qrScanner.connectionSuccess")
             } else if isSubmittingCode {
                 scannerStatusCard(
-                    title: "已识别二维码",
-                    message: "正在验证 Mac 连接…",
+                    title: L10n.text("ui.qr_code_recognized"),
+                    message: L10n.text("ui.verifying_mac_connection"),
                     showsProgress: true
                 )
             }
@@ -171,7 +171,7 @@ struct QRCodeScannerSheet: View {
                     .accessibilityHidden(true)
 
                 VStack(spacing: 8) {
-                    Text("无法扫码")
+                    Text(L10n.text("ui.unable_to_scan_code"))
                         .font(.title2.weight(.semibold))
                     Text(failure.message)
                         .font(.body)
@@ -181,12 +181,12 @@ struct QRCodeScannerSheet: View {
 
                 VStack(spacing: 10) {
                     if failure.recoveryActions.contains(.openSettings) {
-                        Button("前往系统设置", action: openAppSettings)
+                        Button(L10n.text("ui.go_to_system_settings"), action: openAppSettings)
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
                     }
                     if failure.recoveryActions.contains(.retryScanning) {
-                        Button("继续扫码") {
+                        Button(L10n.text("ui.continue_to_scan_the_code")) {
                             isCameraReady = false
                             scannerFailure = nil
                         }
@@ -194,11 +194,11 @@ struct QRCodeScannerSheet: View {
                         .controlSize(.large)
                     }
                     if failure.recoveryActions.count == 1 {
-                        Button("改用手动连接", action: chooseManualConnection)
+                        Button(L10n.text("ui.use_manual_connection_instead"), action: chooseManualConnection)
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
                     } else {
-                        Button("改用手动连接", action: chooseManualConnection)
+                        Button(L10n.text("ui.use_manual_connection_instead"), action: chooseManualConnection)
                             .buttonStyle(.bordered)
                             .controlSize(.large)
                     }
@@ -401,18 +401,18 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
         do {
             let input = try AVCaptureDeviceInput(device: device)
             guard captureSession.canAddInput(input) else {
-                reportFailure(.configurationFailed("无法接入相机输入，请改用手动连接。"))
+                reportFailure(.configurationFailed(L10n.text("ui.unable_to_access_camera_input_please_use_manual")))
                 return
             }
             captureSession.addInput(input)
         } catch {
-            reportFailure(.configurationFailed("打开相机失败：\(error.localizedDescription)"))
+            reportFailure(.configurationFailed(L10n.format("ui.failed_to_open_camera_value", error.localizedDescription)))
             return
         }
 
         let output = AVCaptureMetadataOutput()
         guard captureSession.canAddOutput(output) else {
-            reportFailure(.configurationFailed("当前相机不支持二维码扫描，请改用手动连接。"))
+            reportFailure(.configurationFailed(L10n.text("ui.the_current_camera_does_not_support_qr_code")))
             return
         }
         captureSession.addOutput(output)

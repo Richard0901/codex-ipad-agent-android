@@ -130,39 +130,39 @@ enum ComposerPermissionMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .requestApproval:
-            return "请求批准"
+            return L10n.text("ui.request_approval")
         case .readOnly:
-            return "只读"
+            return L10n.text("ui.read_only")
         case .autoApprove:
-            return "替我审批"
+            return L10n.text("ui.approval_for_me")
         case .fullAccess:
-            return "完全访问"
+            return L10n.text("ui.full_access")
         }
     }
 
     var chipTitle: String {
         switch self {
         case .requestApproval:
-            return "权限 请求批准"
+            return L10n.text("ui.permissions_request_approval")
         case .readOnly:
-            return "权限 只读"
+            return L10n.text("ui.permissions_read_only")
         case .autoApprove:
-            return "权限 替我审批"
+            return L10n.text("ui.permissions_approval_for_me")
         case .fullAccess:
-            return "权限 完全访问"
+            return L10n.text("ui.permissions_full_access")
         }
     }
 
     var detail: String {
         switch self {
         case .requestApproval:
-            return "可写当前工作区，执行前由你确认"
+            return L10n.text("ui.can_write_to_the_current_workspace_and_be")
         case .readOnly:
-            return "默认不写文件"
+            return L10n.text("ui.do_not_write_files_by_default")
         case .autoApprove:
-            return "低风险审批交给代理"
+            return L10n.text("ui.leave_low_risk_approvals_to_agents")
         case .fullAccess:
-            return "允许访问整个文件系统"
+            return L10n.text("ui.allow_access_to_entire_file_system")
         }
     }
 

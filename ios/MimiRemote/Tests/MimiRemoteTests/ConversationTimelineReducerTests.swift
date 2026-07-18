@@ -1,0 +1,230 @@
+import XCTest
+@testable import MimiRemote
+
+@MainActor
+extension ConversationDataFlowTests {
+    func testTargetThreadSnapshotRebaseKeepsLivePlanAtFirstSeenSlot() {
+        let store = ConversationStore()
+        let sessionID = "019f7454-64e2-7f70-8208-21291af45ea6"
+        let turnID = "019f745b-c22c-7920-be01-936112fe021c"
+
+        func complete(
+            id: String,
+            itemID: String,
+            role: MessageRole,
+            kind: MessageKind,
+            content: String,
+            seq: EventSequence,
+            createdAt: TimeInterval
+        ) {
+            store.completeMessage(
+                AgentMessage(
+                    id: id,
+                    sessionID: sessionID,
+                    turnID: turnID,
+                    itemID: itemID,
+                    role: role,
+                    kind: kind,
+                    content: content,
+                    createdAt: Date(timeIntervalSince1970: createdAt),
+                    seq: seq,
+                    revision: Int(seq),
+                    sendStatus: .confirmed
+                ),
+                metadata: AgentEventMetadata(
+                    seq: seq,
+                    sessionID: sessionID,
+                    turnID: turnID,
+                    itemID: itemID,
+                    messageID: id,
+                    clientMessageID: nil,
+                    revision: Int(seq),
+                    createdAt: Date(timeIntervalSince1970: createdAt)
+                ),
+                fallbackSessionID: sessionID
+            )
+        }
+
+        complete(id: "live-commentary-1", itemID: "msg-commentary-1", role: .assistant, kind: .commentary, content: "先检查服务和日志。", seq: 1, createdAt: 30)
+        complete(id: "live-turn-plan", itemID: "turn-plan", role: .system, kind: .plan, content: "最小修复 → 测试 → 发布", seq: 2, createdAt: 33)
+        complete(id: "live-commentary-2", itemID: "msg-commentary-2", role: .assistant, kind: .commentary, content: "生产发布已成功。", seq: 3, createdAt: 45)
+        complete(id: "live-command", itemID: "cmd-find", role: .tool, kind: .commandSummary, content: "命令：find /opt/chat-archive/releases", seq: 4, createdAt: 47)
+        complete(id: "live-final", itemID: "msg-final", role: .assistant, kind: .message, content: "已修复并上线。", seq: 5, createdAt: 51)
+
+        // legacy thread/read 不含 turn/plan/updated，并把真实 msg_* 重编号为 item-N；
+        // 同时 active turn 的缺失时间都会落在 turn.startedAt 附近。
+        store.replaceHistorySnapshot([
+            CodexHistoryMessage(id: "history-user", role: "user", content: "修复并发布", createdAt: Date(timeIntervalSince1970: 18), turnID: turnID, itemID: "item-0", timelineOrdinal: 0, turnLifecycle: .completed, isTimestampFallback: true),
+            CodexHistoryMessage(id: "history-commentary-1", role: "assistant", kind: .commentary, content: "先检查服务和日志。", createdAt: Date(timeIntervalSince1970: 18.001), turnID: turnID, itemID: "item-1", timelineOrdinal: 1, turnLifecycle: .completed, isTimestampFallback: true),
+            CodexHistoryMessage(id: "history-commentary-2", role: "assistant", kind: .commentary, content: "生产发布已成功。", createdAt: Date(timeIntervalSince1970: 18.002), turnID: turnID, itemID: "item-2", timelineOrdinal: 2, turnLifecycle: .completed, isTimestampFallback: true),
+            CodexHistoryMessage(id: "history-command", role: "system", kind: .commandSummary, content: "命令：find /opt/chat-archive/releases", createdAt: Date(timeIntervalSince1970: 18.003), turnID: turnID, itemID: "item-3", timelineOrdinal: 3, turnLifecycle: .completed, isTimestampFallback: true),
+            CodexHistoryMessage(id: "history-final", role: "assistant", content: "已修复并上线。", createdAt: Date(timeIntervalSince1970: 18.004), turnID: turnID, itemID: "item-4", timelineOrdinal: 4, turnLifecycle: .completed, isTimestampFallback: true)
+        ], sessionID: sessionID)
+
+        XCTAssertEqual(
+            store.messages(for: sessionID).map(\.content),
+            [
+                "修复并发布",
+                "先检查服务和日志。",
+                "最小修复 → 测试 → 发布",
+                "生产发布已成功。",
+                "命令：find /opt/chat-archive/releases",
+                "已修复并上线。"
+            ]
+        )
+
+        complete(id: "live-turn-plan", itemID: "turn-plan", role: .system, kind: .plan, content: "✓ 最小修复 → ✓ 测试 → ✓ 发布", seq: 6, createdAt: 50)
+        let refreshed = store.messages(for: sessionID)
+        XCTAssertEqual(refreshed.filter { $0.kind == .plan }.count, 1)
+        XCTAssertEqual(refreshed.firstIndex { $0.kind == .plan }, 2, "计划更新必须留在首次出现槽位")
+        XCTAssertEqual(refreshed.last?.content, "已修复并上线。")
+    }
+
+    func testAmbiguousLegacyAliasesPreserveAllSameTextItems() {
+        let store = ConversationStore()
+        let sessionID = "thread-ambiguous-alias"
+        let turnID = "turn-ambiguous-alias"
+
+        for index in 0..<2 {
+            let itemID = "msg-live-\(index)"
+            store.completeMessage(
+                AgentMessage(
+                    id: itemID,
+                    sessionID: sessionID,
+                    turnID: turnID,
+                    itemID: itemID,
+                    role: .assistant,
+                    kind: .commentary,
+                    content: "继续检查。",
+                    createdAt: Date(timeIntervalSince1970: TimeInterval(10 + index)),
+                    seq: Int64(index + 1),
+                    revision: index + 1,
+                    sendStatus: .confirmed
+                ),
+                metadata: AgentEventMetadata(
+                    seq: Int64(index + 1),
+                    sessionID: sessionID,
+                    turnID: turnID,
+                    itemID: itemID,
+                    messageID: itemID,
+                    clientMessageID: nil,
+                    revision: index + 1,
+                    createdAt: nil
+                ),
+                fallbackSessionID: sessionID
+            )
+        }
+
+        store.setHistory((0..<2).map { index in
+            CodexHistoryMessage(
+                id: "item-\(index)",
+                role: "assistant",
+                kind: .commentary,
+                content: "继续检查。",
+                createdAt: Date(timeIntervalSince1970: TimeInterval(20 + index)),
+                turnID: turnID,
+                itemID: "item-\(index)",
+                timelineOrdinal: Int64(index)
+            )
+        }, sessionID: sessionID)
+
+        XCTAssertEqual(store.messages(for: sessionID).filter { $0.content == "继续检查。" }.count, 4)
+    }
+
+    func testExplicitTurnLifecycleControlsProcessCompletionStyle() throws {
+        let turnID = "turn-explicit-lifecycle"
+        let reasoning = ConversationMessage(
+            turnID: turnID,
+            itemID: "reasoning",
+            role: .system,
+            kind: .reasoningSummary,
+            content: "正在排查",
+            activityPayload: ConversationActivityPayload(
+                category: .thinking,
+                displayTitle: "正在排查",
+                status: "running"
+            ),
+            turnLifecycle: .inProgress
+        )
+        let command = ConversationMessage(
+            turnID: turnID,
+            itemID: "command",
+            role: .system,
+            kind: .commandSummary,
+            content: "运行命令",
+            activityPayload: ConversationActivityPayload(
+                category: .runCommand,
+                displayTitle: "运行命令",
+                status: "completed"
+            ),
+            turnLifecycle: .inProgress
+        )
+        let final = ConversationMessage(
+            turnID: turnID,
+            itemID: "final",
+            role: .assistant,
+            content: "阶段输出",
+            sendStatus: .confirmed,
+            turnLifecycle: .inProgress
+        )
+
+        let runningItems = ConversationTimelineItemBuilder.items(from: [reasoning, command, final])
+        guard case .processGroup(let runningGroup) = runningItems.first else {
+            return XCTFail("相邻 reasoning/command 应组成过程组")
+        }
+        XCTAssertEqual(runningGroup.status, .running, "显式 inProgress 不能被 final 提前标记完成")
+
+        let completedMessages = [reasoning, command, final].map { message -> ConversationMessage in
+            var next = message
+            next.turnLifecycle = .completed
+            return next
+        }
+        let completedItems = ConversationTimelineItemBuilder.items(from: completedMessages)
+        guard case .processGroup(let completedGroup) = completedItems.first else {
+            return XCTFail("完成后仍应保留同一个过程组")
+        }
+        XCTAssertEqual(completedGroup.status, .completed)
+    }
+
+    func testOrderingConflictFallsBackToFirstSeenSlotsInsteadOfTimestamps() {
+        let first = ConversationMessage(
+            stableID: "live-a",
+            turnID: "turn-cycle",
+            itemID: "a",
+            role: .assistant,
+            kind: .commentary,
+            content: "先出现 A",
+            createdAt: Date(timeIntervalSince1970: 30)
+        )
+        let localPlan = ConversationMessage(
+            stableID: "local-plan",
+            turnID: "turn-cycle",
+            itemID: "plan",
+            role: .system,
+            kind: .plan,
+            content: "本地计划",
+            createdAt: Date(timeIntervalSince1970: 10)
+        )
+        let second = ConversationMessage(
+            stableID: "live-b",
+            turnID: "turn-cycle",
+            itemID: "b",
+            role: .assistant,
+            kind: .commentary,
+            content: "后出现 B",
+            createdAt: Date(timeIntervalSince1970: 20)
+        )
+        let snapshot = [
+            ConversationMessage(stableID: "live-b", turnID: "turn-cycle", itemID: "b", role: .assistant, kind: .commentary, content: "快照 B"),
+            ConversationMessage(stableID: "live-a", turnID: "turn-cycle", itemID: "a", role: .assistant, kind: .commentary, content: "快照 A")
+        ]
+
+        let result = ConversationTimelineReducer().rebase(
+            snapshot: snapshot,
+            current: [first, localPlan, second]
+        )
+
+        XCTAssertTrue(result.hadOrderingCycle)
+        XCTAssertEqual(result.messages.map(\.content), ["快照 A", "本地计划", "快照 B"])
+    }
+}

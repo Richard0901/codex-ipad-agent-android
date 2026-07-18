@@ -26,7 +26,7 @@ final class ThemeStoreTests: XCTestCase {
         let store = ThemeStore(defaults: defaults)
 
         XCTAssertEqual(store.mode, .system)
-        XCTAssertEqual(store.mode.subtitle, "跟随当前设备外观")
+        XCTAssertEqual(store.mode.subtitle, L10n.text("ui.follow_the_current_device_appearance"))
         XCTAssertEqual(store.preset, .codex)
         XCTAssertEqual(store.uiFontPreset, .system)
         XCTAssertEqual(store.codeFontPreset, .systemMono)
@@ -165,8 +165,8 @@ final class ThemeStoreTests: XCTestCase {
         let darkSecondaryText = rgba(darkTokens.secondaryText)
         let darkTertiaryText = rgba(darkTokens.tertiaryText)
 
-        XCTAssertEqual(ThemePreset.codex.title, "暖阳")
-        XCTAssertEqual(ThemePreset.codex.subtitle, "中性暖白配单一深紫主色，克制但不沉闷")
+        XCTAssertEqual(ThemePreset.codex.title, L10n.text("ui.warm_sun"))
+        XCTAssertEqual(ThemePreset.codex.subtitle, L10n.text("ui.neutral_warm_white_with_a_single_main_color"))
 
         assertRGB(lightBackground, red: 249, green: 248, blue: 245)
         assertRGB(lightSidebarBackground, red: 249, green: 248, blue: 245)

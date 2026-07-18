@@ -35,7 +35,7 @@ struct SessionContextSidebarView: View {
                     await sessionStore.refreshSelectedCommandActions()
                 }
             } else {
-                ContentUnavailableView("未选择会话", systemImage: "sidebar.right")
+                ContentUnavailableView(L10n.text("ui.no_session_selected"), systemImage: "sidebar.right")
                     .font(themeStore.uiFont(.caption))
             }
         }
@@ -43,7 +43,7 @@ struct SessionContextSidebarView: View {
         .sheet(item: $goalEditor) { draft in
             ThreadGoalEditorSheet(draft: draft)
         }
-        .confirmationDialog("执行这个动作？", isPresented: Binding(
+        .confirmationDialog(L10n.text("ui.perform_this_action"), isPresented: Binding(
             get: { pendingCommandAction != nil },
             set: { isPresented in
                 if !isPresented {
@@ -52,13 +52,13 @@ struct SessionContextSidebarView: View {
             }
         ), titleVisibility: .visible) {
             if let action = pendingCommandAction {
-                Button("执行 \(action.name)", role: .destructive) {
+                Button(L10n.format("ui.execute_value", action.name), role: .destructive) {
                     let target = action
                     pendingCommandAction = nil
                     Task { await sessionStore.runSelectedCommandAction(target) }
                 }
             }
-            Button("取消", role: .cancel) {
+            Button(L10n.text("ui.cancel"), role: .cancel) {
                 pendingCommandAction = nil
             }
         } message: {
@@ -74,7 +74,7 @@ struct SessionContextSidebarView: View {
 
     @ViewBuilder
     private func goalSection(goal: ThreadGoal?) -> some View {
-        Section("目标") {
+        Section(L10n.text("ui.target")) {
             if let goal {
                 ContextItemRow(
                     symbolName: "target",
@@ -83,15 +83,15 @@ struct SessionContextSidebarView: View {
                     badge: goal.status.displayText
                 )
                 if goal.timeUsedSeconds > 0 {
-                    ContextValueRow(symbolName: "timer", title: "耗时", value: goal.elapsedText)
+                    ContextValueRow(symbolName: "timer", title: L10n.text("ui.time_consuming"), value: goal.elapsedText)
                 }
                 if let updatedAt = goal.updatedAt {
-                    ContextValueRow(symbolName: "clock", title: "更新", value: updatedAt.formatted(date: .omitted, time: .shortened))
+                    ContextValueRow(symbolName: "clock", title: L10n.text("ui.updated_label"), value: updatedAt.formatted(date: .omitted, time: .shortened))
                 }
                 Button {
                     goalEditor = ThreadGoalEditorDraft(sessionID: goal.threadID, existing: goal)
                 } label: {
-                    Label("编辑目标", systemImage: "pencil")
+                    Label(L10n.text("ui.edit_target"), systemImage: "pencil")
                 }
                 .disabled(sessionStore.isUpdatingThreadGoal)
 
@@ -107,17 +107,17 @@ struct SessionContextSidebarView: View {
                 Button(role: .destructive) {
                     Task { await sessionStore.clearSelectedThreadGoal() }
                 } label: {
-                    Label("清除目标", systemImage: "trash")
+                    Label(L10n.text("ui.clear_target"), systemImage: "trash")
                 }
                 .disabled(sessionStore.isUpdatingThreadGoal)
             } else {
-                ContextEmptyRow(title: "暂无目标")
+                ContextEmptyRow(title: L10n.text("ui.no_target_yet"))
             }
 
             Button {
                 Task { await sessionStore.refreshSelectedThreadGoal() }
             } label: {
-                Label("刷新目标", systemImage: "arrow.clockwise")
+                Label(L10n.text("ui.refresh_target"), systemImage: "arrow.clockwise")
             }
             .disabled(sessionStore.selectedSessionID == nil || sessionStore.isUpdatingThreadGoal)
 
@@ -125,7 +125,7 @@ struct SessionContextSidebarView: View {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在同步目标")
+                    Text(L10n.text("ui.synchronizing_target"))
                         .font(themeStore.uiFont(.caption))
                 }
                 .foregroundStyle(themeStore.tokens(for: colorScheme).secondaryText)
@@ -133,7 +133,7 @@ struct SessionContextSidebarView: View {
             if let error = sessionStore.threadGoalErrorMessage {
                 ContextItemRow(
                     symbolName: "exclamationmark.triangle",
-                    title: "目标同步失败",
+                    title: L10n.text("ui.target_sync_failed"),
                     subtitle: error,
                     badge: nil
                 )
@@ -142,21 +142,21 @@ struct SessionContextSidebarView: View {
     }
 
     private func overviewSection(_ context: SessionContextSnapshot, session: AgentSession?) -> some View {
-        Section("状态") {
+        Section(L10n.text("ui.status")) {
             if let session {
                 ContextValueRow(
                     symbolName: "circle.dashed",
-                    title: "状态",
+                    title: L10n.text("ui.status"),
                     value: session.displayStatusText
                 )
                 ContextValueRow(
                     symbolName: "dot.radiowaves.left.and.right",
-                    title: "连接",
+                    title: L10n.text("ui.connect"),
                     value: sessionStore.webSocketStatus.title
                 )
                 ContextValueRow(
                     symbolName: "folder",
-                    title: "项目",
+                    title: L10n.text("ui.project"),
                     value: session.project.isEmpty ? session.projectID : session.project
                 )
                 if let activeTurnID = session.activeTurnID {
@@ -172,31 +172,31 @@ struct SessionContextSidebarView: View {
                     ContextValueRow(symbolName: "gauge.with.dots.needle.33percent", title: "Token", value: usage)
                 }
                 if let rateLimit = session.rateLimit?.compactText {
-                    ContextValueRow(symbolName: "speedometer", title: "限额", value: rateLimit)
+                    ContextValueRow(symbolName: "speedometer", title: L10n.text("ui.limit"), value: rateLimit)
                 }
             } else if let status = context.status {
                 ContextValueRow(
                     symbolName: symbolName(forStatus: status),
-                    title: "状态",
+                    title: L10n.text("ui.status"),
                     value: statusText(status)
                 )
             }
             if let environment = context.environment {
                 ContextValueRow(
                     symbolName: "laptopcomputer",
-                    title: environment.label ?? environment.kind ?? "环境",
+                    title: environment.label ?? environment.kind ?? L10n.text("ui.environment"),
                     value: nonEmpty(environment.provider, environment.kind) ?? "-"
                 )
                 if let cwd = nonEmpty(environment.cwd) {
-                    ContextValueRow(symbolName: "folder", title: "路径", value: cwd)
+                    ContextValueRow(symbolName: "folder", title: L10n.text("ui.path"), value: cwd)
                 }
             }
             if let git = context.git {
                 if let branch = nonEmpty(git.branch) {
-                    ContextValueRow(symbolName: "point.3.connected.trianglepath.dotted", title: "分支", value: branch)
+                    ContextValueRow(symbolName: "point.3.connected.trianglepath.dotted", title: L10n.text("ui.branch"), value: branch)
                 }
                 if let sha = nonEmpty(git.sha) {
-                    ContextValueRow(symbolName: "number", title: "提交", value: String(sha.prefix(12)))
+                    ContextValueRow(symbolName: "number", title: L10n.text("ui.submit"), value: String(sha.prefix(12)))
                 }
             }
             if let threadID = nonEmpty(context.threadID) {
@@ -207,14 +207,14 @@ struct SessionContextSidebarView: View {
 
     @ViewBuilder
     private func commandActionSection() -> some View {
-        Section("动作") {
+        Section(L10n.text("ui.action")) {
             if sessionStore.selectedCommandActionPath == nil {
-                ContextEmptyRow(title: "未选择工作区")
+                ContextEmptyRow(title: L10n.text("ui.no_workspace_selected"))
             } else {
                 if let error = sessionStore.selectedCommandActionErrorMessage {
                     ContextItemRow(
                         symbolName: "exclamationmark.triangle",
-                        title: "动作不可用",
+                        title: L10n.text("ui.action_not_available"),
                         subtitle: error,
                         badge: nil
                     )
@@ -223,12 +223,12 @@ struct SessionContextSidebarView: View {
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("正在读取动作")
+                        Text(L10n.text("ui.reading_action"))
                             .font(themeStore.uiFont(.caption))
                     }
                     .foregroundStyle(themeStore.tokens(for: colorScheme).secondaryText)
                 } else if sessionStore.selectedCommandActions.isEmpty {
-                    ContextEmptyRow(title: "未配置快捷动作")
+                    ContextEmptyRow(title: L10n.text("ui.no_quick_action_configured"))
                 } else {
                     let selectedActionPath = sessionStore.selectedCommandActionPath
                     let queuedActionIDs = sessionStore.selectedQueuedCommandActionIDs
@@ -251,7 +251,7 @@ struct SessionContextSidebarView: View {
                 }
                 let history = sessionStore.selectedCommandActionHistory
                 if !history.isEmpty {
-                    ContextInlineHeader(title: "最近输出")
+                    ContextInlineHeader(title: L10n.text("ui.recent_output"))
                     ForEach(Array(history.prefix(3).enumerated()), id: \.offset) { _, result in
                         CommandActionResultRow(result: result)
                     }
@@ -261,9 +261,9 @@ struct SessionContextSidebarView: View {
     }
 
     private func taskSection(_ tasks: [SessionContextTask]) -> some View {
-        Section("任务") {
+        Section(L10n.text("ui.task")) {
             if tasks.isEmpty {
-                ContextEmptyRow(title: "暂无任务")
+                ContextEmptyRow(title: L10n.text("ui.no_tasks_yet"))
             } else {
                 ForEach(tasks) { task in
                     ContextItemRow(
@@ -278,10 +278,10 @@ struct SessionContextSidebarView: View {
     }
 
     private func entrySection(_ sources: [SessionContextSource]) -> some View {
-        Section("入口") {
+        Section(L10n.text("ui.entrance")) {
             ContextItemRow(
                 symbolName: currentDeviceSymbolName,
-                title: "当前入口",
+                title: L10n.text("ui.current_entrance"),
                 subtitle: "Mimi Remote",
                 badge: nil
             )
@@ -297,9 +297,9 @@ struct SessionContextSidebarView: View {
     }
 
     private func subagentSection(_ subagents: [SessionContextSubagent]) -> some View {
-        Section("子 Agent") {
+        Section(L10n.text("ui.sub_agent")) {
             if subagents.isEmpty {
-                ContextEmptyRow(title: "暂无子 Agent")
+                ContextEmptyRow(title: L10n.text("ui.no_sub_agents_yet"))
             } else {
                 ForEach(subagents) { subagent in
                     ContextItemRow(
@@ -316,10 +316,10 @@ struct SessionContextSidebarView: View {
     private func statusText(_ status: SessionContextStatus) -> String {
         var parts = [statusText(status.type)]
         if status.activeFlags.contains("waitingOnApproval") {
-            parts.append("待审批")
+            parts.append(L10n.text("ui.pending_approval"))
         }
         if status.activeFlags.contains("waitingOnUserInput") {
-            parts.append("待输入")
+            parts.append(L10n.text("ui.to_be_entered"))
         }
         return parts.joined(separator: " · ")
     }
@@ -327,23 +327,23 @@ struct SessionContextSidebarView: View {
     private func statusText(_ status: String) -> String {
         switch status {
         case "active", "running", "inProgress", "in_progress", "started":
-            return "运行中"
+            return L10n.text("ui.running")
         case "idle":
-            return "空闲"
+            return L10n.text("ui.free")
         case "completed", "complete", "success", "succeeded":
-            return "完成"
+            return L10n.text("ui.complete")
         case "notLoaded", "history":
-            return "历史"
+            return L10n.text("ui.history")
         case "systemError", "failed":
-            return "异常"
+            return L10n.text("ui.abnormal")
         case "waiting_for_approval":
-            return "待审批"
+            return L10n.text("ui.pending_approval")
         case "waiting_for_input":
-            return "待输入"
+            return L10n.text("ui.to_be_entered")
         case "closed":
-            return "已结束"
+            return L10n.text("ui.ended")
         case "unknown", "":
-            return "待确认"
+            return L10n.text("ui.to_be_confirmed")
         default:
             return status.replacingOccurrences(of: "_", with: " ")
         }
@@ -353,18 +353,18 @@ struct SessionContextSidebarView: View {
         switch goal.status {
         case .active:
             return [
-                (.paused, "暂停目标", "pause.circle"),
-                (.complete, "标记完成", "checkmark.circle"),
-                (.blocked, "标记阻塞", "exclamationmark.octagon")
+                (.paused, L10n.text("ui.pause_target"), "pause.circle"),
+                (.complete, L10n.text("ui.mark_complete"), "checkmark.circle"),
+                (.blocked, L10n.text("ui.mark_blocking"), "exclamationmark.octagon")
             ]
         case .paused, .blocked, .usageLimited, .budgetLimited:
             return [
-                (.active, "继续目标", "play.circle"),
-                (.complete, "标记完成", "checkmark.circle")
+                (.active, L10n.text("ui.continue_target"), "play.circle"),
+                (.complete, L10n.text("ui.mark_complete"), "checkmark.circle")
             ]
         case .complete:
             return [
-                (.active, "重新激活", "play.circle")
+                (.active, L10n.text("ui.reactivate"), "play.circle")
             ]
         }
     }
@@ -421,15 +421,15 @@ struct SessionContextSidebarView: View {
     private func title(forSource source: SessionContextSource) -> String {
         switch source.kind {
         case "session":
-            return "原始来源"
+            return L10n.text("ui.original_source")
         case "thread":
-            return "线程来源"
+            return L10n.text("ui.thread_source")
         case "fork":
-            return "Fork 来源"
+            return L10n.text("ui.fork_source")
         case "project":
-            return "项目"
+            return L10n.text("ui.project")
         default:
-            return source.subtitle ?? "来源"
+            return source.subtitle ?? L10n.text("ui.source")
         }
     }
 
@@ -458,7 +458,7 @@ struct SessionContextSidebarView: View {
         case "ipad", "iphone", "ios":
             return "Mimi Remote"
         case "user":
-            return "用户发起"
+            return L10n.text("ui.user_initiated")
         default:
             return raw
         }
@@ -481,7 +481,7 @@ struct ThreadGoalEditorDraft: Identifiable {
     let existing: ThreadGoal?
 
     var title: String {
-        "编辑目标"
+        L10n.text("ui.edit_target")
     }
 
     var objective: String {
@@ -514,10 +514,10 @@ struct ThreadGoalEditorSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("目标") {
-                    TextField("目标", text: $objective, axis: .vertical)
+                Section(L10n.text("ui.target")) {
+                    TextField(L10n.text("ui.target"), text: $objective, axis: .vertical)
                         .lineLimit(3...6)
-                    TextField("Token 预算", text: $tokenBudgetText)
+                    TextField(L10n.text("ui.token_budget"), text: $tokenBudgetText)
                         .keyboardType(.numberPad)
                 }
                 if let validationMessage {
@@ -532,12 +532,12 @@ struct ThreadGoalEditorSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") {
+                    Button(L10n.text("ui.cancel")) {
                         dismiss()
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
+                    Button(L10n.text("ui.save")) {
                         save()
                     }
                     .disabled(validationMessage != nil || sessionStore.isUpdatingThreadGoal)
@@ -548,12 +548,12 @@ struct ThreadGoalEditorSheet: View {
 
     private var validationMessage: String? {
         if objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "目标内容不能为空"
+            return L10n.text("ui.target_content_cannot_be_empty")
         }
         let budget = tokenBudgetText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !budget.isEmpty {
             guard let value = Int64(budget), value > 0 else {
-                return "Token 预算必须是正整数"
+                return L10n.text("ui.token_budget_must_be_a_positive_integer")
             }
         }
         return nil
@@ -678,11 +678,11 @@ private struct CommandActionButtonRow: View {
                     if queuedCount > 0 || action.requiresConfirmation {
                         HStack(spacing: 6) {
                             if queuedCount > 0 {
-                                Label("排队中 · \(queuedCount)", systemImage: "clock")
+                                Label(L10n.format("ui.queuing_value", queuedCount), systemImage: "clock")
                                     .foregroundStyle(tokens.secondaryText)
                             }
                             if action.requiresConfirmation {
-                                Label("需确认", systemImage: "exclamationmark.triangle")
+                                Label(L10n.text("ui.need_to_confirm"), systemImage: "exclamationmark.triangle")
                                     .foregroundStyle(tokens.warning)
                             }
                         }
@@ -746,7 +746,7 @@ private struct CommandActionResultRow: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if result.truncated == true {
-                Text("输出过长，已截断")
+                Text(L10n.text("ui.the_output_is_too_long_and_has_been"))
                     .font(themeStore.uiFont(.caption2))
                     .foregroundStyle(tokens.warning)
             }
@@ -756,17 +756,17 @@ private struct CommandActionResultRow: View {
 
     private var title: String {
         if result.timedOut == true {
-            return "\(result.name) 超时"
+            return L10n.format("ui.value_timeout", result.name)
         }
         if result.success {
-            return "\(result.name) 完成"
+            return L10n.format("ui.value_complete", result.name)
         }
-        return "\(result.name) 失败 · \(result.exitCode)"
+        return L10n.format("ui.value_failed_value", result.name, result.exitCode)
     }
 
     private var outputText: String {
         let text = result.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return text.isEmpty ? "无输出" : text
+        return text.isEmpty ? L10n.text("ui.no_output") : text
     }
 
     private var tokens: ThemeTokens {

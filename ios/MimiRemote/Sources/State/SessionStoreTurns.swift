@@ -45,7 +45,7 @@ extension SessionStore {
     func refreshCurrentContext() async {
 #if DEBUG
         guard !isDebugWorkbenchUISeedActive else {
-            setStatusMessage("Debug UI 样例不会连接后端")
+            setStatusMessage(L10n.text("ui.debug_ui_sample_will_not_connect_to_the"))
             return
         }
 #endif
@@ -60,7 +60,7 @@ extension SessionStore {
         guard let session = selectedSession else {
             return
         }
-        await refreshSelectedSessionContent(session, successStatusMessage: "已加载完整历史", reason: .manualFull)
+        await refreshSelectedSessionContent(session, successStatusMessage: L10n.text("ui.full_history_loaded"), reason: .manualFull)
     }
 
     func loadSummaryHistoryForSelectedSession() async {
@@ -73,7 +73,7 @@ extension SessionStore {
             loadMode: .economy,
             force: true,
             reason: .summaryChoice,
-            successStatusMessage: "已加载缩略历史"
+            successStatusMessage: L10n.text("ui.thumbnail_history_loaded")
         )
     }
 
@@ -113,7 +113,7 @@ extension SessionStore {
                 appServerModelOptions = options
             }
             if force {
-                setStatusMessage(options.isEmpty ? "未发现 app-server 模型列表，继续使用内置选项" : "已刷新模型列表")
+                setStatusMessage(options.isEmpty ? L10n.text("ui.app_server_model_list_not_found_continue_using") : L10n.text("ui.model_list_refreshed"))
             }
         } catch {
             if !didRefreshRuntimeAvailability {
@@ -121,7 +121,7 @@ extension SessionStore {
             }
             appServerModelOptionsLastRefresh = Date()
             if force {
-                setStatusMessage("模型列表不可用，继续使用内置选项")
+                setStatusMessage(L10n.text("ui.model_list_unavailable_continue_using_built_in_options"))
             }
         }
     }
@@ -239,28 +239,28 @@ extension SessionStore {
             return
         }
         loadingEarlierHistorySessionIDs.insert(session.id)
-        setHistoryLoadProgress(sessionID: session.id, title: "加载更早消息", fraction: 0.18)
+        setHistoryLoadProgress(sessionID: session.id, title: L10n.text("ui.load_older_messages"), fraction: 0.18)
         defer {
             loadingEarlierHistorySessionIDs.remove(session.id)
             clearHistoryLoadProgress(sessionID: session.id)
         }
         do {
             let client = try clientFactory()
-            setHistoryLoadProgress(sessionID: session.id, title: "请求历史分页", fraction: 0.42)
+            setHistoryLoadProgress(sessionID: session.id, title: L10n.text("ui.request_history_paging"), fraction: 0.42)
             let page = try await client.messagesPage(
                 sessionID: session.id,
                 before: cursor,
                 limit: historyLoadedQualityBySessionID[session.id] == .summary ? economyHistoryPageLimit : fullHistoryPageLimit,
                 loadMode: historyLoadedQualityBySessionID[session.id] == .summary ? .economy : .full
             )
-            setHistoryLoadProgress(sessionID: session.id, title: "解析历史消息", fraction: 0.76)
+            setHistoryLoadProgress(sessionID: session.id, title: L10n.text("ui.parse_historical_messages"), fraction: 0.76)
             ingestHistoryContext(page.context, fallbackSessionID: session.id)
             conversationStore.setHistory(
                 page.messages,
                 sessionID: session.id,
                 authoritativeCompletedTurnItems: page.authoritativeCompletedTurnItems
             )
-            setHistoryLoadProgress(sessionID: session.id, title: "更新界面", fraction: 0.94)
+            setHistoryLoadProgress(sessionID: session.id, title: L10n.text("ui.update_interface"), fraction: 0.94)
             updateHistoryPageState(sessionID: session.id, page: page, preserveExistingCursorOnEmptyPage: false)
             setErrorMessage(nil)
         } catch {
@@ -469,9 +469,9 @@ extension SessionStore {
                 .displayName
             let message: String
             if let profileName {
-                message = "通知来自“\(profileName)”，请先在设置中切换连接档案"
+                message = L10n.format("ui.the_notification_comes_from_value_please_switch_the", profileName)
             } else {
-                message = "通知来自其他 Mac，请先在设置中切换对应连接档案"
+                message = L10n.text("ui.the_notification_comes_from_another_mac_please_switch")
             }
             setStatusMessage(message)
             return .requiresProfileSwitch(displayName: profileName)
@@ -495,15 +495,15 @@ extension SessionStore {
                           route.profileID == appStore.notificationRoutingProfileID else {
                         return .ignored
                     }
-                    let message = "通知对应的会话暂不可用，请从当前 Mac 的会话列表中查找。"
+                    let message = L10n.text("ui.the_session_corresponding_to_the_notification_is_temporarily")
                     setStatusMessage(message)
                     return .unavailable(message: message)
                 }
             } catch {
                 if terminateConnectionIfCredentialsInvalid(error) {
-                    return .unavailable(message: "当前连接凭据已失效，请重新配对后再打开通知。")
+                    return .unavailable(message: L10n.text("ui.the_current_connection_credentials_have_expired_please_re"))
                 }
-                let message = "无法打开通知对应的会话，请确认当前 Mac 在线后重试。"
+                let message = L10n.text("ui.the_session_corresponding_to_the_notification_cannot_be")
                 setStatusMessage(message)
                 return .unavailable(message: message)
             }
@@ -594,7 +594,7 @@ extension SessionStore {
         logStore.retainSessionCache(sessionID: session.id)
 #if DEBUG
         guard !isDebugWorkbenchUISeedActive else {
-            setStatusMessage("已选择 Debug 会话 \(session.title)")
+            setStatusMessage(L10n.format("ui.debug_session_value_selected", session.title))
             return
         }
 #endif
@@ -628,7 +628,7 @@ extension SessionStore {
     // 决定（当前是 Codex）。要开 Claude 会话必须在这里显式指定，事后无法把线程迁到另一条通道。
     func startNewSession(runtimeProvider: String? = nil) async {
         guard let selectedProjectID else {
-            setErrorMessage("请先选择项目")
+            setErrorMessage(L10n.text("ui.please_select_the_project_first"))
             return
         }
         await createSession(projectID: selectedProjectID, prompt: "", resume: nil, runtimeProvider: runtimeProvider)
@@ -664,11 +664,11 @@ extension SessionStore {
     ) async -> Bool {
         let normalizedObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedObjective.isEmpty else {
-            threadGoalErrorMessage = "目标内容不能为空"
+            threadGoalErrorMessage = L10n.text("ui.target_content_cannot_be_empty")
             return false
         }
         if let tokenBudget, tokenBudget <= 0 {
-            threadGoalErrorMessage = "Token 预算必须大于 0"
+            threadGoalErrorMessage = L10n.text("ui.token_budget_must_be_greater_than_0")
             return false
         }
         threadGoalErrorMessage = nil
@@ -687,7 +687,7 @@ extension SessionStore {
                     queuedIntent: .goal(objective: normalizedObjective, tokenBudget: tokenBudget)
                 )
                 if sent {
-                    setStatusMessage("目标任务已加入待发送")
+                    setStatusMessage(L10n.text("ui.the_target_task_has_been_added_to_be"))
                 }
                 return sent
             }
@@ -706,7 +706,7 @@ extension SessionStore {
                 runningDelivery: .guided
             )
             if sent {
-                setStatusMessage("目标任务已启动")
+                setStatusMessage(L10n.text("ui.the_target_task_has_been_started"))
             }
             return sent
         }
@@ -714,7 +714,7 @@ extension SessionStore {
         let resume = selectedSession
         let projectID = resume?.projectID ?? selectedProjectID
         guard let projectID else {
-            setErrorMessage("请先选择项目")
+            setErrorMessage(L10n.text("ui.please_select_the_project_first"))
             return false
         }
         let started = await createSession(
@@ -725,7 +725,7 @@ extension SessionStore {
             initialGoalObjective: normalizedObjective
         )
         if started {
-            setStatusMessage("目标任务已启动")
+            setStatusMessage(L10n.text("ui.the_target_task_has_been_started"))
         }
         return started
     }
@@ -761,14 +761,14 @@ extension SessionStore {
         if let session = selectedSession,
            session.isRunning || (runningDelivery == .queued && selectedSessionHasQueuedTurns) {
             guard canControlSession(session) else {
-                setErrorMessage("这个会话正在其他客户端运行。请先接管到 iPad，再继续发送。")
+                setErrorMessage(L10n.text("ui.this_session_is_running_on_another_client_please_c95578ac"))
                 return false
             }
             let clientMessageID = UUID().uuidString
             if runningDelivery == .queued {
                 let queueCount = queuedRunningTurnsBySessionID[session.id]?.count ?? 0
                 guard queueCount < Self.queuedTurnLimitPerSession else {
-                    setErrorMessage("每个会话最多保留 \(Self.queuedTurnLimitPerSession) 条待发送消息，请先处理现有队列")
+                    setErrorMessage(L10n.format("ui.each_session_retains_a_maximum_of_value_messages", Self.queuedTurnLimitPerSession))
                     return false
                 }
                 let intent = queuedIntent ?? (payload.options.collaborationMode == .plan ? .plan : .standard)
@@ -785,7 +785,7 @@ extension SessionStore {
                 }) else {
                     return false
                 }
-                setStatusMessage(session.activeTurnID == nil ? "已保存到本机，正在准备发送" : "已保存到本机，将在当前回复完成后发送")
+                setStatusMessage(session.activeTurnID == nil ? L10n.text("ui.saved_to_this_machine_and_preparing_to_send") : L10n.text("ui.saved_to_this_machine_and_will_be_sent"))
                 ensureQueuedSessionMonitoring(sessionID: session.id)
                 dispatchNextQueuedRunningTurnIfIdle(sessionID: session.id)
                 return true
@@ -808,7 +808,7 @@ extension SessionStore {
                 conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed)
                 clearSessionListProjection(sessionID: session.id, clientMessageID: clientMessageID)
                 clearForegroundActivity(sessionID: session.id)
-                setErrorMessage("引导对话失败：当前会话没有活跃 turn")
+                setErrorMessage(L10n.text("ui.failed_to_guide_conversation_there_is_no_active"))
                 return false
             }
             let didAcceptLocally = socket.sendGuidance(payload, clientMessageID: clientMessageID, expectedTurnID: activeTurnID)
@@ -816,7 +816,7 @@ extension SessionStore {
                 conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed)
                 clearSessionListProjection(sessionID: session.id, clientMessageID: clientMessageID)
                 clearForegroundActivity(sessionID: session.id)
-                setErrorMessage("发送失败：WebSocket 未连接")
+                setErrorMessage(L10n.text("ui.sending_failed_websocket_not_connected"))
                 return false
             }
             // 只有后端通道接受首个 turn 后才解除 fresh-empty 保护；本地发送失败时 thread 仍无 rollout。
@@ -827,7 +827,7 @@ extension SessionStore {
         let resume = selectedSession
         let projectID = resume?.projectID ?? selectedProjectID
         guard let projectID else {
-            setErrorMessage("请先选择项目")
+            setErrorMessage(L10n.text("ui.please_select_the_project_first"))
             return false
         }
         return await createSession(projectID: projectID, payload: payload, resume: resume, clientMessageID: UUID().uuidString)
@@ -845,7 +845,7 @@ extension SessionStore {
             return
         }
         guard canControlSession(session) else {
-            setStatusMessage("待发送消息正在等待：请先接管这个会话")
+            setStatusMessage(L10n.text("ui.message_to_be_sent_is_waiting_please_take"))
             return
         }
         guard let socket = socketForQueuedDispatch(sessionID: sessionID) else {
@@ -874,7 +874,7 @@ extension SessionStore {
                 ) else {
                     self.markQueuedTurnWaitingAfterDefiniteFailure(
                         clientMessageID: next.clientMessageID,
-                        message: "目标设置失败，尚未发送"
+                        message: L10n.text("ui.target_setup_failed_and_has_not_been_sent")
                     )
                     return
                 }
@@ -898,7 +898,7 @@ extension SessionStore {
             queuedTurnAwaitingStartSessionIDs.remove(session.id)
             markQueuedTurnWaitingAfterDefiniteFailure(
                 clientMessageID: item.clientMessageID,
-                message: "连接尚未就绪，消息仍保留在本机"
+                message: L10n.text("ui.the_connection_is_not_ready_yet_the_message")
             )
             clearForegroundActivity(sessionID: session.id)
             return
@@ -929,7 +929,7 @@ extension SessionStore {
         }
         contextStore.updateStatus(sessionID: session.id, status: SessionStatus.running.rawValue)
         freshEmptyHistorySignatureBySessionID.removeValue(forKey: session.id)
-        setStatusMessage("排队消息已发送，等待 Codex 开始下一轮")
+        setStatusMessage(L10n.text("ui.the_queued_message_has_been_sent_waiting_for"))
     }
 
     func markQueuedTurnWaitingAfterDefiniteFailure(
@@ -1023,7 +1023,7 @@ extension SessionStore {
                     self?.dispatchNextQueuedRunningTurnIfIdle(sessionID: sessionID)
                 case .failed(let message):
                     self?.queuedSessionReadyIDs.remove(sessionID)
-                    self?.setStatusMessage("待发送队列连接失败：\(message)")
+                    self?.setStatusMessage(L10n.format("ui.failed_to_connect_to_queue_to_be_sent", message))
                     self?.scheduleQueuedSessionReconnect(sessionID: sessionID, generation: generation)
                 case .terminated(let reason):
                     self?.queuedSessionReadyIDs.remove(sessionID)
@@ -1091,7 +1091,7 @@ extension SessionStore {
     func stopQueuedSessionMonitoring(sessionID: SessionID) {
         markDispatchingQueuedTurnsNeedsConfirmation(
             sessionID: sessionID,
-            message: "连接已中断，发送结果需要确认"
+            message: L10n.text("ui.the_connection_has_been_interrupted_sending_results_requires")
         )
         queuedSessionSocketGenerationByID[sessionID, default: 0] += 1
         queuedSessionReconnectTasks.removeValue(forKey: sessionID)?.cancel()
@@ -1105,7 +1105,7 @@ extension SessionStore {
               queuedRunningTurnsBySessionID[sessionID]?.isEmpty == false else { return }
         markDispatchingQueuedTurnsNeedsConfirmation(
             sessionID: sessionID,
-            message: "连接已中断，发送结果需要确认"
+            message: L10n.text("ui.the_connection_has_been_interrupted_sending_results_requires")
         )
         let socket = queuedSessionSockets.removeValue(forKey: sessionID)
         queuedSessionSocketGenerationByID[sessionID, default: generation] += 1
@@ -1214,7 +1214,7 @@ extension SessionStore {
             guard var queue = queuedRunningTurnsBySessionID[sessionID],
                   queue.indices.contains(location.index) else { return }
             queue[location.index].dispatchState = .needsConfirmation
-            queue[location.index].lastError = "发送结果不确定：\(message)"
+            queue[location.index].lastError = L10n.format("ui.uncertain_sending_result_value", message)
             queuedRunningTurnsBySessionID[sessionID] = queue
         }
         conversationStore.updateSendStatus(
@@ -1225,7 +1225,7 @@ extension SessionStore {
         clearForegroundActivity(sessionID: sessionID)
         queuedTurnAwaitingStartSessionIDs.remove(sessionID)
         queuedTurnBlockedCompletionIDBySessionID.removeValue(forKey: sessionID)
-        setErrorMessage("待发送消息结果不确定，请确认后重试：\(message)")
+        setErrorMessage(L10n.format("ui.the_result_of_the_message_to_be_sent", message))
         return true
     }
 
@@ -1314,14 +1314,14 @@ extension SessionStore {
             return
         }
         guard session.activeTurnID != nil else {
-            setStatusMessage("当前没有可中断的活动回合")
+            setStatusMessage(L10n.text("ui.there_are_currently_no_active_rounds_to_interrupt"))
             return
         }
         guard let socket = readyWebSocket(for: session) else {
             return
         }
         if !socket.sendCtrlC() {
-            setErrorMessage("发送 Ctrl-C 失败：WebSocket 未连接")
+            setErrorMessage(L10n.text("ui.sending_ctrl_c_failed_websocket_not_connected"))
         }
     }
 
@@ -1331,19 +1331,19 @@ extension SessionStore {
 
     func decideApproval(_ approval: ApprovalSummary, decision: String) {
         guard let session = selectedSession, session.isRunning else {
-            setErrorMessage("审批失败：WebSocket 未连接")
+            setErrorMessage(L10n.text("ui.approval_failed_websocket_not_connected"))
             return
         }
         guard canControlSession(session) else {
-            setErrorMessage("这个会话正在其他客户端运行。请先接管到 iPad，再处理审批。")
+            setErrorMessage(L10n.text("ui.this_session_is_running_on_another_client_please_d0b49af6"))
             return
         }
         guard let socket = readyWebSocket(for: session) else {
-            setErrorMessage("审批失败：WebSocket 未连接")
+            setErrorMessage(L10n.text("ui.approval_failed_websocket_not_connected"))
             return
         }
         guard !isApprovalDecisionPending(approval, sessionID: session.id) else {
-            setStatusMessage("审批决定正在发送")
+            setStatusMessage(L10n.text("ui.approval_decision_is_being_sent"))
             return
         }
         let normalizedDecision = decision.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1351,13 +1351,13 @@ extension SessionStore {
         markApprovalDecisionPending(approval.id, sessionID: session.id)
         guard socket.sendApprovalDecision(approvalID: approval.id, decision: normalizedDecision, message: nil) else {
             clearPendingApprovalDecision(sessionID: session.id, approvalID: approval.id)
-            setErrorMessage("审批发送失败：WebSocket 未连接")
+            setErrorMessage(L10n.text("ui.approval_sending_failed_websocket_not_connected"))
             return
         }
         if normalizedDecision.caseInsensitiveCompare("acceptWithPermissionUpdate") == .orderedSame {
-            setStatusMessage("已发送批准并记住规则的决定，等待 Claude 确认")
+            setStatusMessage(L10n.text("ui.sent_decision_to_approve_and_remember_rules_awaiting"))
         } else {
-            setStatusMessage(isAccepting ? "批准决定已发送，等待 Agent 继续执行" : "拒绝决定已发送，等待 Agent 确认")
+            setStatusMessage(isAccepting ? L10n.text("ui.the_approval_decision_has_been_sent_waiting_for") : L10n.text("ui.the_rejection_decision_has_been_sent_and_is"))
         }
     }
 
@@ -1370,29 +1370,29 @@ extension SessionStore {
 
     func respondToUserInput(_ request: AgentUserInputRequest, answers: [String: [String]]) {
         guard let session = selectedSession, session.isRunning else {
-            setErrorMessage("补充信息发送失败：WebSocket 未连接")
+            setErrorMessage(L10n.text("ui.supplemental_information_sending_failed_websocket_not_connected"))
             return
         }
         guard canControlSession(session) else {
-            setErrorMessage("这个会话正在其他客户端运行。请先接管到 iPad，再提交输入。")
+            setErrorMessage(L10n.text("ui.this_session_is_running_on_another_client_please_aacfc6a6"))
             return
         }
         guard let socket = readyWebSocket(for: session) else {
-            setErrorMessage("补充信息发送失败：WebSocket 未连接")
+            setErrorMessage(L10n.text("ui.supplemental_information_sending_failed_websocket_not_connected"))
             return
         }
         guard !isUserInputResponsePending(request, sessionID: session.id) else {
-            setStatusMessage("补充信息正在发送")
+            setStatusMessage(L10n.text("ui.additional_information_is_being_sent"))
             return
         }
         markUserInputResponsePending(request, sessionID: session.id)
         guard socket.sendUserInputResponse(requestID: request.id, answers: answers) else {
             clearPendingUserInputResponse(sessionID: session.id, requestID: request.id)
-            setErrorMessage("补充信息发送失败：WebSocket 未连接")
+            setErrorMessage(L10n.text("ui.supplemental_information_sending_failed_websocket_not_connected"))
             return
         }
         acceptUserInputResponseLocally(request, sessionID: session.id)
-        setStatusMessage("补充信息已发送，等待 Codex 继续")
+        setStatusMessage(L10n.text("ui.supplementary_information_has_been_sent_waiting_for_codex"))
     }
 
     func isUserInputResponsePending(_ request: AgentUserInputRequest) -> Bool {
@@ -1420,7 +1420,7 @@ extension SessionStore {
            session.isRunning,
            let clientMessageID = message.clientMessageID {
             guard canControlSession(session) else {
-                setErrorMessage("这个会话正在其他客户端运行。请先接管到 iPad，再继续发送。")
+                setErrorMessage(L10n.text("ui.this_session_is_running_on_another_client_please_c95578ac"))
                 return false
             }
             guard let socket = readyWebSocket(for: session) else {
@@ -1436,7 +1436,7 @@ extension SessionStore {
                 conversationStore.updateSendStatus(clientMessageID: clientMessageID, sessionID: session.id, status: .failed)
                 clearSessionListProjection(sessionID: session.id, clientMessageID: clientMessageID)
                 clearForegroundActivity(sessionID: session.id)
-                setErrorMessage("重试失败：WebSocket 未连接")
+                setErrorMessage(L10n.text("ui.retry_failed_websocket_not_connected"))
                 return false
             }
             return true
@@ -1482,7 +1482,7 @@ extension SessionStore {
         if let reconnectSessionID {
             markDispatchingQueuedTurnsNeedsConfirmation(
                 sessionID: reconnectSessionID,
-                message: "App 已进入后台，发送结果需要确认"
+                message: L10n.text("ui.the_app_has_entered_the_background_and_confirmation")
             )
         }
         // iOS 可能在后台直接挂起 URLSession，未必及时回调断线。主动退役连接可避免回前台
@@ -1514,7 +1514,7 @@ extension SessionStore {
             if let reconnectSessionID, sessionsByID[reconnectSessionID] != nil {
                 networkSuspendedSessionID = reconnectSessionID
             }
-            setStatusMessage("网络不可用，恢复后自动重连")
+            setStatusMessage(L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
             return
         }
         // 回前台同样可能赶上 gateway 还没恢复；做几秒的高频重试，避免单次失败后又卡到下次切换。
@@ -1546,7 +1546,7 @@ extension SessionStore {
             return
         }
         guard canControlSession(session) else {
-            setErrorMessage("这个会话正在其他客户端运行。请先接管到 iPad，再停止。")
+            setErrorMessage(L10n.text("ui.this_session_is_running_on_another_client_please"))
             return
         }
         do {
@@ -1560,9 +1560,9 @@ extension SessionStore {
             clearForegroundActivity(sessionID: session.id)
             clearRuntimeActivity(sessionID: session.id)
             cancelQueuedRunningTurns(sessionID: session.id, markMessagesFailed: true)
-            conversationStore.appendSystem("会话已停止。", sessionID: session.id)
+            conversationStore.appendSystem(L10n.text("ui.the_session_has_been_stopped"), sessionID: session.id)
             disconnectWebSocket()
-            setStatusMessage("已停止会话")
+            setStatusMessage(L10n.text("ui.session_stopped"))
         } catch {
             setErrorMessage(error.localizedDescription)
         }
@@ -1596,11 +1596,11 @@ extension SessionStore {
     ) async -> Bool {
         let normalizedObjective = objective?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let normalizedObjective, normalizedObjective.isEmpty {
-            threadGoalErrorMessage = "目标内容不能为空"
+            threadGoalErrorMessage = L10n.text("ui.target_content_cannot_be_empty")
             return false
         }
         if let tokenBudget, tokenBudget <= 0 {
-            threadGoalErrorMessage = "Token 预算必须大于 0"
+            threadGoalErrorMessage = L10n.text("ui.token_budget_must_be_greater_than_0")
             return false
         }
         isUpdatingThreadGoal = true
@@ -1617,7 +1617,7 @@ extension SessionStore {
                 clearLocalCompletedGoalMark(goal, sessionID: threadID)
             }
             applyThreadGoal(goal, fallbackSessionID: threadID, respectsLocalCompletion: false)
-            setStatusMessage("目标已更新")
+            setStatusMessage(L10n.text("ui.goal_updated"))
             return true
         } catch {
             threadGoalErrorMessage = error.localizedDescription
@@ -1655,7 +1655,7 @@ extension SessionStore {
         do {
             try await clientFactory().clearThreadGoal(threadID: sessionID)
             clearThreadGoal(sessionID: sessionID)
-            setStatusMessage("目标已清除")
+            setStatusMessage(L10n.text("ui.target_cleared"))
         } catch {
             threadGoalErrorMessage = error.localizedDescription
             setErrorMessage(error.localizedDescription)

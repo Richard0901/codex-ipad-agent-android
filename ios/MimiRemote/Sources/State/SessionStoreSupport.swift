@@ -132,12 +132,12 @@ struct ProjectSessionListSnapshot: Equatable {
 
     var actionTitle: String {
         if isLoadingMore {
-            return "加载中..."
+            return L10n.text("ui.loading_514c33af")
         }
         if isShowingAll && visibleSessions.count >= allSessionCount && !canLoadMore {
-            return "收起显示"
+            return L10n.text("ui.show_less")
         }
-        return "显示更多"
+        return L10n.text("ui.show_more")
     }
 }
 
@@ -409,7 +409,7 @@ struct UserNotificationSessionReminderScheduler: SessionReminderScheduling {
         }
 
         let content = UNMutableNotificationContent()
-        content.title = "会话提醒"
+        content.title = L10n.text("ui.session_reminder")
         content.body = reminder.title
         content.sound = .default
         content.userInfo = route.userInfo
@@ -528,7 +528,7 @@ enum FilePreviewStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidPayload:
-            return "文件预览内容无效"
+            return L10n.text("ui.file_preview_content_is_invalid")
         }
     }
 }
@@ -541,11 +541,11 @@ enum WorktreeCleanupSelectionError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .emptySelection:
-            return "请至少选择一个可清理的 Worktree。"
+            return L10n.text("ui.please_select_at_least_one_worktree_that_can")
         case .containsBlockedPath:
-            return "清理选择已过期或包含受保护的 Worktree，请重新生成预览。"
+            return L10n.text("ui.the_cleanup_selection_is_expired_or_contains_a")
         case .missingPlan:
-            return "清理预览缺少 plan_id，请重新生成预览。"
+            return L10n.text("ui.clean_preview_is_missing_plan_id_please_regenerate")
         }
     }
 }
@@ -556,7 +556,7 @@ enum WorkspaceSessionRefreshError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .workspaceUnavailable:
-            return "工作区已失效，请重新打开"
+            return L10n.text("ui.the_workspace_has_expired_please_reopen_it")
         }
     }
 }
@@ -588,11 +588,11 @@ enum QueuedTurnIntent: Codable, Equatable {
     var title: String {
         switch self {
         case .standard:
-            return "下一轮"
+            return L10n.text("ui.next_round")
         case .plan:
-            return "计划"
+            return L10n.text("ui.plan")
         case .goal:
-            return "目标"
+            return L10n.text("ui.target")
         }
     }
 
@@ -695,11 +695,11 @@ enum QueuedTurnStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidProfile:
-            return "本地队列不属于当前 Mac 连接档案"
+            return L10n.text("ui.the_local_queue_does_not_belong_to_the")
         case .unsupportedVersion(let version):
-            return "本地队列版本不支持（v\(version)）"
+            return L10n.format("ui.the_local_queue_version_is_not_supported_v", version)
         case .storageTooLarge(let maximumBytes):
-            return "本地队列超过 \(maximumBytes / 1_024 / 1_024) MB，请先删除部分消息或图片"
+            return L10n.format("ui.the_local_queue_exceeds_value_mb_please_delete", maximumBytes / 1_024 / 1_024)
         }
     }
 }

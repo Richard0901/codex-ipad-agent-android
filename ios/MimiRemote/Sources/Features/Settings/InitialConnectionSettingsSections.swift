@@ -33,9 +33,9 @@ struct InitialConnectionSettingsSections: View {
                         connectionProfileRow(item)
                     }
                 } header: {
-                    Text("已保存的 Mac")
+                    Text(L10n.text("ui.saved_mac"))
                 } footer: {
-                    Text("同一时间只连接一台 Mac。切换前会先验证连接，访问码保存在系统钥匙串。")
+                    Text(L10n.text("ui.only_one_mac_is_connected_at_a_time"))
                 }
             }
 
@@ -44,7 +44,7 @@ struct InitialConnectionSettingsSections: View {
                 if appStore.localAgentDetected {
                     VStack(alignment: .leading, spacing: 5) {
                         Label(
-                            appStore.isUsingLocalConnection ? "已通过本机助手直连" : "已检测到这台 Mac 上的助手",
+                            appStore.isUsingLocalConnection ? L10n.text("ui.directly_connected_through_local_assistant") : L10n.text("ui.assistant_has_been_detected_on_this_mac"),
                             systemImage: "checkmark.circle.fill"
                         )
                         .font(themeStore.uiFont(.body, weight: .semibold))
@@ -60,7 +60,7 @@ struct InitialConnectionSettingsSections: View {
 #endif
                 if !appStore.isConfigured && !appStore.localAgentDetected {
                     VStack(alignment: .leading, spacing: 5) {
-                        Label("先在 Mac 启动 Mimi 助手", systemImage: "desktopcomputer")
+                        Label(L10n.text("ui.start_mimi_assistant_on_mac_first"), systemImage: "desktopcomputer")
                             .font(themeStore.uiFont(.body, weight: .semibold))
                         Text("agentd up")
                             .font(.system(.callout, design: .monospaced, weight: .medium))
@@ -81,21 +81,21 @@ struct InitialConnectionSettingsSections: View {
                 .controlSize(.large)
                 .disabled(isSavingConnection)
 
-                DisclosureGroup("Mac 端准备") {
+                DisclosureGroup(L10n.text("ui.mac_preparation")) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("首次安装")
+                        Text(L10n.text("ui.first_time_installation"))
                             .font(themeStore.uiFont(.caption, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Text("brew install gaixianggeng/tap/mimi-remote")
                             .font(.system(.callout, design: .monospaced))
                             .textSelection(.enabled)
-                        Text("启动助手并显示二维码")
+                        Text(L10n.text("ui.start_the_assistant_and_display_the_qr_code"))
                             .font(themeStore.uiFont(.caption, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Text("agentd up")
                             .font(.system(.callout, design: .monospaced))
                             .textSelection(.enabled)
-                        Text("二维码过期时运行 `agentd pair`。")
+                        Text(L10n.text("ui.run_agentd_pair_when_the_qr_code_expires"))
                             .font(themeStore.uiFont(.footnote))
                             .foregroundStyle(.secondary)
                     }
@@ -105,18 +105,18 @@ struct InitialConnectionSettingsSections: View {
                 DisclosureGroup(isExpanded: manualConnectionExpandedBinding) {
                     VStack(alignment: .leading, spacing: 12) {
                         if isAddingConnectionProfile {
-                            connectionFieldLabel("显示名称") {
-                                TextField("例如：工作室 Mac", text: $profileDisplayName)
+                            connectionFieldLabel(L10n.text("ui.display_name")) {
+                                TextField(L10n.text("ui.example_studio_mac"), text: $profileDisplayName)
                                     .textInputAutocapitalization(.words)
                                     .accessibilityIdentifier("settings.profileDisplayName")
                             }
                         }
-                        connectionFieldLabel("连接地址") {
+                        connectionFieldLabel(L10n.text("ui.connection_address")) {
                             StableEndpointTextField(placeholder: endpointPlaceholder, text: $endpoint)
                                 .frame(minHeight: 28)
                         }
-                        connectionFieldLabel("访问码") {
-                            SecureField("输入访问码", text: $token)
+                        connectionFieldLabel(L10n.text("ui.access_code")) {
+                            SecureField(L10n.text("ui.enter_access_code"), text: $token)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                         }
@@ -129,7 +129,7 @@ struct InitialConnectionSettingsSections: View {
                                     ProgressView()
                                         .controlSize(.small)
                                 }
-                                Text(isSavingConnection ? "正在连接…" : manualSaveButtonTitle)
+                                Text(isSavingConnection ? L10n.text("ui.connecting") : manualSaveButtonTitle)
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -142,9 +142,9 @@ struct InitialConnectionSettingsSections: View {
                     Label(manualConnectionTitle, systemImage: "keyboard")
                 }
             } header: {
-                Text(appStore.isConfigured ? "添加 Mac" : "连接 Mac")
+                Text(appStore.isConfigured ? L10n.text("ui.add_mac") : L10n.text("ui.connect_to_mac"))
             } footer: {
-                Text("推荐扫码连接；会自动验证新连接，失败时保留当前 Mac。")
+                Text(L10n.text("ui.it_is_recommended_to_scan_the_qr_code"))
             }
             // Form 会把透明 Group 展开成多个 Section。所有弹窗必须挂在这个始终存在的
             // 具体 Section 上，确保已连接时新增的“已保存/状态”Section 不会生成多个 presenter。
@@ -164,7 +164,7 @@ struct InitialConnectionSettingsSections: View {
                 }
             }
             .confirmationDialog(
-                pendingRemovalConfirmation?.title ?? "确认删除连接凭据？",
+                pendingRemovalConfirmation?.title ?? L10n.text("ui.confirm_to_delete_connection_credentials"),
                 isPresented: removalConfirmationBinding,
                 titleVisibility: .visible,
                 presenting: pendingRemovalConfirmation
@@ -174,7 +174,7 @@ struct InitialConnectionSettingsSections: View {
                 }
                 .accessibilityIdentifier(removalConfirmationAccessibilityIdentifier(confirmation))
 
-                Button("取消", role: .cancel) {
+                Button(L10n.text("ui.cancel"), role: .cancel) {
                     pendingRemovalConfirmation = nil
                 }
             } message: { confirmation in
@@ -184,7 +184,7 @@ struct InitialConnectionSettingsSections: View {
             if shouldShowConnectionStatus {
                 Section {
                     HStack {
-                        Label("连接状态", systemImage: connectionStatusSystemImage)
+                        Label(L10n.text("ui.connection_status"), systemImage: connectionStatusSystemImage)
                         Spacer()
                         if isConnectionTesting {
                             ProgressView()
@@ -200,16 +200,16 @@ struct InitialConnectionSettingsSections: View {
                     }
 
                     if connectionTestDurationText != nil || appStore.lastConnectionTestReport != nil {
-                        DisclosureGroup("连接诊断") {
+                        DisclosureGroup(L10n.text("ui.connection_diagnostics")) {
                             if let connectionTestDurationText {
-                                LabeledContent("测试耗时", value: connectionTestDurationText)
+                                LabeledContent(L10n.text("ui.testing_time"), value: connectionTestDurationText)
                                     .foregroundStyle(statusColor)
                             }
                             if let report = appStore.lastConnectionTestReport {
                                 if let failedStage = report.failedStage {
-                                    connectionStageSummaryRow(title: "失败环节", stage: failedStage, color: .red)
+                                    connectionStageSummaryRow(title: L10n.text("ui.failure_link"), stage: failedStage, color: .red)
                                 } else if let slowestStage = report.slowestStage {
-                                    connectionStageSummaryRow(title: "最慢环节", stage: slowestStage, color: tokens.warning)
+                                    connectionStageSummaryRow(title: L10n.text("ui.slowest_link"), stage: slowestStage, color: tokens.warning)
                                 }
                                 if appStore.recentConnectionTestReports.count > 1,
                                    let unstableStage = appStore.mostUnstableConnectionTestStage {
@@ -227,7 +227,7 @@ struct InitialConnectionSettingsSections: View {
                         }
                     }
                 } header: {
-                    Text("状态")
+                    Text(L10n.text("ui.status"))
                 }
             }
 
@@ -236,7 +236,7 @@ struct InitialConnectionSettingsSections: View {
                 Button {
                     appStore.enterDebugWorkbenchWithoutPairing()
                 } label: {
-                    Label("Debug 进入工作台", systemImage: "wrench.and.screwdriver")
+                    Label(L10n.text("ui.debug_enter_the_workbench"), systemImage: "wrench.and.screwdriver")
                 }
             }
 #endif
@@ -282,43 +282,43 @@ struct InitialConnectionSettingsSections: View {
     }
 
     private var primaryScanButtonTitle: String {
-        appStore.isConfigured ? "扫描二维码添加 Mac" : "扫描二维码连接"
+        appStore.isConfigured ? L10n.text("ui.scan_qr_code_to_add_mac") : L10n.text("ui.scan_the_qr_code_to_connect")
     }
 
     private var localAgentPairingHint: String {
         switch appStore.connectionStatus {
         case .testing:
-            return "正在自动领取本机凭据并验证 Codex 连接…"
+            return L10n.text("ui.automatically_claiming_local_credentials_and_verifying_codex_connection")
         case .failed:
-            return "自动连接未完成；请升级并重启 agentd，或通过扫码连接。"
+            return L10n.text("ui.the_automatic_connection_is_not_completed_please_upgrade")
         case .idle, .connected:
-            return "将自动连接本机助手；旧版助手仍可通过扫码完成配对。"
+            return L10n.text("ui.the_local_assistant_will_be_automatically_connected_older")
         }
     }
 
     private var endpointPlaceholder: String {
 #if targetEnvironment(macCatalyst)
-        "本机或 Tailscale 地址"
+        L10n.text("ui.native_or_tailscale_address")
 #else
-        "Tailscale 地址"
+        L10n.text("ui.tailscale_address")
 #endif
     }
 
     private var manualConnectionTitle: String {
         guard appStore.activeConnectionProfile != nil else {
-            return "手动连接"
+            return L10n.text("ui.manual_connection")
         }
         if !isShowingAdvancedManualConnection || isAddingConnectionProfile {
-            return "手动添加 Mac"
+            return L10n.text("ui.add_mac_manually")
         }
-        return "手动更新当前 Mac"
+        return L10n.text("ui.manually_update_your_current_mac")
     }
 
     private var manualSaveButtonTitle: String {
         if isAddingConnectionProfile {
-            return "添加并连接"
+            return L10n.text("ui.add_and_connect")
         }
-        return appStore.isConfigured ? "更新连接" : "连接"
+        return appStore.isConfigured ? L10n.text("ui.update_connection") : L10n.text("ui.connect")
     }
 
     private func connectionFieldLabel<Content: View>(
@@ -382,14 +382,14 @@ struct InitialConnectionSettingsSections: View {
             Spacer(minLength: 8)
 
             if item.isCurrent {
-                Label("当前", systemImage: "checkmark.circle.fill")
+                Label(L10n.text("ui.current_label"), systemImage: "checkmark.circle.fill")
                     .font(themeStore.uiFont(.caption, weight: .semibold))
                     .foregroundStyle(themeStore.tokens(for: colorScheme).success)
             } else if profileOperationID == item.id {
                 ProgressView()
                     .controlSize(.small)
             } else {
-                Button("切换") {
+                Button(L10n.text("ui.switch")) {
                     Task { await switchConnectionProfile(id: item.id) }
                 }
                 .buttonStyle(.bordered)
@@ -399,22 +399,22 @@ struct InitialConnectionSettingsSections: View {
             }
 
             Menu {
-                Button("重命名") {
+                Button(L10n.text("ui.rename")) {
                     profileRenameTarget = item.profile
                 }
                 .accessibilityIdentifier("settings.profile.rename.\(item.id)")
 
                 if item.isCurrent {
-                    Button("重新扫码配对") {
+                    Button(L10n.text("ui.scan_the_qr_code_again_to_pair")) {
                         beginRepairingCurrentProfile()
                     }
                     Divider()
-                    Button("忘记这台 Mac", role: .destructive) {
+                    Button(L10n.text("ui.forget_this_mac"), role: .destructive) {
                         pendingRemovalConfirmation = .forgettingCurrent(item.profile)
                     }
                     .accessibilityIdentifier("settings.connection.forget")
                 } else {
-                    Button("删除", role: .destructive) {
+                    Button(L10n.text("ui.delete"), role: .destructive) {
                         pendingRemovalConfirmation = .deletingSavedProfile(item.profile)
                     }
                     .accessibilityIdentifier("settings.profile.delete.\(item.id)")
@@ -425,7 +425,7 @@ struct InitialConnectionSettingsSections: View {
                     .frame(width: 30, height: 30)
             }
             .disabled(isSavingConnection || profileOperationID != nil)
-            .accessibilityLabel("管理 \(item.profile.displayName)")
+            .accessibilityLabel(L10n.format("ui.manage_value", item.profile.displayName))
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("settings.profile.\(item.id)")
@@ -462,7 +462,7 @@ struct InitialConnectionSettingsSections: View {
 
     private func connectionStabilityRow(_ stability: ConnectionTestStageStability) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Text("最近波动")
+            Text(L10n.text("ui.recent_fluctuations"))
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 3) {
                 Text(stability.kind.title)
@@ -480,9 +480,19 @@ struct InitialConnectionSettingsSections: View {
         let spread = AppStore.connectionTestDurationText(milliseconds: stability.spreadMillis)
         let max = AppStore.connectionTestDurationText(milliseconds: stability.maxMillis)
         if stability.failureCount > 0 {
-            return "\(stability.sampleCount) 次 · 失败 \(stability.failureCount) 次 · 最大 \(max)"
+            return L10n.format(
+                "ui.connection_test_stability_failure_summary",
+                L10n.plural("ui.connection_test_samples_count", count: stability.sampleCount),
+                L10n.plural("ui.connection_test_failures_count", count: stability.failureCount),
+                max
+            )
         }
-        return "\(stability.sampleCount) 次 · 波动 \(spread) · 最大 \(max)"
+        return L10n.format(
+            "ui.connection_test_stability_summary",
+            L10n.plural("ui.connection_test_samples_count", count: stability.sampleCount),
+            spread,
+            max
+        )
     }
 
     private func connectionStageRow(_ stage: ConnectionTestStageTiming) -> some View {
@@ -516,7 +526,7 @@ struct InitialConnectionSettingsSections: View {
         case .succeeded:
             return duration
         case .failed:
-            return "失败 · \(duration)"
+            return L10n.format("ui.failure_value", duration)
         }
     }
 
@@ -535,17 +545,21 @@ struct InitialConnectionSettingsSections: View {
 
         if diagnostics.failedUpstreamDialsDelta > 0 {
             connectionGatewayMetricRow(
-                title: "上游拨号失败",
-                detail: "本次测试新增失败，累计最大耗时",
-                value: "\(diagnostics.failedUpstreamDialsDelta) 次 · \(AppStore.connectionTestDurationText(milliseconds: diagnostics.upstreamDialMillisMax))",
+                title: L10n.text("ui.upstream_dialup_failed"),
+                detail: L10n.text("ui.this_test_failed_to_add_a_new_addition"),
+                value: L10n.format(
+                    "ui.connection_test_upstream_dial_failures",
+                    L10n.plural("ui.upstream_dial_failures_count", count: diagnostics.failedUpstreamDialsDelta),
+                    AppStore.connectionTestDurationText(milliseconds: diagnostics.upstreamDialMillisMax)
+                ),
                 color: .red
             )
         }
 
         if let connection = diagnostics.relatedConnection {
             connectionGatewayMetricRow(
-                title: "Mac 上游拨号",
-                detail: "agentd 到本机 app-server",
+                title: L10n.text("ui.mac_upstream_dialing"),
+                detail: L10n.text("ui.agentd_to_local_app_server"),
                 value: AppStore.connectionTestDurationText(milliseconds: connection.upstreamDialMillis),
                 color: gatewayMetricColor(milliseconds: connection.upstreamDialMillis)
             )
@@ -553,7 +567,7 @@ struct InitialConnectionSettingsSections: View {
 
         if let rpc = diagnostics.latestRPC {
             connectionGatewayMetricRow(
-                title: "最近 RPC",
+                title: L10n.text("ui.recent_rpcs"),
                 detail: rpc.method.isEmpty ? "app-server JSON-RPC" : rpc.method,
                 value: AppStore.connectionTestDurationText(milliseconds: rpc.latencyMillis),
                 color: gatewayMetricColor(milliseconds: rpc.latencyMillis)
@@ -562,17 +576,17 @@ struct InitialConnectionSettingsSections: View {
 
         if diagnostics.rpcOutstandingRequests > 0 {
             connectionGatewayMetricRow(
-                title: "等待上游",
-                detail: "app-server 仍未返回响应",
-                value: "\(diagnostics.rpcOutstandingRequests) 个 · \(AppStore.connectionTestDurationText(milliseconds: diagnostics.rpcOutstandingMillisMax))",
+                title: L10n.text("ui.waiting_for_upstream"),
+                detail: L10n.text("ui.app_server_still_hasn_t_returned_a_response"),
+                value: L10n.format("ui.value_value", diagnostics.rpcOutstandingRequests, AppStore.connectionTestDurationText(milliseconds: diagnostics.rpcOutstandingMillisMax)),
                 color: themeStore.tokens(for: colorScheme).warning
             )
         }
 
         if diagnostics.writeBackMillisMax > 0 {
             connectionGatewayMetricRow(
-                title: "写回 iPad",
-                detail: "agentd gateway 写给当前设备",
+                title: L10n.text("ui.write_back_to_ipad"),
+                detail: L10n.text("ui.agentd_gateway_is_written_to_the_current_device"),
                 value: AppStore.connectionTestDurationText(milliseconds: diagnostics.writeBackMillisMax),
                 color: gatewayMetricColor(milliseconds: diagnostics.writeBackMillisMax)
             )
@@ -581,7 +595,7 @@ struct InitialConnectionSettingsSections: View {
         if let closeReason = diagnostics.relatedConnection?.closeReason,
            !closeReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             connectionGatewayMetricRow(
-                title: "最近断开",
+                title: L10n.text("ui.recently_disconnected"),
                 detail: closeReason,
                 value: nil,
                 color: .secondary
@@ -598,7 +612,7 @@ struct InitialConnectionSettingsSections: View {
     private func connectionGatewaySummaryRow(_ diagnostics: ConnectionTestGatewayDiagnostics) -> some View {
         let summary = gatewayDiagnosticSummary(diagnostics)
         return HStack(alignment: .top, spacing: 12) {
-            Text("Gateway 判断")
+            Text(L10n.text("ui.gateway_judgment"))
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 3) {
                 Text(summary.title)
@@ -635,7 +649,7 @@ struct InitialConnectionSettingsSections: View {
 
     private func connectionGatewayDiagnosticsErrorRow(_ error: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Text("Gateway 诊断")
+            Text(L10n.text("ui.gateway_diagnostics"))
             Spacer(minLength: 12)
             Text(error)
                 .font(themeStore.uiFont(.footnote))
@@ -659,15 +673,15 @@ struct InitialConnectionSettingsSections: View {
         let warning = themeStore.tokens(for: colorScheme).warning
         if diagnostics.failedUpstreamDialsDelta > 0 {
             return GatewayDiagnosticSummary(
-                title: "上游拨号失败",
-                detail: "agentd 连本机 app-server 失败",
+                title: L10n.text("ui.upstream_dialup_failed"),
+                detail: L10n.text("ui.agentd_failed_to_connect_to_local_app_server"),
                 color: .red
             )
         }
         if diagnostics.rpcOutstandingRequests > 0 && diagnostics.rpcOutstandingMillisMax >= 2_000 {
             return GatewayDiagnosticSummary(
-                title: "上游未返回",
-                detail: "请求已进 app-server，响应还没回来",
+                title: L10n.text("ui.upstream_did_not_return"),
+                detail: L10n.text("ui.the_request_has_been_sent_to_app_server"),
                 color: warning
             )
         }
@@ -675,36 +689,36 @@ struct InitialConnectionSettingsSections: View {
            rpc.latencyMillis >= 1_000 {
             let method = rpc.method.isEmpty ? "app-server JSON-RPC" : rpc.method
             return GatewayDiagnosticSummary(
-                title: "RPC 返回慢",
-                detail: "\(method) 返回耗时偏高",
+                title: L10n.text("ui.rpc_returns_slowly"),
+                detail: L10n.format("ui.value_return_time_is_high", method),
                 color: gatewayMetricColor(milliseconds: rpc.latencyMillis)
             )
         }
         if diagnostics.writeBackMillisMax >= 500 {
             return GatewayDiagnosticSummary(
-                title: "写回链路慢",
-                detail: "优先检查 iPad 与 Tailscale 网络",
+                title: L10n.text("ui.write_back_link_slow"),
+                detail: L10n.text("ui.prioritize_checking_ipads_and_tailscale_networks"),
                 color: gatewayMetricColor(milliseconds: diagnostics.writeBackMillisMax)
             )
         }
         if let connection = diagnostics.relatedConnection,
            connection.upstreamDialMillis >= 500 {
             return GatewayDiagnosticSummary(
-                title: "本机拨号慢",
-                detail: "agentd 到 app-server 建连偏慢",
+                title: L10n.text("ui.local_dialing_is_slow"),
+                detail: L10n.text("ui.agentd_is_slow_to_establish_a_connection_to"),
                 color: gatewayMetricColor(milliseconds: connection.upstreamDialMillis)
             )
         }
         if diagnostics.totalConnectionsDelta > 0 {
             return GatewayDiagnosticSummary(
-                title: "本次有新连接",
-                detail: "未见明显 gateway 瓶颈",
+                title: L10n.text("ui.there_is_a_new_connection_this_time"),
+                detail: L10n.text("ui.no_obvious_gateway_bottleneck_found"),
                 color: .secondary
             )
         }
         return GatewayDiagnosticSummary(
-            title: "无新增样本",
-            detail: "继续复现慢场景再看快照",
+            title: L10n.text("ui.no_new_samples"),
+            detail: L10n.text("ui.continue_to_reproduce_the_slow_scene_and_look"),
             color: .secondary
         )
     }
@@ -735,21 +749,43 @@ struct InitialConnectionSettingsSections: View {
         }
         let lowercased = raw.lowercased()
         if lowercased.contains("expired") || raw.contains("过期") {
-            return "配对二维码已过期，请在 Mac 上重新运行 agentd pair 后扫码。"
+            return L10n.text("ui.the_pairing_qr_code_has_expired_please_re")
         }
         if lowercased.contains("unauthorized") || lowercased.contains("401") {
-            return "这台设备没有通过 Mac 助手验证，请重新扫码连接。"
+            return L10n.text("ui.this_device_has_not_been_verified_by_mac")
         }
         if lowercased.contains("timed out") || lowercased.contains("cannot connect") || raw.contains("无法连接") {
-            return "当前设备暂时找不到这台 Mac。请确认 Mimi Mac 助手正在运行，并且当前设备已连接 Tailscale。"
+            return L10n.text("ui.the_current_device_cannot_find_this_mac_at")
         }
-        if raw.contains("Endpoint") || raw.contains("连接链接") {
+        if raw == L10n.text("ui.the_connection_credentials_have_been_saved_safely_but") ||
+            raw.contains("连接凭据已安全保存") {
+            // Old builds persisted this message in Chinese. Always return the current locale's
+            // copy so an English screen never echoes that legacy raw value.
+            return L10n.text("ui.the_connection_credentials_have_been_saved_safely_but")
+        }
+        let localizedConnectionLinkKeys = [
+            "ui.invalid_connection_link",
+            "ui.the_connection_link_is_missing_the_access_code",
+            "ui.the_link_is_missing_an_address",
+            "ui.the_connection_address_format_is_invalid",
+            "ui.the_connection_address_is_invalid_please_enter_the"
+        ]
+        if localizedConnectionLinkKeys.contains(where: { raw == L10n.text($0) }) || raw.contains("Endpoint") {
             return raw
         }
-        if raw.contains("连接凭据已安全保存") {
-            return raw
+        if raw.contains("连接链接缺少访问码") {
+            return L10n.text("ui.the_connection_link_is_missing_the_access_code")
         }
-        return "连接没有完成。请确认 Mac 助手正在运行，或重新扫描 Mac 上的配对二维码。"
+        if raw.contains("连接链接缺少地址") {
+            return L10n.text("ui.the_link_is_missing_an_address")
+        }
+        if raw.contains("连接地址格式无效") {
+            return L10n.text("ui.the_connection_address_format_is_invalid")
+        }
+        if raw.contains("连接地址") || raw.contains("连接链接") {
+            return L10n.text("ui.invalid_connection_link")
+        }
+        return L10n.text("ui.the_connection_was_not_completed_please_confirm_that")
     }
 
     private func loadInitialConnectionIfNeeded() {
@@ -828,7 +864,7 @@ struct InitialConnectionSettingsSections: View {
         case .current(let expectedProfileID):
             guard expectedProfileID == appStore.activeConnectionProfileID else {
                 // 弹窗展示期间连接可能被 URL Scheme 或其它入口切换；不能误删后来成为当前的档案。
-                localError = "当前 Mac 已发生变化，请重新操作。"
+                localError = L10n.text("ui.the_current_mac_has_changed_please_try_again")
                 return
             }
             clearPairing()
@@ -908,13 +944,13 @@ struct InitialConnectionSettingsSections: View {
             }
             return .accepted(
                 wasAddingConnectionProfile
-                    ? "已添加并切换到这台 Mac"
-                    : "已连接这台 Mac"
+                    ? L10n.text("ui.added_and_switched_to_this_mac")
+                    : L10n.text("ui.this_mac_is_connected")
             )
         } catch is CancellationError {
             isSavingConnection = false
             localError = nil
-            return .rejected("扫码已取消，请重新扫描 Mac 上的二维码。")
+            return .rejected(L10n.text("ui.the_code_scan_has_been_cancelled_please_scan"))
         } catch {
             isSavingConnection = false
             appStore.connectionStatus = .failed(error.localizedDescription)
@@ -948,4 +984,3 @@ struct InitialConnectionSettingsSections: View {
         }
     }
 }
-

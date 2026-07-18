@@ -11,7 +11,7 @@ struct SessionInspectorView: View {
 
         VStack(spacing: 0) {
             header
-            Picker("Inspector", selection: $selectedSection) {
+            Picker(L10n.text("ui.inspector"), selection: $selectedSection) {
                 ForEach(SessionInspectorSection.allCases) { section in
                     Image(systemName: section.symbolName)
                         .font(themeStore.uiFont(size: 14, weight: .semibold))
@@ -89,7 +89,7 @@ struct SessionInspectorView: View {
     }
 
     private var sessionSubtitle: String {
-        sessionStore.selectedSession?.title ?? sessionStore.selectedProject?.name ?? "未选择会话"
+        sessionStore.selectedSession?.title ?? sessionStore.selectedProject?.name ?? L10n.text("ui.no_session_selected")
     }
 }
 
@@ -103,11 +103,11 @@ private enum SessionInspectorSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .overview:
-            return "概览"
+            return L10n.text("ui.overview")
         case .changes:
-            return "变更"
+            return L10n.text("ui.change")
         case .activity:
-            return "活动"
+            return L10n.text("ui.activities")
         }
     }
 
@@ -148,9 +148,9 @@ private enum RuntimeActivityMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .entries:
-            return "条目"
+            return L10n.text("ui.entry")
         case .output:
-            return "原始输出"
+            return L10n.text("ui.raw_output")
         }
     }
 }
@@ -167,7 +167,7 @@ private struct RuntimeActivityPanelView: View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         VStack(spacing: 0) {
-            Picker("活动", selection: $selectedMode) {
+            Picker(L10n.text("ui.activities"), selection: $selectedMode) {
                 ForEach(RuntimeActivityMode.allCases) { mode in
                     Text(mode.title).tag(mode)
                 }
@@ -195,7 +195,7 @@ private struct RuntimeActivityPanelView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
                 if runtimeMessages.isEmpty {
-                    ContentUnavailableView("暂无活动条目", systemImage: "list.bullet.rectangle")
+                    ContentUnavailableView(L10n.text("ui.no_active_entries_yet"), systemImage: "list.bullet.rectangle")
                         .font(themeStore.uiFont(.caption))
                         .padding(.top, 48)
                 } else {
@@ -219,7 +219,7 @@ private struct RuntimeActivityPanelView: View {
         VStack(spacing: 0) {
             HStack {
                 Spacer()
-                Toggle("自动滚动", isOn: $logStore.autoScroll)
+                Toggle(L10n.text("ui.autoscroll"), isOn: $logStore.autoScroll)
                     .toggleStyle(.switch)
                     .font(themeStore.uiFont(.caption))
             }
@@ -247,23 +247,23 @@ private struct RuntimeActivityPanelView: View {
     private func title(for kind: MessageKind) -> String {
         switch kind {
         case .commentary:
-            return "过程说明"
+            return L10n.text("ui.process_description")
         case .plan:
-            return "计划"
+            return L10n.text("ui.plan")
         case .reasoningSummary:
-            return "推理摘要"
+            return L10n.text("ui.reasoning_summary")
         case .commandSummary:
-            return "命令 / 工具"
+            return L10n.text("ui.command_tool")
         case .fileChangeSummary:
-            return "文件变更"
+            return L10n.text("ui.file_changes")
         case .approval:
-            return "审批"
+            return L10n.text("ui.approval")
         case .userInput:
-            return "补充信息"
+            return L10n.text("ui.supplementary_information")
         case .error:
-            return "运行异常"
+            return L10n.text("ui.abnormal_operation")
         case .message:
-            return "消息"
+            return L10n.text("ui.news")
         }
     }
 

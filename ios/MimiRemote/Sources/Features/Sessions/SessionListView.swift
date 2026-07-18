@@ -15,10 +15,10 @@ enum SessionLibraryStatusFilter: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .all: return "全部状态"
-        case .active: return "运行中"
-        case .needsAttention: return "需要处理"
-        case .history: return "历史"
+        case .all: return L10n.text("ui.all_status")
+        case .active: return L10n.text("ui.running")
+        case .needsAttention: return L10n.text("ui.need_to_be_processed")
+        case .history: return L10n.text("ui.history")
         }
     }
 
@@ -70,7 +70,7 @@ struct SessionListView: View {
                 if sessionStore.isSessionSearchActive && sessionStore.isSearchingRemoteSessionResults {
                     VStack(spacing: 10) {
                         ProgressView()
-                        Text("正在搜索历史会话…")
+                        Text(L10n.text("ui.searching_historical_conversations"))
                             .font(themeStore.uiFont(size: 13, weight: .medium))
                             .foregroundStyle(tokens.secondaryText)
                     }
@@ -81,11 +81,11 @@ struct SessionListView: View {
                     .listRowSeparator(.hidden)
                 } else {
                     ContentUnavailableView {
-                        Label("没有匹配的会话", systemImage: "bubble.left.and.bubble.right")
+                        Label(L10n.text("ui.no_matching_session"), systemImage: "bubble.left.and.bubble.right")
                     } description: {
-                        Text(sessionStore.isSessionSearchActive ? "换个关键词或筛选条件试试。" : "从一个工作区创建新会话后会显示在这里。")
+                        Text(sessionStore.isSessionSearchActive ? L10n.text("ui.try_changing_keywords_or_filter_conditions") : L10n.text("ui.new_sessions_created_from_a_workspace_appear_here"))
                     } actions: {
-                        Button("新会话", action: presentNewSession)
+                        Button(L10n.text("ui.new_session"), action: presentNewSession)
                             .buttonStyle(.borderedProminent)
                             .tint(tokens.primaryAction)
                     }
@@ -98,7 +98,7 @@ struct SessionListView: View {
                         sessionRows(sessionPartition.active)
                     } header: {
                         sessionSectionHeader(
-                            title: "进行中",
+                            title: L10n.text("ui.in_progress"),
                             systemImage: "bolt.fill",
                             count: sessionPartition.active.count,
                             color: tokens.primaryAction
@@ -111,7 +111,7 @@ struct SessionListView: View {
                         sessionRows(sessionPartition.history)
                     } header: {
                         sessionSectionHeader(
-                            title: "历史",
+                            title: L10n.text("ui.history"),
                             systemImage: "clock.arrow.circlepath",
                             count: sessionPartition.history.count,
                             color: tokens.tertiaryText
@@ -132,7 +132,7 @@ struct SessionListView: View {
                         } else {
                             Image(systemName: "magnifyingglass")
                         }
-                        Text(sessionStore.isLoadingMoreSessionSearchResults ? "正在继续搜索…" : "继续搜索")
+                        Text(sessionStore.isLoadingMoreSessionSearchResults ? L10n.text("ui.searching_continues") : L10n.text("ui.continue_searching"))
                     }
                     .font(themeStore.uiFont(size: 13, weight: .medium))
                     .frame(maxWidth: .infinity)
@@ -150,9 +150,9 @@ struct SessionListView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(tokens.background.ignoresSafeArea())
-        .navigationTitle("会话")
+        .navigationTitle(L10n.text("ui.session"))
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $sessionStore.sessionSearchQuery, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "搜索会话")
+        .searchable(text: $sessionStore.sessionSearchQuery, placement: .navigationBarDrawer(displayMode: .automatic), prompt: L10n.text("ui.search_session"))
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 filterMenu(tokens: tokens)
@@ -160,7 +160,7 @@ struct SessionListView: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 sessionListToolbarButton(
                     systemImage: "arrow.clockwise",
-                    accessibilityLabel: "刷新会话库",
+                    accessibilityLabel: L10n.text("ui.refresh_session_library"),
                     tokens: tokens
                 ) {
                     Task { await sessionStore.refreshSessionLibraryIndex() }
@@ -168,7 +168,7 @@ struct SessionListView: View {
 
                 sessionListToolbarButton(
                     systemImage: "plus",
-                    accessibilityLabel: "新建会话",
+                    accessibilityLabel: L10n.text("ui.new_session_3da224c4"),
                     tokens: tokens,
                     isPrimary: true,
                     action: presentNewSession
@@ -253,11 +253,11 @@ struct SessionListView: View {
 
     private func filterMenu(tokens: ThemeTokens) -> some View {
         Menu {
-            Section("工作区") {
+            Section(L10n.text("ui.workspace")) {
                 Button {
                     selectedWorkspaceID = "all"
                 } label: {
-                    Label("全部工作区", systemImage: selectedWorkspaceID == "all" ? "checkmark" : "folder")
+                    Label(L10n.text("ui.all_workspaces"), systemImage: selectedWorkspaceID == "all" ? "checkmark" : "folder")
                 }
                 ForEach(sessionStore.sidebarProjects) { project in
                     Button {
@@ -267,7 +267,7 @@ struct SessionListView: View {
                     }
                 }
             }
-            Section("状态") {
+            Section(L10n.text("ui.status")) {
                 ForEach(SessionLibraryStatusFilter.allCases) { filter in
                     Button {
                         selectedStatus = filter
@@ -280,7 +280,7 @@ struct SessionListView: View {
             Label(filterTitle, systemImage: "line.3.horizontal.decrease")
                 .foregroundStyle(tokens.secondaryText)
         }
-        .accessibilityLabel("筛选会话")
+        .accessibilityLabel(L10n.text("ui.filter_sessions"))
     }
 
     private var filterTitle: String {
@@ -288,7 +288,7 @@ struct SessionListView: View {
            let project = sessionStore.sidebarProjects.first(where: { $0.id == selectedWorkspaceID }) {
             return project.name
         }
-        return selectedStatus == .all ? "筛选" : selectedStatus.title
+        return selectedStatus == .all ? L10n.text("ui.filter") : selectedStatus.title
     }
 
     private func presentNewSession() {
@@ -363,7 +363,7 @@ struct SessionIndexRow: View {
                 if isObserving {
                     Image(systemName: "eye")
                         .foregroundStyle(tokens.tertiaryText)
-                        .accessibilityLabel("仅观察")
+                        .accessibilityLabel(L10n.text("ui.just_observe"))
                 }
 
                 if style == .sidebar {
@@ -479,15 +479,15 @@ struct SessionIndexRow: View {
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "HH:mm"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate("Hm")
         return formatter
     }()
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "M月d日"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate("Md")
         return formatter
     }()
 }
@@ -508,14 +508,14 @@ private struct SessionRowActions: ViewModifier {
                 Button {
                     sessionStore.takeOverSession(session)
                 } label: {
-                    Label("接管到 iPad", systemImage: "hand.raised.fill")
+                    Label(L10n.text("ui.take_over_to_ipad"), systemImage: "hand.raised.fill")
                 }
             }
 
             Button {
                 sessionStore.toggleSessionPinned(session)
             } label: {
-                Label(isPinned ? "取消置顶" : "置顶", systemImage: isPinned ? "pin.slash" : "pin")
+                Label(isPinned ? L10n.text("ui.unpin") : L10n.text("ui.pin_to_top"), systemImage: isPinned ? "pin.slash" : "pin")
             }
 
             if sessionStore.supportsCodexThreadManagement(session) {
@@ -524,20 +524,20 @@ private struct SessionRowActions: ViewModifier {
                 Button {
                     renameTarget = SessionRenameTarget(session: session)
                 } label: {
-                    Label("重命名", systemImage: "pencil")
+                    Label(L10n.text("ui.rename"), systemImage: "pencil")
                 }
 
                 Button {
                     Task { await sessionStore.compactSessionContext(session) }
                 } label: {
-                    Label("压缩上下文", systemImage: "arrow.down.right.and.arrow.up.left")
+                    Label(L10n.text("ui.compression_context"), systemImage: "arrow.down.right.and.arrow.up.left")
                 }
                 .disabled(session.isRunning)
 
                 Button {
                     reviewPresentation = SessionReviewPresentation(session: session)
                 } label: {
-                    Label("开始代码审查", systemImage: "checklist.checked")
+                    Label(L10n.text("ui.start_code_review"), systemImage: "checklist.checked")
                 }
                 .disabled(session.isRunning)
             }
@@ -545,25 +545,25 @@ private struct SessionRowActions: ViewModifier {
             Button {
                 Task { await sessionStore.handoffSessionToWorktree(session) }
             } label: {
-                Label("转到新 Git Worktree", systemImage: "arrow.triangle.branch")
+                Label(L10n.text("ui.go_to_the_new_git_worktree"), systemImage: "arrow.triangle.branch")
             }
             .disabled(session.isRunning || sessionStore.isCreatingWorktree)
 
             Menu {
-                Button("30 分钟后") { Task { await sessionStore.scheduleSessionReminder(session, after: 30 * 60) } }
-                Button("2 小时后") { Task { await sessionStore.scheduleSessionReminder(session, after: 2 * 60 * 60) } }
-                Button("明天") { Task { await sessionStore.scheduleSessionReminder(session, after: 24 * 60 * 60) } }
+                Button(L10n.text("ui.30_minutes_later")) { Task { await sessionStore.scheduleSessionReminder(session, after: 30 * 60) } }
+                Button(L10n.text("ui.2_hours_later")) { Task { await sessionStore.scheduleSessionReminder(session, after: 2 * 60 * 60) } }
+                Button(L10n.text("ui.tomorrow")) { Task { await sessionStore.scheduleSessionReminder(session, after: 24 * 60 * 60) } }
                 if reminder != nil {
-                    Button("清除提醒", role: .destructive) { sessionStore.clearSessionReminder(session) }
+                    Button(L10n.text("ui.clear_reminder"), role: .destructive) { sessionStore.clearSessionReminder(session) }
                 }
             } label: {
-                Label("提醒", systemImage: reminder == nil ? "bell" : "bell.fill")
+                Label(L10n.text("ui.reminder"), systemImage: reminder == nil ? "bell" : "bell.fill")
             }
 
             Button(role: isArchived ? nil : .destructive) {
                 Task { await sessionStore.toggleSessionArchivedRemote(session) }
             } label: {
-                Label(isArchived ? "取消归档" : "归档", systemImage: isArchived ? "archivebox.fill" : "archivebox")
+                Label(isArchived ? L10n.text("ui.unarchive") : L10n.text("ui.archive"), systemImage: isArchived ? "archivebox.fill" : "archivebox")
             }
         }
         .sheet(item: $renameTarget) { target in
@@ -594,9 +594,9 @@ private enum SessionReviewScope: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .uncommittedChanges: return "未提交改动"
-        case .baseBranch: return "相对基准分支"
-        case .commit: return "指定提交"
+        case .uncommittedChanges: return L10n.text("ui.changes_not_committed")
+        case .baseBranch: return L10n.text("ui.relative_base_branch")
+        case .commit: return L10n.text("ui.specify_submission")
         }
     }
 
@@ -627,8 +627,8 @@ private struct SessionReviewSheet: View {
 
         NavigationStack {
             Form {
-                Section("审查目标") {
-                    Picker("目标类型", selection: $scope) {
+                Section(L10n.text("ui.review_goals")) {
+                    Picker(L10n.text("ui.target_type"), selection: $scope) {
                         ForEach(SessionReviewScope.allCases) { option in
                             Label(option.title, systemImage: option.systemImage)
                                 .tag(option)
@@ -640,41 +640,41 @@ private struct SessionReviewSheet: View {
                 switch scope {
                 case .uncommittedChanges:
                     Section {
-                        Label("审查当前工作区尚未提交的全部改动", systemImage: "info.circle")
+                        Label(L10n.text("ui.review_all_uncommitted_changes_in_the_current_workspace"), systemImage: "info.circle")
                             .foregroundStyle(tokens.secondaryText)
                     }
                 case .baseBranch:
                     Section {
-                        TextField("例如 main", text: $baseBranch)
+                        TextField(L10n.text("ui.for_example_main"), text: $baseBranch)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .submitLabel(.go)
                             .onSubmit(submit)
                             .accessibilityIdentifier("sessions.review.baseBranch")
                     } header: {
-                        Text("基准分支")
+                        Text(L10n.text("ui.base_branch"))
                     } footer: {
-                        Text(normalizedBaseBranch.isEmpty ? "请输入非空分支名。" : "将审查当前分支相对 \(normalizedBaseBranch) 的差异。")
+                        Text(normalizedBaseBranch.isEmpty ? L10n.text("ui.please_enter_a_non_empty_branch_name") : L10n.format("ui.the_current_branch_will_be_reviewed_for_differences", normalizedBaseBranch))
                             .foregroundStyle(normalizedBaseBranch.isEmpty ? tokens.warning : tokens.tertiaryText)
                     }
                 case .commit:
                     Section {
-                        TextField("Commit SHA", text: $commitSHA)
+                        TextField(L10n.text("ui.commit_sha"), text: $commitSHA)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .submitLabel(.go)
                             .onSubmit(submit)
                             .accessibilityIdentifier("sessions.review.commit")
                     } header: {
-                        Text("提交")
+                        Text(L10n.text("ui.submit"))
                     } footer: {
-                        Text(normalizedCommitSHA.isEmpty ? "请输入非空 Commit SHA。" : "将只审查提交 \(normalizedCommitSHA)。")
+                        Text(normalizedCommitSHA.isEmpty ? L10n.text("ui.please_enter_a_non_empty_commit_sha") : L10n.format("ui.only_submission_value_will_be_reviewed", normalizedCommitSHA))
                             .foregroundStyle(normalizedCommitSHA.isEmpty ? tokens.warning : tokens.tertiaryText)
                     }
                 }
 
                 Section {
-                    Label("Review 始终在当前会话内执行，不会创建 detached 会话。", systemImage: "lock.shield")
+                    Label(L10n.text("ui.review_is_always_executed_within_the_current_session"), systemImage: "lock.shield")
                         .foregroundStyle(tokens.tertiaryText)
                 }
 
@@ -688,11 +688,11 @@ private struct SessionReviewSheet: View {
             .font(themeStore.uiFont(.body))
             .scrollContentBackground(.hidden)
             .background(tokens.background)
-            .navigationTitle("开始代码审查")
+            .navigationTitle(L10n.text("ui.start_code_review"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                         .disabled(isSubmitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -701,7 +701,7 @@ private struct SessionReviewSheet: View {
                             ProgressView()
                                 .controlSize(.small)
                         } else {
-                            Text("开始")
+                            Text(L10n.text("ui.start"))
                         }
                     }
                     .disabled(isSubmitting || session.isRunning || normalizedTarget == nil)
@@ -745,7 +745,7 @@ private struct SessionReviewSheet: View {
             if didStart {
                 dismiss()
             } else {
-                submissionError = sessionStore.statusMessage ?? "Review 启动失败，请稍后重试。"
+                submissionError = sessionStore.statusMessage ?? L10n.text("ui.review_failed_to_start_please_try_again_later")
             }
         }
     }
@@ -767,22 +767,22 @@ private struct SessionRenameSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("会话名称") {
-                    TextField("输入名称", text: $name)
+                Section(L10n.text("ui.session_name")) {
+                    TextField(L10n.text("ui.enter_name"), text: $name)
                         .textInputAutocapitalization(.sentences)
                         .submitLabel(.done)
                         .onSubmit(save)
                 }
             }
-            .navigationTitle("重命名会话")
+            .navigationTitle(L10n.text("ui.rename_session"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                         .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isSaving ? "保存中…" : "保存", action: save)
+                    Button(isSaving ? L10n.text("ui.saving_6644f061") : L10n.text("ui.save"), action: save)
                         .disabled(isSaving || normalizedName.isEmpty || normalizedName == session.title)
                 }
             }

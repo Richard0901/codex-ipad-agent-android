@@ -285,7 +285,7 @@ extension ConversationDataFlowTests {
 
         XCTAssertFalse(handedOff)
         XCTAssertTrue(client.requestedWorktreeCreates.isEmpty)
-        XCTAssertEqual(store.errorMessage, "运行中的会话不能直接转到 Worktree，请先停止或等待完成。")
+        XCTAssertEqual(store.errorMessage, L10n.text("ui.running_sessions_cannot_go_directly_to_worktree_please"))
     }
 
     func testSessionStoreRefreshesOpensAndDeletesManagedWorktree() async {
@@ -406,7 +406,7 @@ extension ConversationDataFlowTests {
 
         XCTAssertFalse(deleted)
         XCTAssertTrue(client.requestedWorktreeDeletes.isEmpty)
-        XCTAssertEqual(store.worktreeErrorMessage, "该 Worktree 还有运行中的会话，先停止会话后再删除。")
+        XCTAssertEqual(store.worktreeErrorMessage, L10n.text("ui.this_worktree_also_has_a_running_session_stop"))
     }
 
     func testSessionStoreAppliesDeletedWorktreeBeforeRegistryCleanupWarning() async {
@@ -866,7 +866,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(snapshot.allSessionCount, 5)
         XCTAssertEqual(snapshot.hiddenCount, 2)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "显示更多")
+        XCTAssertEqual(snapshot.actionTitle, L10n.text("ui.show_more"))
 
         await store.toggleSessionListExpansion(projectID: project.id)
         XCTAssertEqual(store.visibleSessions(forProjectID: project.id).count, 5)
@@ -875,7 +875,7 @@ extension ConversationDataFlowTests {
         XCTAssertTrue(snapshot.isShowingAll)
         XCTAssertEqual(snapshot.visibleSessions.count, 5)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "收起显示")
+        XCTAssertEqual(snapshot.actionTitle, L10n.text("ui.show_less"))
 
         await store.toggleSessionListExpansion(projectID: project.id)
         XCTAssertEqual(store.visibleSessions(forProjectID: project.id).map(\.id), ["codex_0", "codex_1", "codex_2"])
@@ -951,13 +951,13 @@ extension ConversationDataFlowTests {
         var snapshot = store.sessionListSnapshot(forProjectID: project.id)
         XCTAssertEqual(snapshot.visibleSessions.count, SessionStore.sessionPreviewLimit + SessionStore.sessionExpansionStep)
         XCTAssertEqual(snapshot.hiddenCount, 4)
-        XCTAssertEqual(snapshot.actionTitle, "显示更多")
+        XCTAssertEqual(snapshot.actionTitle, L10n.text("ui.show_more"))
 
         await store.toggleSessionListExpansion(projectID: project.id)
         snapshot = store.sessionListSnapshot(forProjectID: project.id)
         XCTAssertEqual(snapshot.visibleSessions.count, 12)
         XCTAssertEqual(snapshot.hiddenCount, 0)
-        XCTAssertEqual(snapshot.actionTitle, "收起显示")
+        XCTAssertEqual(snapshot.actionTitle, L10n.text("ui.show_less"))
     }
 
     func testSessionStoreLoadsNextSessionPageWhenExpanded() async {
@@ -1009,7 +1009,7 @@ extension ConversationDataFlowTests {
         XCTAssertFalse(snapshot.isShowingAll)
         XCTAssertTrue(snapshot.canLoadMore)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "显示更多")
+        XCTAssertEqual(snapshot.actionTitle, L10n.text("ui.show_more"))
 
         await store.toggleSessionListExpansion(projectID: project.id)
 
@@ -1022,7 +1022,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(snapshot.allSessionCount, 5)
         XCTAssertEqual(snapshot.visibleSessions.count, 5)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "收起显示")
+        XCTAssertEqual(snapshot.actionTitle, L10n.text("ui.show_less"))
     }
 
     func testSessionStoreKeepsNewestVisibleAfterLoadingOlderPageAndRefreshing() async {
@@ -1108,7 +1108,7 @@ extension ConversationDataFlowTests {
         var snapshot = store.sessionListSnapshot(forProjectID: project.id)
         XCTAssertTrue(snapshot.canLoadMore)
         XCTAssertTrue(snapshot.shouldShowActionRow)
-        XCTAssertEqual(snapshot.actionTitle, "显示更多")
+        XCTAssertEqual(snapshot.actionTitle, L10n.text("ui.show_more"))
 
         client.page = SessionsPage(sessions: firstPage, hasMore: false)
         await store.refreshAll(autoAttach: false)
@@ -1195,7 +1195,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(store.selectedSession?.id, created.id)
         XCTAssertNil(store.selectedHistorySavingsNotice)
         XCTAssertNil(store.errorMessage)
-        XCTAssertEqual(conversationStore.messages(for: created.id).map(\.content), ["交互式会话已启动。"])
+        XCTAssertEqual(conversationStore.messages(for: created.id).map(\.content), [L10n.text("ui.an_interactive_session_has_been_started")])
         XCTAssertEqual(sockets.count, 1)
 
         // 回前台会再次 refreshAll；空 thread 已记录空快照后，不能在首个 turn 前读取不存在的 rollout。
@@ -1227,7 +1227,7 @@ extension ConversationDataFlowTests {
         // 空会话也必须先发布本地占位，让弹窗可以立即关闭并进入会话页；不能等 thread/start 返回。
         let optimisticSessionID = try XCTUnwrap(store.selectedSessionID)
         XCTAssertTrue(optimisticSessionID.hasPrefix("local:"))
-        XCTAssertEqual(store.selectedSession?.title, "新会话")
+        XCTAssertEqual(store.selectedSession?.title, L10n.text("ui.new_session"))
         XCTAssertEqual(store.selectedSession?.source, "local")
         XCTAssertEqual(client.modelOptionsCallCount, 0, "空会话没有 turn/start，不应先请求 model/list")
 
@@ -2426,4 +2426,3 @@ extension ConversationDataFlowTests {
     }
 
 }
-

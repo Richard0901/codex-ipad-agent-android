@@ -91,14 +91,14 @@ extension SessionStore {
                 projectID: mimiDemo.id,
                 project: mimiDemo.name,
                 dir: mimiDemo.path,
-                title: "整理开源发布说明",
+                title: L10n.text("ui.organize_open_source_release_notes"),
                 status: SessionStatus.completed.rawValue,
                 source: "debug",
                 runtimeProvider: "codex",
                 resumeID: selectedSessionID,
                 createdAt: now.addingTimeInterval(-60 * 40),
                 updatedAt: now.addingTimeInterval(-60 * 3),
-                preview: "核对安装步骤、架构图、隐私边界和公开截图。",
+                preview: L10n.text("ui.review_installation_steps_architecture_diagrams_privacy_boundaries_and"),
                 rateLimit: debugRateLimit
             ),
             AgentSession(
@@ -106,14 +106,14 @@ extension SessionStore {
                 projectID: mimiDemo.id,
                 project: mimiDemo.name,
                 dir: mimiDemo.path,
-                title: "检查连接恢复测试",
+                title: L10n.text("ui.check_connection_recovery_test"),
                 status: SessionStatus.running.rawValue,
                 source: "debug",
                 runtimeProvider: "codex",
                 resumeID: runningSessionID,
                 createdAt: now.addingTimeInterval(-60 * 110),
                 updatedAt: now.addingTimeInterval(-60 * 1),
-                preview: "正在验证断网恢复、审批和排队消息状态。",
+                preview: L10n.text("ui.verifying_disconnection_recovery_approval_and_queued_message_status"),
                 activeTurnID: "debug-turn-running"
             ),
             AgentSession(
@@ -121,20 +121,20 @@ extension SessionStore {
                 projectID: sampleApp.id,
                 project: sampleApp.name,
                 dir: sampleApp.path,
-                title: "完善示例项目文档",
+                title: L10n.text("ui.improve_sample_project_documentation"),
                 status: SessionStatus.closed.rawValue,
                 source: "debug",
                 runtimeProvider: "codex",
                 resumeID: "debug-session-workspace",
                 createdAt: now.addingTimeInterval(-60 * 180),
                 updatedAt: now.addingTimeInterval(-60 * 28),
-                preview: "补充可执行命令、配置示例和故障排查入口。"
+                preview: L10n.text("ui.supplemented_with_executable_commands_configuration_examples_and_troubleshooting")
             )
         ]
 
         isLoading = false
         setErrorMessage(nil)
-        setStatusMessage("Debug UI 样例已加载")
+        setStatusMessage(L10n.text("ui.debug_ui_sample_loaded"))
         setProjectsIfChanged([mimiDemo.project, sampleApp.project])
         setRecentWorkspacesIfChanged([mimiDemo, sampleApp])
         sessionWorkspaceIDs = nil
@@ -157,7 +157,7 @@ extension SessionStore {
             QueuedTurnEntry(
                 sessionID: runningSessionID,
                 projectID: mimiDemo.id,
-                payload: CodexAppServerTurnPayload(prompt: "当前回复完成后，继续检查 README 的构建命令"),
+                payload: CodexAppServerTurnPayload(prompt: L10n.text("ui.after_the_current_reply_is_complete_continue_checking")),
                 clientMessageID: "debug-queued-waiting",
                 intent: .standard,
                 expectedTurnID: "debug-turn-running"
@@ -165,11 +165,11 @@ extension SessionStore {
             QueuedTurnEntry(
                 sessionID: runningSessionID,
                 projectID: mimiDemo.id,
-                payload: CodexAppServerTurnPayload(prompt: "确认安全扫描完成后，再生成发布摘要"),
+                payload: CodexAppServerTurnPayload(prompt: L10n.text("ui.after_confirming_that_the_security_scan_is_complete")),
                 clientMessageID: "debug-queued-confirmation",
                 intent: .standard,
                 dispatchState: .needsConfirmation,
-                lastError: "上次发送在确认前中断"
+                lastError: L10n.text("ui.last_send_interrupted_before_confirmation")
             )
         ]
         rebuildProjectSessionListSnapshots()
@@ -180,7 +180,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-user-1",
                 role: "user",
-                content: "帮我检查这次 README 改动，确认安装步骤和安全边界与代码一致。",
+                content: L10n.text("ui.help_me_check_this_readme_change_and_confirm"),
                 createdAt: now.addingTimeInterval(-60 * 18),
                 turnID: "\(sessionID)-turn-1",
                 itemID: "\(sessionID)-item-user-1",
@@ -189,7 +189,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-assistant-1",
                 role: "assistant",
-                content: "我会核对 Homebrew、源码构建和配对流程，并把 Codex 与 Claude 的运行边界拆开说明。",
+                content: L10n.text("ui.i_ll_go_over_homebrew_source_build_and"),
                 createdAt: now.addingTimeInterval(-60 * 16),
                 turnID: "\(sessionID)-turn-1",
                 itemID: "\(sessionID)-item-assistant-1",
@@ -199,7 +199,7 @@ extension SessionStore {
                 id: "\(sessionID)-summary-1",
                 role: "system",
                 kind: .reasoningSummary,
-                content: "已完成文档核对：安装命令可执行，架构与当前 runtime 选择逻辑一致。",
+                content: L10n.text("ui.document_verification_has_been_completed_the_installation_command"),
                 createdAt: now.addingTimeInterval(-60 * 14),
                 turnID: "\(sessionID)-turn-1",
                 itemID: "\(sessionID)-item-summary-1",
@@ -208,7 +208,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-user-2",
                 role: "user",
-                content: "再检查一下截图和示例配置里有没有真实 Token、私有地址或个人目录。",
+                content: L10n.text("ui.check_again_whether_there_are_real_tokens_private"),
                 createdAt: now.addingTimeInterval(-60 * 6),
                 turnID: "\(sessionID)-turn-2",
                 itemID: "\(sessionID)-item-user-2",
@@ -217,7 +217,7 @@ extension SessionStore {
             CodexHistoryMessage(
                 id: "\(sessionID)-assistant-2",
                 role: "assistant",
-                content: "截图只使用 /Users/demo 和本地种子数据，配置中的 Token 是占位符；公开门禁也会扫描当前工作树与全部 Git 历史。",
+                content: L10n.text("ui.the_screenshot_only_uses_users_demo_and_local"),
                 createdAt: now.addingTimeInterval(-60 * 4),
                 turnID: "\(sessionID)-turn-2",
                 itemID: "\(sessionID)-item-assistant-2",
@@ -286,7 +286,7 @@ extension SessionStore {
               !appStore.requiresRePairing,
               errorMessage == nil else {
             if connectionTermination == nil, !appStore.requiresRePairing {
-                let message = "连接凭据已安全保存，但暂时无法加载项目和会话。请确认 Mac 助手和 Tailscale 可用后重试，无需重新扫码。"
+                let message = L10n.text("ui.the_connection_credentials_have_been_saved_safely_but")
                 appStore.connectionStatus = .failed(message)
                 appStore.lastError = message
                 setErrorMessage(message)
@@ -299,7 +299,7 @@ extension SessionStore {
     func refreshAll(autoAttach: Bool = false) async {
 #if DEBUG
         guard !isDebugWorkbenchUISeedActive else {
-            setStatusMessage("Debug UI 样例不会连接后端")
+            setStatusMessage(L10n.text("ui.debug_ui_sample_will_not_connect_to_the"))
             return
         }
 #endif
@@ -340,7 +340,7 @@ extension SessionStore {
                 replaceSessionsIfChanged(with: [], projectID: nil)
                 setSelectedSessionID(nil)
                 disconnectWebSocket()
-                setStatusMessage(sidebarProjects.isEmpty ? "尚未打开工作区" : "已加载 \(sidebarProjects.count) 个最近工作区")
+                setStatusMessage(sidebarProjects.isEmpty ? L10n.text("ui.no_workspace_has_been_opened_yet") : L10n.plural("ui.recent_workspaces_loaded_count", count: sidebarProjects.count))
                 setErrorMessage(nil)
                 await reconcilePersistedQueuedTurns()
                 return
@@ -352,7 +352,7 @@ extension SessionStore {
             guard let workspace = workspacesByID[projectID] else {
                 setSelectedProjectID(nil)
                 setSelectedSessionID(nil)
-                setStatusMessage("工作区已失效，请重新打开")
+                setStatusMessage(L10n.text("ui.the_workspace_has_expired_please_reopen_it"))
                 setErrorMessage(nil)
                 return
             }
@@ -395,7 +395,11 @@ extension SessionStore {
 
             await reconcilePersistedQueuedTurns()
             ensureAllQueuedSessionMonitoring()
-            setStatusMessage("已加载 \(sidebarProjects.count) 个最近工作区，\(filteredSessions.count) 个会话")
+            setStatusMessage(L10n.format(
+                "ui.counts_joined",
+                L10n.plural("ui.recent_workspaces_loaded_count", count: sidebarProjects.count),
+                L10n.plural("ui.sessions_loaded_count", count: filteredSessions.count)
+            ))
             setErrorMessage(nil)
         } catch {
             if let requestProjectID, let requestToken, !isCurrentSessionPageRequest(projectID: requestProjectID, token: requestToken) {
@@ -422,7 +426,7 @@ extension SessionStore {
         setErrorMessage(nil)
 #if DEBUG
         guard !isDebugWorkbenchUISeedActive else {
-            setStatusMessage("已选择 Debug 工作区 \(project.name)")
+            setStatusMessage(L10n.format("ui.debug_workspace_value_selected", project.name))
             return
         }
 #endif
@@ -493,7 +497,7 @@ extension SessionStore {
     func openWorkspace(path: String) async -> Bool {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            setErrorMessage("请输入开发环境中的目录路径")
+            setErrorMessage(L10n.text("ui.please_enter_the_directory_path_in_the_development"))
             return false
         }
         do {
@@ -552,12 +556,12 @@ extension SessionStore {
     @discardableResult
     func handoffSessionToWorktree(_ session: AgentSession, name: String? = nil, base: String? = nil, branch: String? = nil) async -> Bool {
         guard !session.isRunning else {
-            setErrorMessage("运行中的会话不能直接转到 Worktree，请先停止或等待完成。")
+            setErrorMessage(L10n.text("ui.running_sessions_cannot_go_directly_to_worktree_please"))
             return false
         }
         let rootProjectID = rootProjectID(forProjectID: session.projectID)
         guard let rootWorkspace = ensureWorkspaceForKnownProjectID(rootProjectID) else {
-            setErrorMessage("来源会话的根项目已失效，请重新打开工作区。")
+            setErrorMessage(L10n.text("ui.the_root_project_of_the_source_session_has"))
             return false
         }
 
@@ -598,11 +602,11 @@ extension SessionStore {
                 } else {
                     disconnectWebSocket()
                 }
-                conversationStore.appendSystem("已从来源会话 fork 到这个 Worktree。", sessionID: responseSession.id)
-                setStatusMessage("已 fork 到新 Worktree")
+                conversationStore.appendSystem(L10n.text("ui.this_worktree_has_been_forked_from_the_source"), sessionID: responseSession.id)
+                setStatusMessage(L10n.text("ui.forked_to_new_worktree"))
                 return true
             } catch {
-                setStatusMessage("原生 fork 不可用，改用提示式 Worktree 交接：\(error.localizedDescription)")
+                setStatusMessage(L10n.format("ui.native_fork_is_not_available_use_prompt_worktree", error.localizedDescription))
             }
 
             var options = CodexAppServerTurnOptions.default
@@ -621,7 +625,7 @@ extension SessionStore {
                 clientMessageID: UUID().uuidString
             )
             if started {
-                setStatusMessage("已转到新 Git Worktree")
+                setStatusMessage(L10n.text("ui.moved_to_new_git_worktree"))
             }
             return started
         } catch {
@@ -647,26 +651,18 @@ extension SessionStore {
         worktree: WorktreeDescriptor
     ) -> String {
         let sourceThreadID = normalizedOptional(session.resumeID) ?? session.id
-        let branch = normalizedOptional(worktree.branch) ?? "未命名分支"
-        let preview = normalizedOptional(session.preview).map { "\n来源摘要：\($0)" } ?? ""
-        return """
-        请在这个新的 Worktree 中继续处理来源会话的任务。
-
-        来源会话：
-        - 标题：\(session.title)
-        - 线程 ID：\(sourceThreadID)
-        - 原工作区：\(rootWorkspace.path)\(preview)
-
-        新 Worktree：
-        - 路径：\(targetWorkspace.path)
-        - Base：\(worktree.base)
-        - 分支：\(branch)
-
-        继续要求：
-        1. 先检查当前目录的 Git 状态和关键文件。
-        2. 不要假设原工作区的未提交改动已经复制到这里；这个 Worktree 是从上面的 Base 创建的隔离 checkout。
-        3. 如果需要来源会话更完整的上下文，请先向我确认要补充哪些信息。
-        """
+        let branch = normalizedOptional(worktree.branch) ?? L10n.text("ui.unnamed_branch")
+        let preview = normalizedOptional(session.preview).map { L10n.format("ui.source_summary_value", $0) } ?? ""
+        return L10n.format(
+            "ui.worktree_handoff_prompt",
+            session.title,
+            sourceThreadID,
+            rootWorkspace.path,
+            preview,
+            targetWorkspace.path,
+            worktree.base,
+            branch
+        )
     }
 
     func worktreeBranches(path: String) -> WorktreeBranchListResponse? {
@@ -736,15 +732,20 @@ extension SessionStore {
             if let failedPaths = response.failedPaths, !failedPaths.isEmpty {
                 let detail = failedPaths
                     .sorted { $0.key < $1.key }
-                    .map { "\($0.key)：\($0.value)" }
-                    .joined(separator: "；")
-                worktreeErrorMessage = "已清理 \(count) 条丢失的 Worktree 登记，但另有 \(failedPaths.count) 条失败：\(detail)"
+                    .map { L10n.format("ui.labeled_value", $0.key, $0.value) }
+                    .joined(separator: L10n.text("ui.semicolon_separator"))
+                worktreeErrorMessage = L10n.format(
+                    "ui.value_missing_worktree_entries_cleaned_up_but_value",
+                    L10n.plural("ui.worktree_registrations_cleaned_count", count: count),
+                    L10n.plural("ui.worktree_cleanup_failures_count", count: failedPaths.count),
+                    detail
+                )
                 setStatusMessage(count == 0
-                    ? "Worktree 登记清理未完成"
-                    : "已清理 \(count) 条 Worktree 登记，另有项目失败")
+                    ? L10n.text("ui.worktree_registration_cleanup_not_completed")
+                    : L10n.plural("ui.worktree_registrations_cleaned_count", count: count))
             } else {
                 worktreeErrorMessage = nil
-                setStatusMessage(count == 0 ? "没有需要清理的 Worktree 登记" : "已清理 \(count) 条丢失的 Worktree 登记")
+                setStatusMessage(count == 0 ? L10n.text("ui.there_are_no_worktree_registrations_to_clean_up") : L10n.plural("ui.worktree_registrations_cleaned_count", count: count))
             }
             return count
         } catch {
@@ -814,11 +815,14 @@ extension SessionStore {
                 // 再暴露失败，避免 UI 把整批操作误报为“全部未执行”。
                 worktreeErrorMessage = partialFailureMessage
                 setStatusMessage(deletedPaths.isEmpty
-                    ? "Worktree 清理失败"
-                    : "已清理 \(deletedPaths.count) 个 Git Worktree，另有项目清理失败")
+                    ? L10n.text("ui.worktree_cleanup_failed")
+                    : L10n.format(
+                        "ui.git_worktree_cleanup_partial_success",
+                        L10n.plural("ui.git_worktrees_cleaned_count", count: deletedPaths.count)
+                    ))
             } else {
                 worktreeErrorMessage = nil
-                setStatusMessage(deletedPaths.isEmpty ? "没有 Worktree 被删除" : "已清理 \(deletedPaths.count) 个 Git Worktree")
+                setStatusMessage(deletedPaths.isEmpty ? L10n.text("ui.no_worktree_is_deleted") : L10n.plural("ui.git_worktrees_cleaned_count", count: deletedPaths.count))
             }
             return response
         } catch {
@@ -863,7 +867,7 @@ extension SessionStore {
     @discardableResult
     func deleteManagedWorktree(_ item: WorktreeListItem, force: Bool = false) async -> Bool {
         if hasRunningSession(in: item) {
-            worktreeErrorMessage = "该 Worktree 还有运行中的会话，先停止会话后再删除。"
+            worktreeErrorMessage = L10n.text("ui.this_worktree_also_has_a_running_session_stop")
             return false
         }
 
@@ -887,11 +891,11 @@ extension SessionStore {
             })
             forgetManagedWorktreeAfterDeletion(workspace)
             if let registryCleanupError = normalizedOptional(response.registryCleanupError) {
-                worktreeErrorMessage = "Git Worktree 已删除，但清理管理登记失败：\(registryCleanupError)。可稍后使用“清理丢失登记”重试。"
-                setStatusMessage("已删除 Git Worktree \(workspace.name)，但管理登记仍需清理")
+                worktreeErrorMessage = L10n.format("ui.git_worktree_was_deleted_but_cleanup_management_registration", registryCleanupError)
+                setStatusMessage(L10n.format("ui.git_worktree_value_has_been_deleted_but_the", workspace.name))
             } else {
                 worktreeErrorMessage = nil
-                setStatusMessage("已删除 Git Worktree \(workspace.name)")
+                setStatusMessage(L10n.format("ui.git_worktree_value_has_been_deleted", workspace.name))
             }
             return true
         } catch {

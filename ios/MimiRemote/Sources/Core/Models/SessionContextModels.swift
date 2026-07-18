@@ -166,7 +166,7 @@ struct SessionContextTask: Identifiable, Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let title = try container.decodeIfPresent(String.self, forKey: .title) ?? "任务"
+        let title = try container.decodeIfPresent(String.self, forKey: .title) ?? L10n.text("ui.task")
         self.id = try container.decodeIfPresent(String.self, forKey: .id) ?? title
         self.kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "task"
         self.title = title
@@ -197,7 +197,7 @@ struct SessionContextSource: Identifiable, Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let label = try container.decodeIfPresent(String.self, forKey: .label) ?? "来源"
+        let label = try container.decodeIfPresent(String.self, forKey: .label) ?? L10n.text("ui.source")
         self.id = try container.decodeIfPresent(String.self, forKey: .id) ?? label
         self.kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "source"
         self.label = label

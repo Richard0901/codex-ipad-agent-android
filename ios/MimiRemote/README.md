@@ -1,5 +1,33 @@
 # Mimi Remote iOS App
 
+## Build from source (English)
+
+Mimi Remote is a native iPhone/iPad client for coding agents running on your own Mac. It requires iOS/iPadOS 26 or later, Xcode 26 or later with the iOS 26 SDK, and XcodeGen; there is no public App Store release. From the repository root, install XcodeGen, then generate and open the project:
+
+```bash
+brew install xcodegen
+
+xcodegen generate \
+  --spec ios/MimiRemote/project.yml \
+  --project ios/MimiRemote
+
+open ios/MimiRemote/MimiRemote.xcodeproj
+```
+
+Select the `MimiRemote` scheme, your development team, and an iPhone/iPad target in Xcode. Build the Mac service first with Codex CLI signed in, run `agentd up`, then scan its short-lived pairing QR code in the app. For a command-line build check:
+
+```bash
+xcodebuild \
+  -project ios/MimiRemote/MimiRemote.xcodeproj \
+  -scheme MimiRemote \
+  -configuration Debug \
+  -sdk iphoneos \
+  CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
+```
+
+The detailed engineering and operational reference below is currently in Chinese.
+
 ## 目标
 
 Mimi Remote 是原生 iPhone / iPad SwiftUI 控制台。`MimiRemote` 只保留为 Xcode target、scheme 和源码目录名，不作为用户侧产品名。

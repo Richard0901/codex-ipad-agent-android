@@ -120,16 +120,16 @@ struct RateLimitSummary: Codable, Hashable {
 
     var compactText: String? {
         if isExhausted {
-            return "额度已用尽"
+            return L10n.text("ui.quota_has_been_exhausted")
         }
         if let percentText = usedPercentText {
-            return "已用 \(percentText)"
+            return L10n.format("ui.used_value", percentText)
         }
         if let remainingRequests {
-            return "剩余 \(remainingRequests) 次"
+            return L10n.plural("ui.times_remaining_count", count: remainingRequests)
         }
         if let remainingTokens {
-            return "剩余 \(remainingTokens) tok"
+            return L10n.format("ui.remaining_value_tok", remainingTokens)
         }
         return nil
     }
@@ -241,13 +241,13 @@ struct CodexUsageDisplaySummary: Equatable {
         let resetDate = rateLimit.resetDate
         let secondaryText: String
         if let resetDate {
-            secondaryText = "预计 \(resetText(resetDate, now: now)) 重置"
+            secondaryText = L10n.format("ui.expected_value_reset", resetText(resetDate, now: now))
         } else {
-            secondaryText = "暂无重置时间"
+            secondaryText = L10n.text("ui.no_reset_time_yet")
         }
 
         return CodexUsageDisplaySummary(
-            title: "Codex 使用量",
+            title: L10n.text("ui.codex_usage"),
             primaryText: primaryText,
             secondaryText: secondaryText,
             progress: progress,
@@ -259,8 +259,10 @@ struct CodexUsageDisplaySummary: Equatable {
 
     private static func resetText(_ date: Date, now: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = Calendar.current.isDate(date, inSameDayAs: now) ? "HH:mm" : "M月d日 HH:mm"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate(
+            Calendar.current.isDate(date, inSameDayAs: now) ? "Hm" : "MdHm"
+        )
         return formatter.string(from: date)
     }
 }
@@ -302,22 +304,34 @@ struct CodexUsageWindowDisplay: Equatable, Identifiable {
 
     var accessibilityName: String {
         guard let durationMinutes, durationMinutes > 0 else {
-            return "\(providerName) 账号窗口"
+            return L10n.format("ui.value_account_window", providerName)
         }
         if durationMinutes % (24 * 60) == 0 {
-            return "\(providerName) \(durationMinutes / (24 * 60)) 天窗口"
+            return L10n.format(
+                "ui.value_usage_window",
+                providerName,
+                L10n.plural("ui.days_count", count: durationMinutes / (24 * 60))
+            )
         }
         if durationMinutes % 60 == 0 {
-            return "\(providerName) \(durationMinutes / 60) 小时窗口"
+            return L10n.format(
+                "ui.value_usage_window",
+                providerName,
+                L10n.plural("ui.hours_count", count: durationMinutes / 60)
+            )
         }
-        return "\(providerName) \(durationMinutes) 分钟窗口"
+        return L10n.format(
+            "ui.value_usage_window",
+            providerName,
+            L10n.plural("ui.minutes_count", count: durationMinutes)
+        )
     }
 
     var primaryText: String {
         guard let usedPercentText else {
-            return "等待刷新"
+            return L10n.text("ui.waiting_for_refresh")
         }
-        return "已用 \(usedPercentText)"
+        return L10n.format("ui.used_value", usedPercentText)
     }
 
     /// 账号接口返回的是“已用比例”，左上角圆环表达的是“剩余比例”，统一在展示模型中换算，
@@ -339,9 +353,9 @@ struct CodexUsageWindowDisplay: Equatable, Identifiable {
 
     var remainingText: String {
         guard let remainingPercentText else {
-            return "等待刷新"
+            return L10n.text("ui.waiting_for_refresh")
         }
-        return "剩余 \(remainingPercentText)"
+        return L10n.format("ui.value_remaining", remainingPercentText)
     }
 }
 
@@ -355,9 +369,9 @@ struct CodexUsageWindowsDisplay: Equatable {
 
     var windowSummaryText: String {
         guard !windows.isEmpty else {
-            return "尚未取得账号用量"
+            return L10n.text("ui.account_usage_has_not_been_obtained_yet")
         }
-        return "\(windows.map(\.label).joined(separator: " 和 ")) 账号窗口"
+        return L10n.format("ui.value_account_window", windows.map(\.label).joined(separator: L10n.text("ui.and")))
     }
 
     static func make(
@@ -440,7 +454,7 @@ struct CodexUsageWindowsDisplay: Equatable {
 
     private static func durationLabel(_ minutes: Int?) -> String {
         guard let minutes, minutes > 0 else {
-            return "窗口"
+            return L10n.text("ui.window")
         }
         if minutes % (24 * 60) == 0 {
             return "\(minutes / (24 * 60))d"
@@ -454,11 +468,11 @@ struct CodexUsageWindowsDisplay: Equatable {
     private static func durationTitle(_ minutes: Int?) -> String {
         switch minutes {
         case 300:
-            return "短窗口"
+            return L10n.text("ui.short_window")
         case 10_080:
-            return "周窗口"
+            return L10n.text("ui.weekly_window")
         default:
-            return "账号窗口"
+            return L10n.text("ui.account_window_title")
         }
     }
 
@@ -471,44 +485,46 @@ struct CodexUsageWindowsDisplay: Equatable {
 
     private static func resetText(_ date: Date?, now: Date) -> String {
         guard let date else {
-            return "暂无重置时间"
+            return L10n.text("ui.no_reset_time_yet")
         }
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = Calendar.current.isDate(date, inSameDayAs: now) ? "HH:mm" : "M月d日 HH:mm"
-        return "\(formatter.string(from: date)) 重置"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate(
+            Calendar.current.isDate(date, inSameDayAs: now) ? "Hm" : "MdHm"
+        )
+        return L10n.format("ui.value_reset", formatter.string(from: date))
     }
 
     private static func creditText(_ rateLimit: RateLimitSummary?, fallbackDisplayName: String) -> String {
         guard let rateLimit else {
-            return "等待 \(fallbackDisplayName) 返回账号用量"
+            return L10n.format("ui.waiting_for_value_to_return_account_usage", fallbackDisplayName)
         }
         switch rateLimit.availability?.lowercased() {
         case "unavailable":
             if rateLimit.unavailableReason == "headless_statusline_unavailable" {
-                return "Headless 暂无额度百分比"
+                return L10n.text("ui.headless_no_quota_percentage_yet")
             }
-            return "账号额度数据暂不可用"
+            return L10n.text("ui.account_quota_data_is_temporarily_unavailable")
         case "partial":
-            return "仅显示已观测的限流窗口"
+            return L10n.text("ui.show_only_observed_current_limiting_windows")
         default:
             break
         }
         if rateLimit.creditsUnlimited == true {
-            return "Credits 无限制"
+            return L10n.text("ui.credits_unlimited")
         }
         if let balance = rateLimit.creditBalance?.trimmingCharacters(in: .whitespacesAndNewlines),
            !balance.isEmpty {
-            return "Credits 余额 \(balance)"
+            return L10n.format("ui.credits_balance_value", balance)
         }
         if rateLimit.hasCredits == false {
-            return "Credits 未启用"
+            return L10n.text("ui.credits_not_enabled")
         }
         if let plan = rateLimit.planType?.trimmingCharacters(in: .whitespacesAndNewlines),
            !plan.isEmpty {
-            return "计划 \(plan)"
+            return L10n.format("ui.plan_value", plan)
         }
-        return "暂无余额信息"
+        return L10n.text("ui.no_balance_information_yet")
     }
 }
 
@@ -528,11 +544,11 @@ struct CodexQuotaNotice: Equatable {
                 return nil
             }
             let resetText = resetDate.map { Self.resetText($0, now: now) }
-            let suffix = resetText.map { "预计 \($0) 恢复；也可以在桌面 Codex 点“增加额度”或“重置使用量”。" }
-                ?? "可以在桌面 Codex 点“增加额度”或“重置使用量”。"
+            let suffix = resetText.map { L10n.format("ui.expected_value_recovery_you_can_also_click_increase", $0) }
+                ?? L10n.text("ui.you_can_click_increase_quota_or_reset_usage")
             return CodexQuotaNotice(
-                title: "Codex 消息额度已用尽",
-                message: "\(rateLimit.displayName) 当前额度不可用。\(suffix)",
+                title: L10n.text("ui.codex_message_quota_has_been_exhausted"),
+                message: L10n.format("ui.value_the_current_quota_is_not_available_value", rateLimit.displayName, suffix),
                 resetDate: resetDate,
                 blocksSending: true,
                 canDismiss: false
@@ -545,8 +561,8 @@ struct CodexQuotaNotice: Equatable {
             return nil
         }
         return CodexQuotaNotice(
-            title: "Codex 消息额度已用尽",
-            message: "这次发送被 Codex 额度限制拦截。请等待重置，或先在桌面 Codex 点“增加额度”/“重置使用量”。",
+            title: L10n.text("ui.codex_message_quota_has_been_exhausted"),
+            message: L10n.text("ui.this_sending_was_blocked_by_codex_quota_limit"),
             resetDate: nil,
             blocksSending: true,
             canDismiss: true
@@ -576,6 +592,7 @@ struct CodexQuotaNotice: Equatable {
             "quota exceeded",
             "quota exhausted",
             "quota has been exhausted",
+            // 服务端旧版错误不随 iOS UI 语言切换。这里只做分类，绝不把这些原文直接显示给用户。
             "额度已用尽",
             "额度耗尽",
             "消息额度不足",
@@ -596,6 +613,7 @@ struct CodexQuotaNotice: Equatable {
             "ratelimit",
             "quota",
             "429",
+            // 同上：兼容远端中文错误的稳定识别，不作为本地化产品文案。
             "额度",
             "限额",
             "速率限制",
@@ -610,23 +628,42 @@ struct CodexQuotaNotice: Equatable {
 
     private static func resetText(_ date: Date, now: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
-        formatter.dateFormat = Calendar.current.isDate(date, inSameDayAs: now) ? "HH:mm" : "M月d日 HH:mm"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate(
+            Calendar.current.isDate(date, inSameDayAs: now) ? "Hm" : "MdHm"
+        )
         let seconds = max(0, Int(date.timeIntervalSince(now).rounded()))
         let absolute = formatter.string(from: date)
         if seconds < 60 {
-            return "\(absolute)（约 \(seconds) 秒）"
+            return L10n.format(
+                "ui.value_approximately_value",
+                absolute,
+                L10n.plural("ui.seconds_count", count: seconds)
+            )
         }
         let minutes = seconds / 60
         if minutes < 60 {
-            return "\(absolute)（约 \(minutes) 分钟）"
+            return L10n.format(
+                "ui.value_approximately_value",
+                absolute,
+                L10n.plural("ui.minutes_count", count: minutes)
+            )
         }
         let hours = minutes / 60
         let remainingMinutes = minutes % 60
         if remainingMinutes == 0 {
-            return "\(absolute)（约 \(hours) 小时）"
+            return L10n.format(
+                "ui.value_approximately_value",
+                absolute,
+                L10n.plural("ui.hours_count", count: hours)
+            )
         }
-        return "\(absolute)（约 \(hours) 小时 \(remainingMinutes) 分钟）"
+        return L10n.format(
+            "ui.value_approximately_value_value",
+            absolute,
+            L10n.plural("ui.hours_count", count: hours),
+            L10n.plural("ui.minutes_count", count: remainingMinutes)
+        )
     }
 }
 
@@ -705,7 +742,7 @@ struct AgentUserInputRequest: Identifiable, Codable, Hashable {
                 return question
             }
         }
-        return "补充输入"
+        return L10n.text("ui.supplementary_input")
     }
 }
 
@@ -799,7 +836,7 @@ struct DataFlowSessionRow: Identifiable, Codable, Hashable {
         self.projectID = try container.decode(String.self, forKey: .projectID)
         self.projectName = try container.decodeIfPresent(String.self, forKey: .projectName)
         self.projectPath = try container.decodeIfPresent(String.self, forKey: .projectPath)
-        self.title = try container.decodeIfPresent(String.self, forKey: .title) ?? "未命名会话"
+        self.title = try container.decodeIfPresent(String.self, forKey: .title) ?? L10n.text("ui.unnamed_session")
         self.status = try container.decodeIfPresent(SessionStatus.self, forKey: .status) ?? .unknown
         self.source = try container.decodeIfPresent(String.self, forKey: .source) ?? "codex"
         self.runtimeProvider = try container.decodeIfPresent(String.self, forKey: .runtimeProvider)
@@ -1047,14 +1084,14 @@ enum ConnectionTerminationStatus: Equatable {
     var title: String {
         switch self {
         case .credentialsInvalid:
-            return "需要重新配对"
+            return L10n.text("ui.need_to_re_pair")
         }
     }
 
     var message: String {
         switch self {
         case .credentialsInvalid:
-            return "访问码已失效，已停止自动重试。请打开连接管理并重新扫描 Mac 上的配对二维码。"
+            return L10n.text("ui.the_access_code_has_expired_and_automatic_retries")
         }
     }
 }
@@ -1068,13 +1105,13 @@ enum ConnectionStatus: Equatable {
     var title: String {
         switch self {
         case .idle:
-            return "未连接"
+            return L10n.text("ui.not_connected")
         case .testing:
-            return "连接中"
+            return L10n.text("ui.connecting_699ade16")
         case .connected:
-            return "已连接 Mac 助手"
+            return L10n.text("ui.mac_assistant_connected")
         case .failed:
-            return "连接失败"
+            return L10n.text("ui.connection_failed")
         }
     }
 }
@@ -1089,13 +1126,13 @@ enum WebSocketStatus: Equatable {
     var title: String {
         switch self {
         case .disconnected:
-            return "终端未连接"
+            return L10n.text("ui.terminal_not_connected")
         case .connecting:
-            return "连接中"
+            return L10n.text("ui.connecting_699ade16")
         case .connected:
-            return "实时连接"
+            return L10n.text("ui.live_connection")
         case .failed:
-            return "连接失败"
+            return L10n.text("ui.connection_failed")
         case .terminated(let reason):
             return reason.title
         }

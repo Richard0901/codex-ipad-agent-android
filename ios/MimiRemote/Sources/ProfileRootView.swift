@@ -16,7 +16,7 @@ struct ProfileRootView: View {
             if horizontalSizeClass == .compact {
                 NavigationStack {
                     profileContent(tokens: tokens)
-                        .navigationTitle("我的")
+                        .navigationTitle(L10n.text("ui.mine"))
                         .navigationBarTitleDisplayMode(.inline)
                 }
                 .themedWorkbenchNavigationChrome(tokens: tokens, colorScheme: themeStore.resolvedColorScheme(for: colorScheme))
@@ -34,14 +34,14 @@ struct ProfileRootView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 if isCompact {
-                    Text("管理 Mac 连接、模型和工具能力。")
+                    Text(L10n.text("ui.manage_mac_connections_models_and_tool_capabilities"))
                         .font(themeStore.uiFont(.callout, weight: .medium))
                         .foregroundStyle(tokens.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
                     WorkbenchPageHeader(
-                        title: "我的",
-                        subtitle: "管理 Mac 连接、模型和工具能力。",
+                        title: L10n.text("ui.mine"),
+                        subtitle: L10n.text("ui.manage_mac_connections_models_and_tool_capabilities"),
                         tokens: tokens
                     )
                 }
@@ -50,35 +50,35 @@ struct ProfileRootView: View {
                 CodexUsagePanel()
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("模型与能力")
+                    Text(L10n.text("ui.models_and_capabilities"))
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
                     ProfileInfoRow(
                         systemImage: "sparkles",
                         title: "Codex",
-                        value: "默认使用",
-                        detail: "默认处理会话任务",
+                        value: L10n.text("ui.used_by_default"),
+                        detail: L10n.text("ui.handle_session_tasks_by_default"),
                         tone: tokens.accent
                     )
                     ProfileInfoRow(
                         systemImage: "flask",
                         title: "Claude",
-                        value: sessionStore.hasClaudeRuntimeChannel ? "已发现" : "可配置",
-                        detail: "配置后可用于会话任务",
+                        value: sessionStore.hasClaudeRuntimeChannel ? L10n.text("ui.found") : L10n.text("ui.configurable"),
+                        detail: L10n.text("ui.can_be_used_for_session_tasks_after_configuration"),
                         tone: sessionStore.hasClaudeRuntimeChannel ? tokens.success : tokens.secondaryText
                     )
                     ProfileInfoRow(
                         systemImage: "cpu",
-                        title: "模型",
+                        title: L10n.text("ui.model"),
                         value: modelSummary,
-                        detail: "为新任务选择合适的模型",
+                        detail: L10n.text("ui.choose_the_right_model_for_a_new_task"),
                         tone: tokens.accent
                     )
                     ProfileInfoRow(
                         systemImage: "wand.and.stars",
                         title: "Skills / MCP",
-                        value: "工具能力",
-                        detail: "查看本机工具和扩展配置",
+                        value: L10n.text("ui.tool_ability"),
+                        detail: L10n.text("ui.view_native_tools_and_extension_configurations"),
                         tone: tokens.accent
                     )
                 }
@@ -95,7 +95,7 @@ struct ProfileRootView: View {
 
     private var modelSummary: String {
         let count = sessionStore.appServerModelOptions.count
-        return count == 0 ? "默认模型" : "\(count) 个模型"
+        return count == 0 ? L10n.text("ui.default_model") : L10n.plural("ui.models_count", count: count)
     }
 }
 
@@ -114,7 +114,7 @@ struct CodexUsagePanel: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 if display.windows.isEmpty {
-                    Text("刷新后显示 Codex 当前返回的账号窗口")
+                    Text(L10n.text("ui.after_refreshing_the_account_window_currently_returned_by"))
                         .font(themeStore.uiFont(.footnote))
                         .foregroundStyle(tokens.secondaryText)
                 } else {
@@ -150,11 +150,11 @@ struct CodexUsagePanel: View {
             .frame(width: 42, height: 42)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("\(display.displayName) 用量")
+                Text(L10n.format("ui.value_dosage", display.displayName))
                     .font(themeStore.uiFont(.headline, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
                     .lineLimit(1)
-                Text(display.hasLiveData ? "Codex 当前返回：\(display.windowSummaryText)" : "点击刷新读取 Codex 账号限额")
+                Text(display.hasLiveData ? L10n.format("ui.codex_currently_returns_value", display.windowSummaryText) : L10n.text("ui.click_refresh_to_read_codex_account_limits"))
                     .font(themeStore.uiFont(.footnote))
                     .foregroundStyle(tokens.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -199,7 +199,7 @@ struct CodexUsagePanel: View {
             ProgressView(value: progress)
                 .tint(tint)
                 .opacity(window.progress == nil ? 0.34 : 1)
-                .accessibilityLabel("\(window.accessibilityName)用量")
+                .accessibilityLabel(L10n.format("ui.value_dosage_ffbd1847", window.accessibilityName))
                 .accessibilityValue(window.primaryText)
 
             Text(window.resetText)
@@ -254,7 +254,7 @@ struct CodexUsagePanel: View {
                 .stroke(tokens.border.opacity(0.72), lineWidth: 1)
         }
         .disabled(isWorking)
-        .accessibilityLabel("刷新 Codex 用量")
+        .accessibilityLabel(L10n.text("ui.refresh_codex_usage_c0f2c6f0"))
     }
 
     private func refreshUsage() async {
@@ -302,14 +302,14 @@ struct MacConnectionPanel: View {
 
             DisclosureGroup(isExpanded: $isShowingManualFields) {
                 VStack(alignment: .leading, spacing: 10) {
-                    TextField("Tailscale 地址", text: $endpoint)
+                    TextField(L10n.text("ui.tailscale_address"), text: $endpoint)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                         .font(themeStore.uiFont(.callout))
                         .padding(10)
                         .background(tokens.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    SecureField("访问码", text: $token)
+                    SecureField(L10n.text("ui.access_code"), text: $token)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(themeStore.uiFont(.callout))
@@ -318,7 +318,7 @@ struct MacConnectionPanel: View {
                 }
                 .padding(.top, 10)
             } label: {
-                Label("手动配置", systemImage: "slider.horizontal.3")
+                Label(L10n.text("ui.manual_configuration"), systemImage: "slider.horizontal.3")
                     .font(themeStore.uiFont(.callout, weight: .semibold))
                     .foregroundStyle(appStore.isConfigured ? tokens.primaryText : tokens.secondaryText)
             }
@@ -347,7 +347,7 @@ struct MacConnectionPanel: View {
             }
         }
         .confirmationDialog(
-            pendingRemovalConfirmation?.title ?? "确认删除连接凭据？",
+            pendingRemovalConfirmation?.title ?? L10n.text("ui.confirm_to_delete_connection_credentials"),
             isPresented: removalConfirmationBinding,
             titleVisibility: .visible,
             presenting: pendingRemovalConfirmation
@@ -357,7 +357,7 @@ struct MacConnectionPanel: View {
             }
             .accessibilityIdentifier("root.connection.forget.confirm")
 
-            Button("取消", role: .cancel) {
+            Button(L10n.text("ui.cancel"), role: .cancel) {
                 pendingRemovalConfirmation = nil
             }
         } message: { confirmation in
@@ -415,7 +415,7 @@ struct MacConnectionPanel: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Text("连接 Mac")
+                    Text(L10n.text("ui.connect_to_mac"))
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
                     Text(appStore.connectionStatus.title)
@@ -425,7 +425,7 @@ struct MacConnectionPanel: View {
                         .padding(.vertical, 4)
                         .background(connectionTone(tokens: tokens).opacity(0.12), in: Capsule())
                 }
-                Text(appStore.isConfigured ? appStore.endpoint : "尚未配置 Mac 连接")
+                Text(appStore.isConfigured ? appStore.endpoint : L10n.text("ui.mac_connection_not_configured_yet"))
                     .font(themeStore.uiFont(.callout))
                     .foregroundStyle(tokens.secondaryText)
                     .lineLimit(2)
@@ -441,23 +441,23 @@ struct MacConnectionPanel: View {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在测试连接")
+                    Text(L10n.text("ui.testing_connection"))
                         .font(themeStore.uiFont(.footnote, weight: .medium))
                         .foregroundStyle(tokens.secondaryText)
                 }
             }
             if let milliseconds = appStore.lastConnectionTestDurationMillis {
-                Text("上次测试耗时 \(AppStore.connectionTestDurationText(milliseconds: milliseconds))")
+                Text(L10n.format("ui.the_last_test_took_value", AppStore.connectionTestDurationText(milliseconds: milliseconds)))
                     .font(themeStore.uiFont(.footnote))
                     .foregroundStyle(tokens.secondaryText)
             }
             if let report = appStore.lastConnectionTestReport {
                 if let failedStage = report.failedStage {
-                    Text("失败环节：\(failedStage.kind.title) · \(AppStore.connectionTestDurationText(milliseconds: failedStage.durationMillis))")
+                    Text(L10n.format("ui.failed_link_value_value", failedStage.kind.title, AppStore.connectionTestDurationText(milliseconds: failedStage.durationMillis)))
                         .font(themeStore.uiFont(.footnote))
                         .foregroundStyle(tokens.warning)
                 } else if let slowestStage = report.slowestStage {
-                    Text("最慢环节：\(slowestStage.kind.title) · \(AppStore.connectionTestDurationText(milliseconds: slowestStage.durationMillis))")
+                    Text(L10n.format("ui.slowest_link_value_value", slowestStage.kind.title, AppStore.connectionTestDurationText(milliseconds: slowestStage.durationMillis)))
                         .font(themeStore.uiFont(.footnote))
                         .foregroundStyle(tokens.secondaryText)
                 }
@@ -478,7 +478,7 @@ struct MacConnectionPanel: View {
                     )
                 }
             } label: {
-                Label(isConnectionTesting ? "测试中" : "测试连接", systemImage: isConnectionTesting ? "timer" : "bolt.horizontal.circle")
+                Label(isConnectionTesting ? L10n.text("ui.under_test") : L10n.text("ui.test_connection"), systemImage: isConnectionTesting ? "timer" : "bolt.horizontal.circle")
             }
             .buttonStyle(.bordered)
             .disabled(!canSubmit)
@@ -486,7 +486,7 @@ struct MacConnectionPanel: View {
             Button {
                 Task { await saveManualConnection() }
             } label: {
-                Label(isSavingConnection ? "保存中" : "保存连接", systemImage: "checkmark.circle")
+                Label(isSavingConnection ? L10n.text("ui.saving") : L10n.text("ui.save_connection"), systemImage: "checkmark.circle")
             }
             .buttonStyle(.borderedProminent)
             .disabled(!canSubmit)
@@ -496,7 +496,7 @@ struct MacConnectionPanel: View {
             Button(role: .destructive) {
                 requestForgetCurrent()
             } label: {
-                Label("忘记", systemImage: "trash")
+                Label(L10n.text("ui.forget"), systemImage: "trash")
             }
             .buttonStyle(.bordered)
             .disabled(isSavingConnection)
@@ -541,7 +541,7 @@ struct MacConnectionPanel: View {
             Button {
                 isShowingQRCodeScanner = true
             } label: {
-                compactActionLabel("扫码连接", systemImage: "qrcode.viewfinder")
+                compactActionLabel(L10n.text("ui.scan_code_to_connect"), systemImage: "qrcode.viewfinder")
             }
             .buttonStyle(.bordered)
             .disabled(isSavingConnection)
@@ -549,7 +549,7 @@ struct MacConnectionPanel: View {
             Button {
                 isShowingQRCodeScanner = true
             } label: {
-                compactActionLabel("扫码连接", systemImage: "qrcode.viewfinder")
+                compactActionLabel(L10n.text("ui.scan_code_to_connect"), systemImage: "qrcode.viewfinder")
             }
             .buttonStyle(.borderedProminent)
             .disabled(isSavingConnection)
@@ -565,7 +565,7 @@ struct MacConnectionPanel: View {
                 )
             }
         } label: {
-            compactActionLabel(isConnectionTesting ? "测试中" : "测试连接", systemImage: isConnectionTesting ? "timer" : "bolt.horizontal.circle")
+            compactActionLabel(isConnectionTesting ? L10n.text("ui.under_test") : L10n.text("ui.test_connection"), systemImage: isConnectionTesting ? "timer" : "bolt.horizontal.circle")
         }
         .buttonStyle(.bordered)
         .disabled(!canSubmit)
@@ -575,7 +575,7 @@ struct MacConnectionPanel: View {
         Button {
             Task { await saveManualConnection() }
         } label: {
-            compactActionLabel(isSavingConnection ? "保存中" : "保存连接", systemImage: "checkmark.circle")
+            compactActionLabel(isSavingConnection ? L10n.text("ui.saving") : L10n.text("ui.save_connection"), systemImage: "checkmark.circle")
         }
         .buttonStyle(.borderedProminent)
         .disabled(!canSubmit)
@@ -585,7 +585,7 @@ struct MacConnectionPanel: View {
         Button(role: .destructive) {
             requestForgetCurrent()
         } label: {
-            compactActionLabel("忘记", systemImage: "trash")
+            compactActionLabel(L10n.text("ui.forget"), systemImage: "trash")
         }
         .buttonStyle(.bordered)
         .disabled(isSavingConnection)
@@ -598,7 +598,7 @@ struct MacConnectionPanel: View {
             Button {
                 isShowingQRCodeScanner = true
             } label: {
-                Label("扫码连接", systemImage: "qrcode.viewfinder")
+                Label(L10n.text("ui.scan_code_to_connect"), systemImage: "qrcode.viewfinder")
             }
             .buttonStyle(.bordered)
             .disabled(isSavingConnection)
@@ -606,7 +606,7 @@ struct MacConnectionPanel: View {
             Button {
                 isShowingQRCodeScanner = true
             } label: {
-                Label("扫码连接", systemImage: "qrcode.viewfinder")
+                Label(L10n.text("ui.scan_code_to_connect"), systemImage: "qrcode.viewfinder")
             }
             .buttonStyle(.borderedProminent)
             .disabled(isSavingConnection)
@@ -684,11 +684,11 @@ struct MacConnectionPanel: View {
                 defer { isSavingConnection = false }
                 _ = await refreshCommittedConnection(maxWait: wasConfigured ? 10 : 45)
             }
-            return .accepted("已连接这台 Mac")
+            return .accepted(L10n.text("ui.this_mac_is_connected"))
         } catch is CancellationError {
             isSavingConnection = false
             localError = nil
-            return .rejected("扫码已取消，请重新扫描 Mac 上的二维码。")
+            return .rejected(L10n.text("ui.the_code_scan_has_been_cancelled_please_scan"))
         } catch {
             isSavingConnection = false
             appStore.connectionStatus = .failed(error.localizedDescription)
@@ -733,7 +733,7 @@ struct MacConnectionPanel: View {
         guard expectedProfileID == appStore.activeConnectionProfileID else {
             // 弹窗展示期间连接可能被其它入口切换；旧确认不得作用于新的当前 Mac。
             pendingRemovalConfirmation = nil
-            localError = "当前 Mac 已发生变化，请重新操作。"
+            localError = L10n.text("ui.the_current_mac_has_changed_please_try_again")
             return
         }
         pendingRemovalConfirmation = nil
@@ -813,4 +813,3 @@ struct ProfileInfoRow: View {
             .lineLimit(1)
     }
 }
-

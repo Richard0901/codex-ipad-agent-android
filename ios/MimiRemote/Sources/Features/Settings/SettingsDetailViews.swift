@@ -20,13 +20,13 @@ struct ConnectionProfileRenameSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Mac 名称", text: $displayName)
+                    TextField(L10n.text("ui.mac_name"), text: $displayName)
                         .textInputAutocapitalization(.words)
                         .submitLabel(.done)
                         .onSubmit(rename)
                         .accessibilityIdentifier("settings.profile.rename.name")
                 } footer: {
-                    Text(validationMessage ?? "最多 \(AppStore.connectionProfileDisplayNameLimit) 个字符，只修改本机显示名称。")
+                    Text(validationMessage ?? L10n.format("ui.up_to_value_characters_only_the_local_display", AppStore.connectionProfileDisplayNameLimit))
                         .foregroundStyle(validationMessage == nil ? Color.secondary : Color.red)
                 }
 
@@ -38,14 +38,14 @@ struct ConnectionProfileRenameSheet: View {
                     }
                 }
             }
-            .navigationTitle("重命名 Mac")
+            .navigationTitle(L10n.text("ui.rename_mac"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存", action: rename)
+                    Button(L10n.text("ui.save"), action: rename)
                         .disabled(validationMessage != nil)
                         .accessibilityIdentifier("settings.profile.rename.save")
                 }
@@ -141,27 +141,27 @@ struct CapabilitiesView: View {
         Form {
             Section {
                 if let path = sessionStore.capabilityList?.path, !path.isEmpty {
-                    CapabilityValueRow(title: "工作区", value: path)
+                    CapabilityValueRow(title: L10n.text("ui.workspace"), value: path)
                 } else {
-                    CapabilityValueRow(title: "工作区", value: sessionStore.selectedCommandActionPath ?? "仅用户级配置")
+                    CapabilityValueRow(title: L10n.text("ui.workspace"), value: sessionStore.selectedCommandActionPath ?? L10n.text("ui.user_level_configuration_only"))
                 }
                 Button {
                     Task { await sessionStore.refreshCapabilities() }
                 } label: {
                     if sessionStore.isRefreshingCapabilities {
-                        Label("正在刷新", systemImage: "arrow.clockwise")
+                        Label(L10n.text("ui.refreshing_21eaf737"), systemImage: "arrow.clockwise")
                     } else {
-                        Label("刷新能力", systemImage: "arrow.clockwise")
+                        Label(L10n.text("ui.refresh_ability"), systemImage: "arrow.clockwise")
                     }
                 }
                 .disabled(sessionStore.isRefreshingCapabilities)
             } footer: {
-                Text("这里只读展示 agentd 可发现的本地 Skills 和 MCP 配置，不会启动 MCP server，也不会读取或显示环境变量值。")
+                Text(L10n.text("ui.here_the_local_skills_and_mcp_configurations_discoverable"))
             }
             .listRowBackground(tokens.elevatedSurface)
 
             if let error = sessionStore.capabilityErrorMessage {
-                Section("错误") {
+                Section(L10n.text("ui.error")) {
                     Text(error)
                         .font(themeStore.uiFont(.caption))
                         .foregroundStyle(.red)
@@ -169,10 +169,10 @@ struct CapabilitiesView: View {
                 .listRowBackground(tokens.elevatedSurface)
             }
 
-            Section("Skills") {
+            Section(L10n.text("ui.skills")) {
                 let skills = sessionStore.capabilityList?.skills ?? []
                 if skills.isEmpty {
-                    ContentUnavailableView("未发现 Skills", systemImage: "wand.and.stars")
+                    ContentUnavailableView(L10n.text("ui.skills_not_found"), systemImage: "wand.and.stars")
                         .font(themeStore.uiFont(.caption))
                 } else {
                     ForEach(skills) { skill in
@@ -191,7 +191,7 @@ struct CapabilitiesView: View {
             Section("MCP") {
                 let servers = sessionStore.capabilityList?.mcpServers ?? []
                 if servers.isEmpty {
-                    ContentUnavailableView("未发现 MCP server", systemImage: "point.3.connected.trianglepath.dotted")
+                    ContentUnavailableView(L10n.text("ui.mcp_server_not_found"), systemImage: "point.3.connected.trianglepath.dotted")
                         .font(themeStore.uiFont(.caption))
                 } else {
                     ForEach(servers) { server in
@@ -210,7 +210,7 @@ struct CapabilitiesView: View {
             .listRowBackground(tokens.elevatedSurface)
         }
         .themedSettingsForm(tokens: tokens)
-        .navigationTitle("能力")
+        .navigationTitle(L10n.text("ui.ability"))
         .tint(tokens.accent)
         .task {
             if sessionStore.capabilityList == nil {
@@ -233,31 +233,58 @@ struct CapabilitiesView: View {
         if let command = server.command, !command.isEmpty {
             return command
         }
-        return server.transport
+        return transportText(server.transport)
     }
 
     private func serverDetail(_ server: MCPCapability) -> String {
         let base = "\(scopeText(server.scope)) · \(server.configPath)"
-        guard let note = server.statusNote, !note.isEmpty else {
+        guard let note = localizedStatusNote(server) else {
             return base
         }
         return "\(base)\n\(note)"
     }
 
+    /// `status_note` is server diagnostics currently authored in Chinese. The status and
+    /// transport codes are stable, so render those locally and keep raw details out of UI.
+    private func localizedStatusNote(_ server: MCPCapability) -> String? {
+        switch (server.status, server.transport) {
+        case ("disabled", _):
+            return L10n.text("ui.mcp_status_disabled")
+        case ("ready", "stdio"):
+            return L10n.text("ui.mcp_status_command_available")
+        case ("missing_command", "stdio"):
+            return L10n.text("ui.mcp_status_command_missing")
+        case ("invalid", "stdio"):
+            return L10n.text("ui.mcp_status_stdio_command_required")
+        case ("invalid", "http"):
+            return L10n.text("ui.mcp_status_http_url_required")
+        case ("configured", "http"):
+            return L10n.text("ui.mcp_status_http_not_probed")
+        case ("invalid", _):
+            return L10n.text("ui.mcp_status_command_or_url_required")
+        case ("ready", _), ("configured", _):
+            return L10n.text("ui.mcp_status_ready")
+        case (nil, _):
+            return server.enabled ? L10n.text("ui.mcp_status_unknown") : L10n.text("ui.mcp_status_disabled")
+        default:
+            return L10n.text("ui.mcp_status_unknown")
+        }
+    }
+
     private func serverStatusText(_ server: MCPCapability) -> String? {
         switch server.status {
         case "ready":
-            return "可用"
+            return L10n.text("ui.available")
         case "configured":
-            return "已配置"
+            return L10n.text("ui.configured")
         case "missing_command":
-            return "缺少命令"
+            return L10n.text("ui.missing_command")
         case "invalid":
-            return "配置异常"
+            return L10n.text("ui.configuration_exception")
         case "disabled":
-            return "已停用"
+            return L10n.text("ui.deactivated")
         default:
-            return server.enabled ? nil : "已停用"
+            return server.enabled ? nil : L10n.text("ui.deactivated")
         }
     }
 
@@ -279,13 +306,22 @@ struct CapabilitiesView: View {
     private func scopeText(_ scope: String) -> String {
         switch scope {
         case "repo":
-            return "项目"
+            return L10n.text("ui.project")
         case "user":
-            return "用户"
+            return L10n.text("ui.user")
         case "admin":
-            return "系统"
+            return L10n.text("ui.system")
         default:
-            return scope
+            return L10n.text("ui.unknown_scope")
+        }
+    }
+
+    private func transportText(_ transport: String?) -> String? {
+        switch transport {
+        case "stdio": return L10n.text("ui.mcp_transport_stdio")
+        case "http": return L10n.text("ui.mcp_transport_http")
+        case nil, "": return nil
+        default: return L10n.text("ui.mcp_transport_unknown")
         }
     }
 }
@@ -356,7 +392,7 @@ struct CapabilityItemRow: View {
                             .font(themeStore.uiFont(.caption2, weight: .medium))
                             .foregroundStyle(statusColor)
                     } else if !isEnabled {
-                        Text("已停用")
+                        Text(L10n.text("ui.deactivated"))
                             .font(themeStore.uiFont(.caption2, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
@@ -391,7 +427,7 @@ struct AppearanceView: View {
 
         Form {
             Section {
-                Picker("外观", selection: $themeStore.mode) {
+                Picker(L10n.text("ui.appearance"), selection: $themeStore.mode) {
                     ForEach(ThemeMode.allCases) { mode in
                         Label(mode.title, systemImage: iconName(for: mode))
                             .tag(mode)
@@ -399,9 +435,9 @@ struct AppearanceView: View {
                 }
                 .pickerStyle(.segmented)
             } header: {
-                Text("深浅色")
+                Text(L10n.text("ui.dark_and_light_colors"))
             } footer: {
-                Text("系统模式会跟随当前设备外观；浅色和深色会固定 App 外观。")
+                Text(L10n.text("ui.system_mode_follows_the_current_device_appearance_light"))
             }
             .listRowBackground(tokens.elevatedSurface)
 
@@ -416,18 +452,18 @@ struct AppearanceView: View {
                     }
                 }
             } header: {
-                Text("主题")
+                Text(L10n.text("ui.topic"))
             }
             .listRowBackground(tokens.elevatedSurface)
 
             Section {
-                Picker("UI 字体", selection: $themeStore.uiFontPreset) {
+                Picker(L10n.text("ui.ui_font"), selection: $themeStore.uiFontPreset) {
                     ForEach(ThemeUIFontPreset.allCases) { font in
                         Text(font.title).tag(font)
                     }
                 }
 
-                Picker("代码字体", selection: $themeStore.codeFontPreset) {
+                Picker(L10n.text("ui.code_font"), selection: $themeStore.codeFontPreset) {
                     ForEach(ThemeCodeFontPreset.allCases) { font in
                         Text(font.title).tag(font)
                     }
@@ -435,7 +471,7 @@ struct AppearanceView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("字体大小")
+                        Text(L10n.text("ui.font_size"))
                         Spacer()
                         Text(fontScaleText)
                             .foregroundStyle(tokens.secondaryText)
@@ -462,7 +498,7 @@ struct AppearanceView: View {
                 }
                 .padding(.vertical, 4)
             } header: {
-                Text("字体")
+                Text(L10n.text("ui.font"))
             }
             .listRowBackground(tokens.elevatedSurface)
 
@@ -470,7 +506,7 @@ struct AppearanceView: View {
                 AppearanceConversationPreview()
                     .listRowInsets(EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12))
             } header: {
-                Text("聊天预览")
+                Text(L10n.text("ui.chat_preview"))
             }
             .listRowBackground(tokens.elevatedSurface)
 
@@ -478,7 +514,7 @@ struct AppearanceView: View {
                 Button(role: .destructive) {
                     themeStore.reset()
                 } label: {
-                    Label("恢复默认外观", systemImage: "arrow.counterclockwise")
+                    Label(L10n.text("ui.restore_default_appearance"), systemImage: "arrow.counterclockwise")
                 }
             }
             .listRowBackground(tokens.elevatedSurface)
@@ -487,7 +523,7 @@ struct AppearanceView: View {
         .frame(maxWidth: 720)
         .frame(maxWidth: .infinity)
         .background(tokens.background.ignoresSafeArea())
-        .navigationTitle("外观")
+        .navigationTitle(L10n.text("ui.appearance"))
         .preferredColorScheme(resolvedColorScheme)
         .environment(\.colorScheme, resolvedColorScheme)
         .tint(tokens.accent)
@@ -576,7 +612,7 @@ struct AppearanceConversationPreview: View {
             }
 
             PreviewBubble(
-                text: "帮我检查这个 PR 的风险点。",
+                text: L10n.text("ui.help_me_check_the_risks_of_this_pr"),
                 alignment: .trailing,
                 fill: tokens.userBubble,
                 textColor: tokens.primaryText,
@@ -584,7 +620,7 @@ struct AppearanceConversationPreview: View {
             )
 
             PreviewBubble(
-                text: "已开始检查。发现 2 个需要确认的改动，完整日志在 Inspector。",
+                text: L10n.text("ui.checking_started_found_2_changes_that_need_to"),
                 alignment: .leading,
                 fill: tokens.assistantBubble,
                 textColor: tokens.primaryText,
@@ -594,7 +630,7 @@ struct AppearanceConversationPreview: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Image(systemName: "terminal")
-                    Text("命令摘要")
+                    Text(L10n.text("ui.command_summary"))
                     Spacer()
                     Text("go test ./...")
                         .lineLimit(1)

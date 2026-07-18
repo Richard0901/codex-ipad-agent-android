@@ -46,7 +46,7 @@ extension ComposerView {
                     removeAttachment(item, at: index)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .accessibilityLabel("移除")
+                        .accessibilityLabel(L10n.text("ui.remove"))
                 }
                 .buttonStyle(.plain)
             }
@@ -101,15 +101,15 @@ extension ComposerView {
                             ProgressView()
                                 .controlSize(.small)
                         } else {
-                            Label("重试转写", systemImage: "arrow.clockwise")
+                            Label(L10n.text("ui.try_transcribing_again"), systemImage: "arrow.clockwise")
                         }
                     }
                     .font(themeStore.uiFont(.caption, weight: .semibold))
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
                     .disabled(isVoiceTranscribing)
-                    .accessibilityLabel("重试语音转写")
-                    .help("重新提交刚才的录音")
+                    .accessibilityLabel(L10n.text("ui.retry_speech_transcription"))
+                    .help(L10n.text("ui.resubmit_the_recording_you_just_made"))
                 }
                 Button {
                     clearVoiceTransientStatus()
@@ -119,8 +119,8 @@ extension ComposerView {
                         .foregroundStyle(.red.opacity(0.75))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("关闭语音转写错误提示")
-                .help("关闭提示")
+                .accessibilityLabel(L10n.text("ui.turn_off_speech_transcription_error_prompts"))
+                .help(L10n.text("ui.close_prompt"))
             }
             .font(themeStore.uiFont(.caption))
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -174,9 +174,9 @@ extension ComposerView {
         let isGuidedFollowUp = !isGoalMode && !isPlanMode && canUseGuidedFollowUp && guidedFollowUpEnabled
         let title: String
         if composerState.voiceDraftNeedsReview {
-            title = isGoalMode ? "确认目标" : isPlanMode ? "确认计划" : isGuidedFollowUp ? "确认引导" : "确认发送"
+            title = isGoalMode ? L10n.text("ui.confirm_target") : isPlanMode ? L10n.text("ui.confirm_plan") : isGuidedFollowUp ? L10n.text("ui.confirm_boot") : L10n.text("ui.confirm_sending")
         } else {
-            title = isGoalMode ? "发送目标" : isPlanMode ? "生成计划" : isGuidedFollowUp ? "引导" : "发送"
+            title = isGoalMode ? L10n.text("ui.send_target") : isPlanMode ? L10n.text("ui.generate_plan") : isGuidedFollowUp ? L10n.text("ui.guide") : L10n.text("ui.send")
         }
         let symbol = composerState.voiceDraftNeedsReview ? "checkmark.circle.fill" : (isGoalMode ? "target" : isPlanMode ? "list.clipboard" : isGuidedFollowUp ? "text.bubble.fill" : "paperplane.fill")
         let enabled = canSubmitDraft
@@ -215,7 +215,7 @@ extension ComposerView {
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
         .keyboardShortcut(.return, modifiers: .command)
         .disabled(!enabled)
-        .accessibilityLabel(isGoalMode ? "发送目标任务" : (composerState.voiceDraftNeedsReview ? "确认发送语音草稿" : "发送"))
+        .accessibilityLabel(isGoalMode ? L10n.text("ui.send_target_task") : (composerState.voiceDraftNeedsReview ? L10n.text("ui.confirm_sending_voice_draft") : L10n.text("ui.send")))
     }
 
     var permissionTitle: String {
@@ -484,7 +484,7 @@ extension ComposerView {
         }
         guard retryableVoiceTranscription.sessionID == sessionStore.selectedSessionID else {
             self.retryableVoiceTranscription = nil
-            voiceInput.setErrorMessage("会话已切换，请重新录音")
+            voiceInput.setErrorMessage(L10n.text("ui.the_session_has_been_switched_please_record_again"))
             return
         }
         let context = VoiceTranscriptionContext(sessionID: retryableVoiceTranscription.sessionID)
@@ -525,7 +525,7 @@ extension ComposerView {
             if retryableVoiceTranscription?.id == cached.id {
                 retryableVoiceTranscription = nil
             }
-            voiceInput.setNoticeMessage("语音已重新转写，请确认草稿后发送")
+            voiceInput.setNoticeMessage(L10n.text("ui.the_voice_has_been_re_transcribed_please_confirm"))
         } catch is CancellationError {
             if retryableVoiceTranscription?.id == cached.id {
                 retryableVoiceTranscription = nil
@@ -553,9 +553,9 @@ extension ComposerView {
     func shortVoiceRecordingMessage(recording: VoiceRecordingResult, usableDuration: TimeInterval) -> String {
         // 区分“用户真的很快松手”和“按住了但录音器实际采样很短”，避免把启动延迟误报成没按够 1 秒。
         if recording.pressDuration >= 0.9 && usableDuration < Self.minimumUsableVoiceDuration {
-            return "麦克风启动较慢，刚才录到的声音太短，请等“正在听”后再说"
+            return L10n.text("ui.the_microphone_starts_slowly_the_sound_just_recorded")
         }
-        return "按得有点短，请按住说完整句再松开"
+        return L10n.text("ui.the_press_is_a_bit_short_please_hold")
     }
 
     nonisolated static func voiceRecordingDuration(_ url: URL) async throws -> TimeInterval {
@@ -567,24 +567,24 @@ extension ComposerView {
     func userFacingVoiceTranscriptionError(_ error: Error, recording: VoiceRecordingResult? = nil) -> String {
         let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else {
-            return "语音转写失败，请稍后重试"
+            return L10n.text("ui.voice_transcription_failed_please_try_again_later")
         }
         if message.contains("没有识别到语音内容") || message.contains("按住说话至少 1 秒") {
             if let recording, recording.pressDuration >= 0.9 {
-                return "没有识别到清晰语音，请靠近麦克风并说完整句后再松手"
+                return L10n.text("ui.no_clear_voice_is_recognized_please_move_closer")
             }
-            return "没有识别到清晰语音，请按住说完整句后再松手"
+            return L10n.text("ui.no_clear_voice_was_recognized_please_hold_down")
         }
         if Self.isTemporaryUnavailableVoiceErrorMessage(message) {
             if let seconds = Self.retryAfterSeconds(from: message) {
-                return "语音转写暂不可用，请 \(seconds) 秒后重试"
+                return L10n.plural("ui.speech_retry_seconds_count", count: seconds)
             }
-            return "语音转写暂不可用，请稍后重试"
+            return L10n.text("ui.speech_transcription_is_currently_unavailable_please_try_again_9e0e4eee")
         }
         if Self.isTimeoutVoiceErrorMessage(message) {
-            return "语音转写请求超时，请稍后重试"
+            return L10n.text("ui.the_speech_transcription_request_timed_out_please_try")
         }
-        return "语音转写失败：\(message)"
+        return L10n.format("ui.speech_transcription_failed", message)
     }
 
     nonisolated static func isRetryableVoiceTranscriptionError(_ error: Error) -> Bool {
@@ -668,7 +668,7 @@ extension ComposerView {
         let targetScope = activeComposerDraftScope
         let availableCount = remainingImageAttachmentCapacity(for: targetScope)
         guard availableCount > 0 else {
-            attachmentErrorMessage = "每个草稿最多添加 \(Self.maximumImageAttachmentCount) 张图片"
+            attachmentErrorMessage = L10n.format("ui.at_most_images_can_be_added_to_each", Self.maximumImageAttachmentCount)
             showsAddContentPanel = false
             return
         }
@@ -693,7 +693,7 @@ extension ComposerView {
         let selectedResults = Array(results.prefix(availableCount))
         let skippedCount = max(0, results.count - selectedResults.count)
         guard !selectedResults.isEmpty else {
-            attachmentErrorMessage = "每个草稿最多添加 \(Self.maximumImageAttachmentCount) 张图片"
+            attachmentErrorMessage = L10n.format("ui.at_most_images_can_be_added_to_each", Self.maximumImageAttachmentCount)
             return
         }
 
@@ -799,13 +799,13 @@ extension ComposerView {
             attachmentErrorMessage = nil
         } else if addedCount > 0 {
             let omitted = failedCount + skippedCount
-            attachmentErrorMessage = "已添加 \(addedCount) 张图片，另有 \(omitted) 张未添加"
+            attachmentErrorMessage = L10n.format("ui.pictures_have_been_added_and_have_not_been", addedCount, omitted)
         } else if skippedCount > 0, failedCount == 0 {
-            attachmentErrorMessage = "每个草稿最多添加 \(Self.maximumImageAttachmentCount) 张图片"
+            attachmentErrorMessage = L10n.format("ui.at_most_images_can_be_added_to_each", Self.maximumImageAttachmentCount)
         } else if let firstError {
             attachmentErrorMessage = userFacingAttachmentError(firstError)
         } else {
-            attachmentErrorMessage = "图片读取失败"
+            attachmentErrorMessage = L10n.text("ui.image_reading_failed")
         }
     }
 
@@ -820,7 +820,7 @@ extension ComposerView {
 
     func userFacingAttachmentError(_ error: Error) -> String {
         let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        return message.isEmpty ? "图片读取失败" : "图片读取失败：\(message)"
+        return message.isEmpty ? L10n.text("ui.image_reading_failed") : L10n.format("ui.image_reading_failed_20ce920a", message)
     }
 
     func attachmentSymbol(for item: CodexAppServerUserInput) -> String {

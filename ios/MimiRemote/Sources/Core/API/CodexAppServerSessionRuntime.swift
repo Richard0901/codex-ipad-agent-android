@@ -13,23 +13,23 @@ enum CodexAppServerSessionRuntimeError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidGatewayURL:
-            return "app-server gateway URL 无效"
+            return L10n.text("ui.app_server_gateway_url_is_invalid")
         case .gatewayUnavailable:
-            return "agentd 未启用 app-server gateway，请先配置 loopback app-server WebSocket upstream"
+            return L10n.text("ui.agentd_does_not_enable_app_server_gateway_please")
         case .threadSearchUnavailable:
-            return "当前 agentd 或 Codex app-server 不支持 thread/search"
+            return L10n.text("ui.currently_agentd_or_codex_app_server_does_not")
         case .projectNotFound(let projectID):
-            return "项目不存在或未加入 allowlist：\(projectID)"
+            return L10n.format("ui.the_project_does_not_exist_or_is_not", projectID)
         case .projectRequired:
-            return "direct 模式必须先选择 allowlist 项目"
+            return L10n.text("ui.direct_mode_must_first_select_the_allowlist_item")
         case .sessionNotFound(let sessionID):
-            return "app-server thread 不存在：\(sessionID)"
+            return L10n.format("ui.app_server_thread_does_not_exist_value", sessionID)
         case .missingActiveTurn(let sessionID):
-            return "当前会话没有可中断的 active turn：\(sessionID)"
+            return L10n.format("ui.there_is_no_interruptible_active_turn_for_the", sessionID)
         case .approvalNotFound(let approvalID):
-            return "审批请求已失效：\(approvalID)"
+            return L10n.format("ui.approval_request_has_expired_value", approvalID)
         case .userInputRequestNotFound(let requestID):
-            return "补充信息请求已失效：\(requestID)"
+            return L10n.format("ui.the_request_for_additional_information_has_expired_value", requestID)
         }
     }
 }
@@ -672,7 +672,7 @@ actor CodexAppServerSessionRuntime {
     // 超时，避免大会话首屏因为 20s 的默认请求超时而直接报错。
     static let bulkReadTimeout: TimeInterval = 60
     static let threadTurnsCursorPrefix = "turns:"
-    static let economyHistoryNotice = "此会话包含较大的图片或工具输出，已使用省流模式加载。"
+    static let economyHistoryNotice = L10n.text("ui.this_session_contains_large_images_or_tool_output")
 
     func messagesPage(
         sessionID: SessionID,
@@ -1875,7 +1875,7 @@ actor CodexAppServerSessionRuntime {
             // deprecationNotice 是连接级通知，官方协议不带 threadId。直接 emit 会被路由层丢弃，
             // 因此将它投递给当前连接已知会话，让用户真正看到升级提示。
             let params = notification.params?.objectValue ?? [:]
-            let summary = params["summary"]?.stringValue ?? "app-server 协议能力已废弃"
+            let summary = params["summary"]?.stringValue ?? L10n.text("ui.app_server_protocol_capability_is_obsolete")
             let details = params["details"]?.stringValue
             let payload = AgentErrorPayload(
                 message: [summary, details].compactMap { $0 }.joined(separator: "\n"),

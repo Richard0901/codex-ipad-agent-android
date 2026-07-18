@@ -442,7 +442,7 @@ extension CodexAppServerSessionRuntime {
             projectID: projectID,
             project: projectName,
             dir: cwd,
-            title: title.isEmpty ? "未命名会话" : title,
+            title: title.isEmpty ? L10n.text("ui.unnamed_session") : title,
             status: effectiveStatus,
             source: runtimeProvider,
             runtimeProvider: runtimeProvider,
@@ -477,7 +477,7 @@ extension CodexAppServerSessionRuntime {
             environment: SessionContextEnvironment(
                 id: "local",
                 kind: "local",
-                label: "本地",
+                label: L10n.text("ui.local"),
                 cwd: cwd,
                 provider: runtimeProvider == "codex" ? nonEmpty(thread["modelProvider"]?.stringValue, "openai") : nonEmpty(thread["modelProvider"]?.stringValue, "anthropic"),
                 runtimeProvider: runtimeProvider
@@ -806,13 +806,13 @@ extension CodexAppServerSessionRuntime {
     ) -> [SessionContextSource] {
         var sources: [SessionContextSource] = []
         if let label = sourceLabel(from: thread["source"]) {
-            sources.append(SessionContextSource(id: "session_source", kind: "session", label: label, subtitle: "原始来源"))
+            sources.append(SessionContextSource(id: "session_source", kind: "session", label: label, subtitle: L10n.text("ui.original_source")))
         }
         if let threadSource = nonEmpty(thread["threadSource"]?.stringValue) {
-            sources.append(SessionContextSource(id: "thread_source", kind: "thread", label: threadSource, subtitle: "线程来源"))
+            sources.append(SessionContextSource(id: "thread_source", kind: "thread", label: threadSource, subtitle: L10n.text("ui.thread_source")))
         }
         if let forkedFrom = nonEmpty(thread["forkedFromId"]?.stringValue) {
-            sources.append(SessionContextSource(id: "forked_from", kind: "fork", label: String(forkedFrom.prefix(32)), subtitle: "Fork 来源"))
+            sources.append(SessionContextSource(id: "forked_from", kind: "fork", label: String(forkedFrom.prefix(32)), subtitle: L10n.text("ui.fork_source")))
         }
         if sources.isEmpty, let project {
             sources.append(SessionContextSource(id: "project", kind: "project", label: project.name, subtitle: project.path))
@@ -909,15 +909,15 @@ extension CodexAppServerSessionRuntime {
         let status = item["status"]?.stringValue ?? turn["status"]?.stringValue
         switch item["type"]?.stringValue {
         case "commandExecution":
-            let title = nonEmpty(item["command"]?.stringValue, item["processId"]?.stringValue, "命令执行") ?? "命令执行"
+            let title = nonEmpty(item["command"]?.stringValue, item["processId"]?.stringValue, L10n.text("ui.command_execution")) ?? L10n.text("ui.command_execution")
             let subtitle = nonEmpty(item["cwd"]?.stringValue, commandActionSummary(from: item["commandActions"]?.arrayValue))
             return SessionContextTask(id: id, kind: "command", title: String(title.prefix(80)), subtitle: subtitle, status: status)
         case "fileChange":
             let changes = item["changes"]?.arrayValue?.compactMap(\.objectValue) ?? []
-            let title = changes.isEmpty ? "文件变更" : "文件变更 x\(changes.count)"
+            let title = changes.isEmpty ? L10n.text("ui.file_changes") : L10n.plural("ui.files_changed_count", count: changes.count)
             return SessionContextTask(id: id, kind: "file_change", title: title, subtitle: fileChangeSummary(from: changes), status: status)
         case "mcpToolCall":
-            let title = nonEmpty(item["tool"]?.stringValue, item["name"]?.stringValue, "工具调用") ?? "工具调用"
+            let title = nonEmpty(item["tool"]?.stringValue, item["name"]?.stringValue, L10n.text("ui.tool_call")) ?? L10n.text("ui.tool_call")
             let subtitle = nonEmpty(item["server"]?.stringValue, item["namespace"]?.stringValue, item["pluginId"]?.stringValue)
             return SessionContextTask(
                 id: id,
@@ -927,7 +927,7 @@ extension CodexAppServerSessionRuntime {
                 status: status
             )
         case "dynamicToolCall":
-            let title = nonEmpty(item["tool"]?.stringValue, item["name"]?.stringValue, "动态工具") ?? "动态工具"
+            let title = nonEmpty(item["tool"]?.stringValue, item["name"]?.stringValue, L10n.text("ui.dynamic_tools")) ?? L10n.text("ui.dynamic_tools")
             let subtitle = nonEmpty(item["pluginId"]?.stringValue, item["namespace"]?.stringValue)
             return SessionContextTask(
                 id: id,
@@ -937,12 +937,12 @@ extension CodexAppServerSessionRuntime {
                 status: status
             )
         case "collabAgentToolCall":
-            let title = nonEmpty(item["agentNickname"]?.stringValue, item["nickname"]?.stringValue, item["tool"]?.stringValue, "子 Agent") ?? "子 Agent"
+            let title = nonEmpty(item["agentNickname"]?.stringValue, item["nickname"]?.stringValue, item["tool"]?.stringValue, L10n.text("ui.sub_agent")) ?? L10n.text("ui.sub_agent")
             let subtitle = nonEmpty(item["agentRole"]?.stringValue, item["role"]?.stringValue)
             return SessionContextTask(id: id, kind: "subagent", title: title, subtitle: subtitle, status: status)
         case "webSearch":
             let query = nonEmpty(item["query"]?.stringValue, item["action"]?.stringValue)
-            let title = query.map { "网络搜索：\($0)" } ?? "网络搜索"
+            let title = query.map { L10n.format("ui.internet_search_value", $0) } ?? L10n.text("ui.web_search")
             return SessionContextTask(id: id, kind: "web_search", title: title, subtitle: nil, status: status)
         default:
             return nil
@@ -1024,6 +1024,11 @@ extension CodexAppServerSessionRuntime {
                 threadIsActive: threadIsActive,
                 completedAt: completedAt
             )
+            let turnLifecycle = historyTurnLifecycle(
+                turn,
+                isInProgress: turnIsInProgress,
+                completedAt: completedAt
+            )
             let items = turn["items"]?.arrayValue?.compactMap(\.objectValue) ?? []
             var hasVisibleUserMessageInTurn = false
             for (itemIndex, item) in items.enumerated() {
@@ -1041,6 +1046,7 @@ extension CodexAppServerSessionRuntime {
                 ) else {
                     continue
                 }
+                message = message.withTurnLifecycle(turnLifecycle)
                 if message.role == "user" {
                     hasVisibleUserMessageInTurn = true
                 }
@@ -1210,6 +1216,29 @@ extension CodexAppServerSessionRuntime {
             return true
         default:
             return false
+        }
+    }
+
+    func historyTurnLifecycle(
+        _ turn: [String: CodexAppServerJSONValue],
+        isInProgress: Bool,
+        completedAt: Date?
+    ) -> ConversationTurnLifecycle {
+        if isInProgress {
+            return .inProgress
+        }
+        let raw = turn["status"]?.stringValue
+            ?? turn["status"]?.objectValue?["type"]?.stringValue
+            ?? turn["status"]?.objectValue?["status"]?.stringValue
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "completed", "complete", "succeeded", "success":
+            return .completed
+        case "failed", "failure", "systemerror", "system_error":
+            return .failed
+        case "interrupted", "cancelled", "canceled", "aborted":
+            return .interrupted
+        default:
+            return completedAt == nil ? .unknown : .completed
         }
     }
 
@@ -1628,6 +1657,8 @@ extension CodexAppServerSessionRuntime {
             return .array(answers.map { .string($0) })
         case "boolean":
             let normalized = first.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            // Upstream payload values are protocol data, not UI copy. Keep both known
+            // Chinese spellings accepted regardless of the device display language.
             return .bool(["true", "1", "yes", "是", "允许"].contains(normalized))
         case "integer":
             return Int64(first).map(CodexAppServerJSONValue.int) ?? .string(first)

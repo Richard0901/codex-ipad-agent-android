@@ -14,8 +14,10 @@ final class ConversationStore: ObservableObject {
     private var historyProjectionCacheBySessionID: [String: HistoryProjectionCache] = [:]
     private var pendingAssistantDeltasBySessionID: [String: PendingAssistantDelta] = [:]
     private var assistantDeltaFlushTasks: [String: Task<Void, Never>] = [:]
+    private var turnLifecycleBySessionID: [SessionID: [TurnID: ConversationTurnLifecycle]] = [:]
     private var sessionAccessTickBySessionID: [String: UInt64] = [:]
     private var sessionAccessCounter: UInt64 = 0
+    private let timelineReducer = ConversationTimelineReducer()
 
 #if DEBUG
     private(set) var historyMergeInvocationCountForTesting = 0
@@ -59,6 +61,7 @@ final class ConversationStore: ObservableObject {
         let sendStatus: MessageSendStatus?
         let activityPayload: ConversationActivityPayload?
         let timelineOrdinal: Int64?
+        let turnLifecycle: ConversationTurnLifecycle?
         let userDelivery: UserMessageDelivery?
         let isTimestampFallback: Bool
     }
@@ -66,12 +69,6 @@ final class ConversationStore: ObservableObject {
     private struct StableMessageCacheKey: Hashable {
         let sessionID: String
         let stableID: MessageID
-    }
-
-    private struct NearbyHistoryEchoCandidate {
-        let role: ConversationMessage.Role
-        let content: String
-        let createdAt: Date
     }
 
     private struct UnstableHistoryReuseKey: Hashable {
@@ -85,6 +82,7 @@ final class ConversationStore: ObservableObject {
         let turnPayload: CodexAppServerTurnPayload?
         let activityPayload: ConversationActivityPayload?
         let timelineOrdinal: Int64?
+        let turnLifecycle: ConversationTurnLifecycle?
         let userDelivery: UserMessageDelivery?
         let isTimestampFallback: Bool
     }
@@ -107,7 +105,6 @@ final class ConversationStore: ObservableObject {
         }
     }
 
-    private let nearbyHistoryEchoMergeWindow: TimeInterval = 10 * 60
     private static let undatedHistoryFallbackDate = Date(timeIntervalSince1970: 0)
 
     func messages(for sessionID: String?) -> [ConversationMessage] {
@@ -142,6 +139,7 @@ final class ConversationStore: ObservableObject {
     ) {
         flushPendingAssistantDelta(sessionID: sessionID)
         let converted = projectedHistoryMessages(history, sessionID: sessionID)
+        recordTurnLifecycles(from: converted, sessionID: sessionID)
         for message in converted {
             if let stableID = message.stableID {
                 let key = stableCacheKey(stableID: stableID, sessionID: sessionID)
@@ -162,6 +160,7 @@ final class ConversationStore: ObservableObject {
             mergeHistory(
                 converted,
                 with: messagesBySessionID[sessionID] ?? [],
+                sessionID: sessionID,
                 authoritativeCompletedTurnItems: authoritativeCompletedTurnItems
             ),
             sessionID: sessionID
@@ -177,6 +176,7 @@ final class ConversationStore: ObservableObject {
         flushPendingAssistantDelta(sessionID: sessionID)
         let previousHistoryProjectionIDs = Set(historyProjectionCacheBySessionID[sessionID]?.messages.map(\.id) ?? [])
         let converted = projectedHistoryMessages(history, sessionID: sessionID)
+        recordTurnLifecycles(from: converted, sessionID: sessionID)
         for message in converted {
             if let stableID = message.stableID {
                 let key = stableCacheKey(stableID: stableID, sessionID: sessionID)
@@ -195,12 +195,11 @@ final class ConversationStore: ObservableObject {
             return
         }
 
-        let localToPreserve = (messagesBySessionID[sessionID] ?? []).filter { message in
-            !previousHistoryProjectionIDs.contains(message.id)
-        }
         let snapshot = mergeHistory(
             converted,
-            with: localToPreserve,
+            with: messagesBySessionID[sessionID] ?? [],
+            sessionID: sessionID,
+            replacingHistoryProjectionIDs: previousHistoryProjectionIDs,
             authoritativeCompletedTurnItems: authoritativeCompletedTurnItems
         )
         if let current = messagesBySessionID[sessionID], areMessagesEquivalent(current, snapshot) {
@@ -311,7 +310,7 @@ final class ConversationStore: ObservableObject {
         metadata: AgentEventMetadata? = nil,
         createdAt: Date? = nil
     ) {
-        if kind == .approval, text.hasPrefix("等待审批："), upsertPendingApprovalMessage(text, sessionID: sessionID) {
+        if kind == .approval, text.hasPrefix(L10n.text("ui.awaiting_approval")), upsertPendingApprovalMessage(text, sessionID: sessionID) {
             return
         }
         // runtime 过程消息需要保留 turnID/itemID，UI 才能在 turn 完成后准确折叠到“已处理”组里。
@@ -328,7 +327,7 @@ final class ConversationStore: ObservableObject {
     }
 
     func resolveApproval(_ approval: ApprovalSummary, accepted: Bool, sessionID: String) {
-        let text = accepted ? "审批已批准：\(approval.title)" : "审批已拒绝：\(approval.title)"
+        let text = accepted ? L10n.format("ui.approval_approved_value", approval.title) : L10n.format("ui.approval_rejected_value", approval.title)
         guard var list = messagesBySessionID[sessionID] else {
             appendSystem(text, sessionID: sessionID, kind: .approval)
             return
@@ -348,14 +347,14 @@ final class ConversationStore: ObservableObject {
     func resolveLatestPendingApproval(sessionID: String) {
         guard var list = messagesBySessionID[sessionID],
               let index = list.lastIndex(where: { message in
-                  message.kind == .approval && message.content.hasPrefix("等待审批：")
+                  message.kind == .approval && message.content.hasPrefix(L10n.text("ui.awaiting_approval"))
               }) else {
             return
         }
         // 远端审批、turn 完成或中断只告诉我们 request 已清理，不一定告诉最终按钮决策；
         // 用中性文案收口，避免时间线长期停在“等待审批”。
         let title = pendingApprovalTitle(from: list[index].content)
-        list[index].content = title.isEmpty ? "审批已解决" : "审批已解决：\(title)"
+        list[index].content = title.isEmpty ? L10n.text("ui.approval_resolved") : L10n.format("ui.approval_resolved_value", title)
         list[index].updatedAt = Date()
         replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
     }
@@ -364,22 +363,22 @@ final class ConversationStore: ObservableObject {
         guard var list = messagesBySessionID[sessionID],
               let index = list.lastIndex(where: { message in
                   message.kind == .userInput
-                      && (message.content.hasPrefix("等待补充信息：") || message.content.hasPrefix("等待引导输入："))
+                      && (message.content.hasPrefix(L10n.text("ui.waiting_for_additional_information_3a146c9c")) || message.content.hasPrefix(L10n.text("ui.waiting_for_boot_input")))
               }) else {
             if skipped {
-                appendSystem("已跳过补充信息，继续执行", sessionID: sessionID, kind: .userInput)
+                appendSystem(L10n.text("ui.supplementary_information_skipped_continue_execution"), sessionID: sessionID, kind: .userInput)
             }
             return
         }
         let title = pendingUserInputTitle(from: list[index].content)
-        let prefix = skipped ? "已跳过补充信息" : "补充信息已提交"
-        list[index].content = title.isEmpty ? prefix : "\(prefix)：\(title)"
+        let prefix = skipped ? L10n.text("ui.additional_information_skipped") : L10n.text("ui.additional_information_has_been_submitted")
+        list[index].content = title.isEmpty ? prefix : L10n.format("ui.labeled_value", prefix, title)
         list[index].updatedAt = Date()
         replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
     }
 
     func restorePendingUserInput(_ request: AgentUserInputRequest, sessionID: String) {
-        let text = "等待补充信息：\(request.title)"
+        let text = L10n.format("ui.waiting_for_additional_information_named", request.title)
         guard var list = messagesBySessionID[sessionID] else {
             appendSystem(text, sessionID: sessionID, kind: .userInput)
             return
@@ -387,7 +386,7 @@ final class ConversationStore: ObservableObject {
         // 补充信息提交是乐观收起 UI；如果发送失败，需要把时间线从“已提交”退回“等待补充信息”。
         if let index = list.lastIndex(where: { message in
             message.kind == .userInput
-                && (message.content.hasPrefix("补充信息已提交") || message.content.hasPrefix("引导输入已提交"))
+                && (message.content.hasPrefix(L10n.text("ui.additional_information_has_been_submitted")) || message.content.hasPrefix(L10n.text("ui.boot_input_submitted")))
         }) {
             list[index].content = text
             list[index].updatedAt = Date()
@@ -436,7 +435,7 @@ final class ConversationStore: ObservableObject {
         }
         let title = pendingApprovalTitle(from: text)
         if let index = list.lastIndex(where: { message in
-            guard message.kind == .approval, message.content.hasPrefix("等待审批：") else {
+            guard message.kind == .approval, message.content.hasPrefix(L10n.text("ui.awaiting_approval")) else {
                 return false
             }
             return message.content == text || pendingApprovalTitle(from: message.content) == title
@@ -451,19 +450,19 @@ final class ConversationStore: ObservableObject {
     }
 
     private func pendingApprovalTitle(from text: String) -> String {
-        let prefix = "等待审批："
+        let prefix = L10n.text("ui.awaiting_approval")
         guard text.hasPrefix(prefix) else {
             return text
         }
         var value = String(text.dropFirst(prefix.count))
-        if let range = value.range(of: "，风险：") {
+        if let range = value.range(of: L10n.format("ui.risk_value", "")) {
             value = String(value[..<range.lowerBound])
         }
         return value
     }
 
     private func pendingUserInputTitle(from text: String) -> String {
-        for prefix in ["等待补充信息：", "等待引导输入："] where text.hasPrefix(prefix) {
+        for prefix in [L10n.text("ui.waiting_for_additional_information_3a146c9c"), L10n.text("ui.waiting_for_boot_input")] where text.hasPrefix(prefix) {
             return String(text.dropFirst(prefix.count))
         }
         return text
@@ -603,6 +602,9 @@ final class ConversationStore: ObservableObject {
             list[index].sendStatus = message.sendStatus == .failed ? .failed : .confirmed
             list[index].revision = message.revision
             list[index].updatedAt = message.updatedAt ?? metadata.createdAt ?? Date()
+            if let turnID = message.turnID {
+                list[index].turnLifecycle = turnLifecycleBySessionID[sessionID]?[turnID] ?? list[index].turnLifecycle
+            }
             list[index].isTimestampFallback = message.isTimestampFallback
             list[index].userDelivery = nil
             if clientMessageID != nil, message.sendStatus != .failed {
@@ -632,6 +634,7 @@ final class ConversationStore: ObservableObject {
                 sendStatus: message.sendStatus,
                 revision: message.revision,
                 activityPayload: message.activityPayload,
+                turnLifecycle: message.turnID.flatMap { turnLifecycleBySessionID[sessionID]?[$0] },
                 isTimestampFallback: message.isTimestampFallback
             )
             // 回放/迟到的 completed 事件带的是流式 item id；thread/read 把 item id 重排成 item-N 后，
@@ -647,17 +650,15 @@ final class ConversationStore: ObservableObject {
                 twin.sendStatus = message.sendStatus == .failed ? MessageSendStatus.failed : MessageSendStatus.confirmed
                 twin.revision = max(message.revision, twin.revision ?? message.revision)
                 twin.activityPayload = twin.activityPayload ?? message.activityPayload
+                if let turnID = message.turnID {
+                    twin.turnLifecycle = turnLifecycleBySessionID[sessionID]?[turnID] ?? twin.turnLifecycle
+                }
                 list[twinIndex] = twin
                 messageUUIDByStableMessageID[key] = twin.id
-                // 真实时间回填后，历史孪生卡可能需要从估算时间位置挪回真实时间线位置。
-                let resorted = timelineSortEntries(from: list)
-                    .sorted(by: areTimelineSortEntriesInOrder)
-                    .map(\.message)
-                replaceMessagesWithoutEquivalenceCheck(resorted, sessionID: sessionID, rebuildIndexes: true)
+                // 同一 Item 的 completed 只能更新首次出现的槽位；真实时间是展示信息，不能触发重排。
+                replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
                 // 流式 id 也指向孪生卡，后续同一事件的补发/查找直接原位命中。
-                if let resolvedIndex = resorted.firstIndex(where: { $0.id == twin.id }) {
-                    messageIndexByStableIDBySessionID[sessionID, default: [:]][stableID] = resolvedIndex
-                }
+                messageIndexByStableIDBySessionID[sessionID, default: [:]][stableID] = twinIndex
                 return
             }
             messageUUIDByStableMessageID[key] = completedMessage.id
@@ -670,8 +671,9 @@ final class ConversationStore: ObservableObject {
         guard let key = turnScopedTextMergeKey(for: message) else {
             return nil
         }
-        // 只认历史投影（带 timelineOrdinal）的孪生卡；同 turn 内两条真实的 live 重复输出仍各自保留。
-        return list.lastIndex { candidate in
+        // 只认唯一历史投影孪生卡；同 turn 同文出现多次时宁可保留两条，也不能误删真实输出。
+        let candidates = list.indices.filter { index in
+            let candidate = list[index]
             guard candidate.timelineOrdinal != nil,
                   candidate.turnID == message.turnID,
                   candidate.id != message.id else {
@@ -679,6 +681,7 @@ final class ConversationStore: ObservableObject {
             }
             return turnScopedTextMergeKey(for: candidate) == key
         }
+        return candidates.count == 1 ? candidates.first : nil
     }
 
     func markCurrentAssistantCompleted(metadata: AgentEventMetadata, fallbackSessionID: String) {
@@ -700,7 +703,34 @@ final class ConversationStore: ObservableObject {
         replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
     }
 
+    func updateTurnLifecycle(
+        _ lifecycle: ConversationTurnLifecycle,
+        metadata: AgentEventMetadata,
+        fallbackSessionID: SessionID
+    ) {
+        guard let turnID = metadata.turnID, !turnID.isEmpty else {
+            return
+        }
+        let sessionID = metadata.sessionID ?? fallbackSessionID
+        turnLifecycleBySessionID[sessionID, default: [:]][turnID] = lifecycle
+        guard var list = messagesBySessionID[sessionID] else {
+            return
+        }
+        var changed = false
+        for index in list.indices where list[index].turnID == turnID && list[index].turnLifecycle != lifecycle {
+            list[index].turnLifecycle = lifecycle
+            changed = true
+        }
+        if changed {
+            replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
+        }
+    }
+
     private func append(_ message: ConversationMessage, sessionID: String) {
+        var message = message
+        if let turnID = message.turnID, message.turnLifecycle == nil {
+            message.turnLifecycle = turnLifecycleBySessionID[sessionID]?[turnID]
+        }
         if message.role != .assistant {
             flushPendingAssistantDelta(sessionID: sessionID)
         }
@@ -825,7 +855,8 @@ final class ConversationStore: ObservableObject {
             content: text,
             createdAt: createdAt ?? Date(),
             sendStatus: .sending,
-            revision: revision
+            revision: revision,
+            turnLifecycle: turnID.flatMap { turnLifecycleBySessionID[sessionID]?[$0] }
         )
         list.append(message)
         appendMessageWithIndex(message, list: list, sessionID: sessionID)
@@ -880,27 +911,46 @@ final class ConversationStore: ObservableObject {
             createdAt: pending.createdAt ?? Date(),
             updatedAt: pending.updatedAt,
             sendStatus: .sending,
-            revision: pending.revision
+            revision: pending.revision,
+            turnLifecycle: pending.turnID.flatMap { turnLifecycleBySessionID[sessionID]?[$0] }
         )
         list.append(message)
         appendMessageWithIndex(message, list: list, sessionID: sessionID)
     }
 
     private func appendMessageWithIndex(_ message: ConversationMessage, list: [ConversationMessage], sessionID: String) {
-        // 普通流式/本地追加总是发生在尾部。像 Codex/Litter 的 live projection 一样只补新行索引，
-        // 避免长会话里每个 append 都 O(n) 重建 stable/client/uuid 三套字典。
-        // 例外：断线回放/迟到 completed 事件带着比当前尾部更早的原始时间戳到达；时间线顺序只有
-        // merge 的排序在维护，直接钉在尾部会把旧卡显示在更新的消息（如历史投影的 plan）后面。
-        // 尾部逆序是罕见路径，检测到就用同一套 timeline 排序整体归位。
-        if list.count >= 2, message.createdAt < list[list.count - 2].createdAt {
-            let resorted = timelineSortEntries(from: list)
-                .sorted(by: areTimelineSortEntriesInOrder)
-                .map(\.message)
-            replaceMessagesWithoutEquivalenceCheck(resorted, sessionID: sessionID, rebuildIndexes: true)
+        // 实时事件通常直接追加。只有旧 Turn 的迟到 completed 需要插回所属 Turn；此处只决定新槽位，
+        // 从不移动已有 Item。若上游给出可靠原始时间，可将它插到同 Turn 的估算历史项之前。
+        if let turnID = message.turnID,
+           let appendedIndex = list.indices.last,
+           list[appendedIndex].id == message.id,
+           let insertionIndex = liveInsertionIndex(for: message, in: list[..<appendedIndex], turnID: turnID) {
+            var reordered = Array(list.dropLast())
+            reordered.insert(message, at: insertionIndex)
+            replaceMessagesWithoutEquivalenceCheck(reordered, sessionID: sessionID, rebuildIndexes: true)
             return
         }
         replaceMessagesWithoutEquivalenceCheck(list, sessionID: sessionID, rebuildIndexes: false)
         indexMessage(message, at: list.count - 1, sessionID: sessionID)
+    }
+
+    private func liveInsertionIndex(
+        for message: ConversationMessage,
+        in existing: ArraySlice<ConversationMessage>,
+        turnID: TurnID
+    ) -> Int? {
+        let sameTurnIndices = existing.indices.filter { existing[$0].turnID == turnID }
+        guard let lastSameTurnIndex = sameTurnIndices.last else {
+            return nil
+        }
+        if !message.isTimestampFallback,
+           let chronologicalIndex = sameTurnIndices.first(where: { index in
+               existing[index].createdAt > message.createdAt
+           }) {
+            return chronologicalIndex
+        }
+        let insertionIndex = existing.index(after: lastSameTurnIndex)
+        return insertionIndex < existing.endIndex ? insertionIndex : nil
     }
 
     @discardableResult
@@ -981,6 +1031,7 @@ final class ConversationStore: ObservableObject {
             && lhs.revision == rhs.revision
             && lhs.activityPayload == rhs.activityPayload
             && lhs.timelineOrdinal == rhs.timelineOrdinal
+            && lhs.turnLifecycle == rhs.turnLifecycle
             && lhs.userDelivery == rhs.userDelivery
             && lhs.isTimestampFallback == rhs.isTimestampFallback
             && lhs.contentDigest == rhs.contentDigest
@@ -1014,10 +1065,20 @@ final class ConversationStore: ObservableObject {
         pendingAssistantDeltasBySessionID.removeValue(forKey: sessionID)
         assistantDeltaFlushTasks[sessionID]?.cancel()
         assistantDeltaFlushTasks.removeValue(forKey: sessionID)
+        turnLifecycleBySessionID.removeValue(forKey: sessionID)
         sessionAccessTickBySessionID.removeValue(forKey: sessionID)
 
         messageUUIDByStableMessageID = messageUUIDByStableMessageID.filter { $0.key.sessionID != sessionID }
         revisionByStableMessageID = revisionByStableMessageID.filter { $0.key.sessionID != sessionID }
+    }
+
+    private func recordTurnLifecycles(from messages: [ConversationMessage], sessionID: SessionID) {
+        for message in messages {
+            guard let turnID = message.turnID, let lifecycle = message.turnLifecycle else {
+                continue
+            }
+            turnLifecycleBySessionID[sessionID, default: [:]][turnID] = lifecycle
+        }
     }
 
     private func rebuildMessageIndexes(for sessionID: String, messages: [ConversationMessage]) {
@@ -1073,7 +1134,13 @@ final class ConversationStore: ObservableObject {
     }
 
     private func messageIndex(stableID: MessageID, sessionID: String) -> Int? {
-        messageIndexByStableIDBySessionID[sessionID]?[stableID]
+        if let direct = messageIndexByStableIDBySessionID[sessionID]?[stableID] {
+            return direct
+        }
+        guard let uuid = messageUUIDByStableMessageID[stableCacheKey(stableID: stableID, sessionID: sessionID)] else {
+            return nil
+        }
+        return messageIndexByUUIDBySessionID[sessionID]?[uuid]
     }
 
     private func messageIndex(clientMessageID: ClientMessageID, sessionID: String) -> Int? {
@@ -1087,232 +1154,29 @@ final class ConversationStore: ObservableObject {
     private func mergeHistory(
         _ history: [ConversationMessage],
         with local: [ConversationMessage],
+        sessionID: String,
+        replacingHistoryProjectionIDs: Set<UUID>? = nil,
         authoritativeCompletedTurnItems: [TurnID: Set<AgentItemID>] = [:]
     ) -> [ConversationMessage] {
 #if DEBUG
         historyMergeInvocationCountForTesting += 1
 #endif
-        var seenPrimaryKeys = Set<String>()
-        var seenUUIDs = Set<UUID>()
-        var historyTurnScopedTextKeys = Set<String>()
-        var nearbyHistoryEchoCandidates: [NearbyHistoryEchoCandidate] = []
-        var merged: [ConversationMessage] = []
-        let liveBackfill = liveBackfillCandidates(from: local)
-
-        for rawItem in history {
-            let item = historyMessageByBackfillingLiveFacts(rawItem, candidates: liveBackfill)
-            guard seenUUIDs.insert(item.id).inserted else {
-                continue
-            }
-            if let key = primaryMergeKey(for: item) {
-                guard seenPrimaryKeys.insert(key).inserted else {
-                    continue
-                }
-            }
-            // 历史侧只登记 (turnId, 文本) 键、本身不参与去重：同一个 turn 内两条同文历史仍各自保留。
-            if let key = turnScopedTextMergeKey(for: item) {
-                historyTurnScopedTextKeys.insert(key)
-            }
-            nearbyHistoryEchoCandidates.append(NearbyHistoryEchoCandidate(role: item.role, content: item.content, createdAt: item.createdAt))
-            merged.append(item)
+        let result = timelineReducer.rebase(
+            snapshot: history,
+            current: local,
+            replacingHistoryProjectionIDs: replacingHistoryProjectionIDs,
+            authoritativeCompletedTurnItems: authoritativeCompletedTurnItems
+        )
+        for (stableID, uuid) in result.stableIDAliases {
+            messageUUIDByStableMessageID[stableCacheKey(stableID: stableID, sessionID: sessionID)] = uuid
         }
-
-        for item in local {
-            guard seenUUIDs.insert(item.id).inserted else {
-                continue
-            }
-            if shouldPruneOrphanedHistoryProcess(
-                item,
-                authoritativeCompletedTurnItems: authoritativeCompletedTurnItems
-            ) {
-                continue
-            }
-            if shouldMergeAsNearbyHistoryEcho(item, candidates: nearbyHistoryEchoCandidates) {
-                continue
-            }
-            // app-server 的 thread/read 把 item id 重排成整条线程的全局顺序号(item-N)，与流式事件里的
-            // 真实 id(msg_…)对不上，导致同一条已 confirmed 的助手消息在手动刷新后既留着直播副本又追加
-            // 历史副本。turnId 两边一致、最终文本一致，按 (turnId, 文本) 兜底判为同一条：丢掉本地副本、
-            // 保留历史，消除重复气泡。
-            if let key = turnScopedTextMergeKey(for: item), historyTurnScopedTextKeys.contains(key) {
-                continue
-            }
-            if let key = primaryMergeKey(for: item) {
-                guard seenPrimaryKeys.insert(key).inserted else {
-                    continue
-                }
-            }
-            merged.append(item)
+#if DEBUG
+        if result.ambiguousAliasCount > 0 || result.hadOrderingCycle {
+            // 只记录计数，不输出消息正文或命令参数。
+            print("[ConversationTimeline] ambiguousAliases=\(result.ambiguousAliasCount) orderingCycle=\(result.hadOrderingCycle)")
         }
-
-        return timelineSortEntries(from: merged)
-            .sorted(by: areTimelineSortEntriesInOrder)
-            .map(\.message)
-    }
-
-    private func shouldPruneOrphanedHistoryProcess(
-        _ item: ConversationMessage,
-        authoritativeCompletedTurnItems: [TurnID: Set<AgentItemID>]
-    ) -> Bool {
-        guard item.timelineOrdinal != nil,
-              let turnID = item.turnID,
-              let itemID = item.itemID,
-              let authoritativeItemIDs = authoritativeCompletedTurnItems[turnID],
-              !authoritativeItemIDs.contains(itemID),
-              isPrunableHistoryProcessKind(item.kind) else {
-            return false
-        }
-        // 核心逻辑：只清历史投影卡。实时命令卡也有 turnID/itemID，但没有 timelineOrdinal；
-        // commandExecution 不落盘时，完成快照天然缺它们，不能把用户正在看的实时过程卡删掉。
-        return true
-    }
-
-    private func isPrunableHistoryProcessKind(_ kind: MessageKind) -> Bool {
-        kind == .commandSummary || kind == .fileChangeSummary
-    }
-
-    private struct LiveBackfillCandidates {
-        var byPrimaryKey: [String: ConversationMessage] = [:]
-        var byTurnScopedTextKey: [String: ConversationMessage] = [:]
-    }
-
-    private func liveBackfillCandidates(from local: [ConversationMessage]) -> LiveBackfillCandidates {
-        var result = LiveBackfillCandidates()
-        for message in local {
-            if let key = primaryMergeKey(for: message) {
-                result.byPrimaryKey[key] = bestLiveBackfill(existing: result.byPrimaryKey[key], candidate: message)
-            }
-            if let key = turnScopedTextMergeKey(for: message) {
-                result.byTurnScopedTextKey[key] = bestLiveBackfill(existing: result.byTurnScopedTextKey[key], candidate: message)
-            }
-        }
-        return result
-    }
-
-    private func bestLiveBackfill(existing: ConversationMessage?, candidate: ConversationMessage) -> ConversationMessage {
-        guard let existing else {
-            return candidate
-        }
-        if existing.isTimestampFallback != candidate.isTimestampFallback {
-            return candidate.isTimestampFallback ? existing : candidate
-        }
-        return candidate.createdAt >= existing.createdAt ? candidate : existing
-    }
-
-    private func historyMessageByBackfillingLiveFacts(_ history: ConversationMessage, candidates: LiveBackfillCandidates) -> ConversationMessage {
-        let candidate = primaryMergeKey(for: history).flatMap { candidates.byPrimaryKey[$0] }
-            ?? turnScopedTextMergeKey(for: history).flatMap { candidates.byTurnScopedTextKey[$0] }
-        guard let candidate else {
-            return history
-        }
-        var next = history
-        if history.isTimestampFallback && !candidate.isTimestampFallback {
-            next.createdAt = candidate.createdAt
-            next.updatedAt = candidate.updatedAt ?? history.updatedAt
-            next.isTimestampFallback = false
-        } else if history.isTimestampFallback, candidate.createdAt != history.createdAt {
-            next.createdAt = candidate.createdAt
-            next.updatedAt = candidate.updatedAt ?? history.updatedAt
-        }
-        if next.activityPayload == nil {
-            next.activityPayload = candidate.activityPayload
-        }
-        return next
-    }
-
-    private struct TimelineSortEntry {
-        let offset: Int
-        let message: ConversationMessage
-        let effectiveAt: Date
-        let timelineOrdinal: Int64?
-    }
-
-    private func timelineSortEntries(from messages: [ConversationMessage]) -> [TimelineSortEntry] {
-        var entries = messages.enumerated().map { offset, message in
-            TimelineSortEntry(
-                offset: offset,
-                message: message,
-                effectiveAt: message.createdAt,
-                timelineOrdinal: message.timelineOrdinal
-            )
-        }
-        var ordinalIndicesByTurn: [TurnID: [Int]] = [:]
-        for (index, message) in messages.enumerated() {
-            guard let turnID = message.turnID,
-                  message.timelineOrdinal != nil else {
-                continue
-            }
-            ordinalIndicesByTurn[turnID, default: []].append(index)
-        }
-
-        for indices in ordinalIndicesByTurn.values {
-            var lastEffectiveAt: Date?
-            var lastReliableEffectiveAt: Date?
-            for index in indices.sorted(by: { leftIndex, rightIndex in
-                compareTimelineOrdinalThenOffset(leftIndex, rightIndex, entries: entries)
-            }) {
-                let entry = entries[index]
-                let effectiveAt: Date
-                if entry.message.isTimestampFallback {
-                    // 估算时间只能被前序消息向后托住；它自己不能反过来压住后续真实时间。
-                    if let lastEffectiveAt, entry.effectiveAt < lastEffectiveAt {
-                        effectiveAt = lastEffectiveAt
-                    } else {
-                        effectiveAt = entry.effectiveAt
-                    }
-                } else if let lastReliableEffectiveAt, entry.effectiveAt < lastReliableEffectiveAt {
-                    // 真实时间之间仍按 ordinal 保持同 turn 内单调，避免上游真实时间短暂反挂。
-                    effectiveAt = lastReliableEffectiveAt
-                } else {
-                    effectiveAt = entry.effectiveAt
-                }
-                // history item 用 live 副本回填真实时间后，时间和 thread/read item 顺序可能短暂反挂。
-                // 同 turn 内先把 ordinal 骨架的时间单调化，再统一排序；但不能让 fallback 时间覆盖真实时间。
-                entries[index] = TimelineSortEntry(
-                    offset: entry.offset,
-                    message: entry.message,
-                    effectiveAt: effectiveAt,
-                    timelineOrdinal: entry.timelineOrdinal
-                )
-                lastEffectiveAt = lastEffectiveAt.map { max($0, effectiveAt) } ?? effectiveAt
-                if !entry.message.isTimestampFallback {
-                    lastReliableEffectiveAt = lastReliableEffectiveAt.map { max($0, effectiveAt) } ?? effectiveAt
-                }
-            }
-        }
-
-        return entries
-    }
-
-    private func compareTimelineOrdinalThenOffset(
-        _ leftIndex: Int,
-        _ rightIndex: Int,
-        entries: [TimelineSortEntry]
-    ) -> Bool {
-        let left = entries[leftIndex]
-        let right = entries[rightIndex]
-        if let leftOrdinal = left.timelineOrdinal,
-           let rightOrdinal = right.timelineOrdinal,
-           leftOrdinal != rightOrdinal {
-            return leftOrdinal < rightOrdinal
-        }
-        return left.offset < right.offset
-    }
-
-    private func areTimelineSortEntriesInOrder(_ lhs: TimelineSortEntry, _ rhs: TimelineSortEntry) -> Bool {
-        if lhs.effectiveAt != rhs.effectiveAt {
-            return lhs.effectiveAt < rhs.effectiveAt
-        }
-        switch (lhs.timelineOrdinal, rhs.timelineOrdinal) {
-        case (.some(let leftOrdinal), .some(let rightOrdinal)) where leftOrdinal != rightOrdinal:
-            return leftOrdinal < rightOrdinal
-        case (.some, .none):
-            return true
-        case (.none, .some):
-            return false
-        default:
-            return lhs.offset < rhs.offset
-        }
+#endif
+        return result.messages
     }
 
     private func projectedHistoryMessages(_ history: [CodexHistoryMessage], sessionID: String) -> [ConversationMessage] {
@@ -1424,6 +1288,7 @@ final class ConversationStore: ObservableObject {
                       turnPayload: item.turnPayload,
                       activityPayload: item.activityPayload,
                       timelineOrdinal: item.timelineOrdinal,
+                      turnLifecycle: item.turnLifecycle,
                       userDelivery: item.userDelivery,
                       isTimestampFallback: isTimestampFallback,
                       buckets: &unstableReuseBuckets
@@ -1448,6 +1313,7 @@ final class ConversationStore: ObservableObject {
             turnPayload: item.turnPayload,
             activityPayload: item.activityPayload,
             timelineOrdinal: item.timelineOrdinal,
+            turnLifecycle: item.turnLifecycle,
             userDelivery: item.userDelivery,
             isTimestampFallback: isTimestampFallback
         )
@@ -1546,6 +1412,7 @@ final class ConversationStore: ObservableObject {
             turnPayload: message.turnPayload,
             activityPayload: message.activityPayload,
             timelineOrdinal: message.timelineOrdinal,
+            turnLifecycle: message.turnLifecycle,
             userDelivery: message.userDelivery,
             isTimestampFallback: message.isTimestampFallback
         )
@@ -1562,6 +1429,7 @@ final class ConversationStore: ObservableObject {
         turnPayload: CodexAppServerTurnPayload?,
         activityPayload: ConversationActivityPayload?,
         timelineOrdinal: Int64?,
+        turnLifecycle: ConversationTurnLifecycle?,
         userDelivery: UserMessageDelivery?,
         isTimestampFallback: Bool,
         buckets: inout [UnstableHistoryReuseKey: UnstableHistoryReuseBucket]
@@ -1577,6 +1445,7 @@ final class ConversationStore: ObservableObject {
             turnPayload: turnPayload,
             activityPayload: activityPayload,
             timelineOrdinal: timelineOrdinal,
+            turnLifecycle: turnLifecycle,
             userDelivery: userDelivery,
             isTimestampFallback: isTimestampFallback
         )
@@ -1616,6 +1485,7 @@ final class ConversationStore: ObservableObject {
             sendStatus: item.sendStatus,
             activityPayload: item.activityPayload,
             timelineOrdinal: item.timelineOrdinal,
+            turnLifecycle: item.turnLifecycle,
             userDelivery: item.userDelivery,
             isTimestampFallback: item.isTimestampFallback
         )
@@ -1644,19 +1514,6 @@ final class ConversationStore: ObservableObject {
         }
     }
 
-    private func primaryMergeKey(for item: ConversationMessage) -> String? {
-        if let clientMessageID = item.clientMessageID {
-            return "client:\(clientMessageID)"
-        }
-        if let appServerStableID = appServerStableMessageID(turnID: item.turnID, itemID: item.itemID) {
-            return "appserver:\(appServerStableID)"
-        }
-        if let stableID = item.stableID {
-            return "stable:\(stableID)"
-        }
-        return nil
-    }
-
     private func appServerStableMessageID(turnID: TurnID?, itemID: AgentItemID?) -> MessageID? {
         guard let itemID, !itemID.isEmpty else {
             return nil
@@ -1677,7 +1534,7 @@ final class ConversationStore: ObservableObject {
         }
         let semanticKind: String
         if item.role == .assistant {
-            semanticKind = "assistant"
+            semanticKind = "assistant:\(item.kind.rawValue)"
         } else if item.role == .system, let processKind = processMessageMergeKind(for: item.kind) {
             semanticKind = processKind
         } else {
@@ -1699,37 +1556,4 @@ final class ConversationStore: ObservableObject {
         }
     }
 
-    private func shouldMergeAsNearbyHistoryEcho(_ item: ConversationMessage, candidates: [NearbyHistoryEchoCandidate]) -> Bool {
-        guard item.sendStatus != .confirmed else {
-            return false
-        }
-        // 旧 rollout 缺稳定 id，本地回显也可能没有 client_message_id。这里仅把“未确认本地消息”
-        // 和时间接近的同文历史合并；历史页里的两条相同文本不能再被 role+content 误删。
-        return candidates.contains { candidate in
-            guard candidate.role == item.role,
-                  abs(candidate.createdAt.timeIntervalSince(item.createdAt)) <= nearbyHistoryEchoMergeWindow else {
-                return false
-            }
-            if candidate.content == item.content {
-                return true
-            }
-            guard item.role == .assistant else {
-                return false
-            }
-            return shouldMergeAssistantNearbyHistoryEcho(localContent: item.content, historyContent: candidate.content)
-        }
-    }
-
-    private func shouldMergeAssistantNearbyHistoryEcho(localContent: String, historyContent: String) -> Bool {
-        let localKey = normalizedAssistantTextForDedup(localContent)
-        let historyKey = normalizedAssistantTextForDedup(historyContent)
-        guard localKey.count >= 12, historyKey.count >= 12 else {
-            return false
-        }
-        // 早期历史可能把同一句重绘内容连在一个气泡里；history 返回干净 assistant 后，
-        // 用压缩后的语义文本合并，刷新时让干净历史替换旧脏气泡。
-        return localKey == historyKey ||
-            localKey.contains(historyKey) ||
-            historyKey.contains(localKey)
-    }
 }

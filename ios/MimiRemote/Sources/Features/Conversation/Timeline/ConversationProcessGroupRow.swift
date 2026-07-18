@@ -21,7 +21,7 @@ struct ConversationProcessGroupRow: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(group.title)
                 .accessibilityValue(accessibilityValue)
-                .accessibilityHint(isExpanded ? "收起本阶段活动" : "展开本阶段活动")
+                .accessibilityHint(isExpanded ? L10n.text("ui.collapse_this_stage_of_activities") : L10n.text("ui.expand_this_stage_of_activities"))
 
                 if isExpanded {
                     VStack(alignment: .leading, spacing: 0) {
@@ -99,8 +99,12 @@ struct ConversationProcessGroupRow: View {
     }
 
     private var accessibilityValue: String {
-        let state = isExpanded ? "已展开" : "已收起"
-        return "\(state)，包含 \(group.activities.count) 项活动"
+        let state = isExpanded ? L10n.text("ui.expanded") : L10n.text("ui.collected")
+        return L10n.format(
+            "ui.value_contains_value",
+            state,
+            L10n.plural("ui.activities_count", count: group.activities.count)
+        )
     }
 
     private var headerTint: Color {

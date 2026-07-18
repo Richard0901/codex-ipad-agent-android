@@ -62,7 +62,7 @@ struct ProjectSidebarView: View {
             isEnabled: !usesCustomHeader,
             text: $sessionStore.sessionSearchQuery,
             placement: searchPlacement,
-            prompt: Text(showsSessions ? "搜索会话" : "搜索工作区")
+            prompt: Text(showsSessions ? L10n.text("ui.search_session") : L10n.text("ui.search_workspace"))
         )
         .sheet(isPresented: $isPresentingOpenWorkspace) {
             OpenWorkspaceSheet()
@@ -180,7 +180,7 @@ struct ProjectSidebarView: View {
                     Image(systemName: "magnifyingglass")
                         .font(themeStore.uiFont(size: 12, weight: .semibold))
                 }
-                Text(sessionStore.isLoadingMoreSessionSearchResults ? "正在继续搜索…" : "继续搜索")
+                Text(sessionStore.isLoadingMoreSessionSearchResults ? L10n.text("ui.searching_continues") : L10n.text("ui.continue_searching"))
                     .lineLimit(1)
             }
             .font(themeStore.uiFont(size: 12, weight: .medium))
@@ -209,22 +209,22 @@ struct ProjectSidebarView: View {
             SidebarSearchLoadingMessage()
         } else if sessionStore.isSessionSearchActive {
             SidebarEmptyMessage(
-                title: showsSessions ? "没有匹配的会话" : "没有匹配的工作区",
-                detail: "换个关键词试试。"
+                title: showsSessions ? L10n.text("ui.no_matching_session") : L10n.text("ui.no_matching_workspace"),
+                detail: L10n.text("ui.try_changing_the_keywords")
             )
         } else if showsSessions {
             SidebarEmptyMessage(
-                title: "还没有会话工作区",
-                detail: "会话页只显示已加入会话的工作区，去工作区把常用项目加入后，这里会显示对应的历史会话。",
-                actionTitle: onOpenWorkspaceTab == nil ? nil : "去工作区",
+                title: L10n.text("ui.no_session_workspace_yet"),
+                detail: L10n.text("ui.the_session_page_only_displays_workspaces_that_have"),
+                actionTitle: onOpenWorkspaceTab == nil ? nil : L10n.text("ui.go_to_work_area"),
                 actionSystemImage: onOpenWorkspaceTab == nil ? nil : "folder.badge.plus",
                 action: onOpenWorkspaceTab
             )
         } else {
             SidebarEmptyMessage(
-                title: "没有已打开的工作区",
-                detail: "选择已授权的工作目录后，这里会保留最近打开的项目。",
-                actionTitle: "打开路径",
+                title: L10n.text("ui.no_workspace_open"),
+                detail: L10n.text("ui.after_selecting_an_authorized_working_directory_the_most"),
+                actionTitle: L10n.text("ui.open_path"),
                 actionSystemImage: "folder.badge.plus"
             ) {
                 isPresentingOpenWorkspace = true
@@ -252,7 +252,7 @@ struct ProjectSidebarView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(showsSessions ? "会话" : "工作区")
+                    Text(showsSessions ? L10n.text("ui.session") : L10n.text("ui.workspace"))
                         .font(themeStore.uiFont(size: 13, weight: .semibold))
                         .foregroundStyle(tokens.secondaryText)
                     Text(sidebarHeaderSubtitle(projects: projects))
@@ -277,7 +277,7 @@ struct ProjectSidebarView: View {
 
     private func sidebarCompactHeaderContent(tokens: ThemeTokens, projects: [AgentProject]) -> some View {
         HStack(spacing: 8) {
-            Text(showsSessions ? "会话" : "工作区")
+            Text(showsSessions ? L10n.text("ui.session") : L10n.text("ui.workspace"))
                 .font(themeStore.uiFont(size: 12, weight: .semibold))
                 .foregroundStyle(tokens.tertiaryText)
             Spacer()
@@ -290,13 +290,13 @@ struct ProjectSidebarView: View {
     private func sidebarHeaderActionGroup(tokens: ThemeTokens, projects: [AgentProject]) -> some View {
         HStack(spacing: 2) {
             if showsSessions, let onCollapseSidebar {
-                sidebarHeaderButton(tokens: tokens, systemImage: "sidebar.left", accessibilityLabel: "收起会话列表") {
+                sidebarHeaderButton(tokens: tokens, systemImage: "sidebar.left", accessibilityLabel: L10n.text("ui.collapse_conversation_list")) {
                     onCollapseSidebar()
                 }
             }
             sidebarHeaderRefresh(tokens: tokens, projects: projects)
             if !showsSessions {
-                sidebarHeaderButton(tokens: tokens, systemImage: "folder.badge.plus", accessibilityLabel: "打开路径") {
+                sidebarHeaderButton(tokens: tokens, systemImage: "folder.badge.plus", accessibilityLabel: L10n.text("ui.open_path")) {
                     isPresentingOpenWorkspace = true
                 }
             }
@@ -315,7 +315,7 @@ struct ProjectSidebarView: View {
             Image(systemName: "magnifyingglass")
                 .font(themeStore.uiFont(size: 12, weight: .semibold))
                 .foregroundStyle(tokens.tertiaryText)
-            TextField(showsSessions ? "搜索会话" : "搜索工作区", text: $sessionStore.sessionSearchQuery)
+            TextField(showsSessions ? L10n.text("ui.search_session") : L10n.text("ui.search_workspace"), text: $sessionStore.sessionSearchQuery)
                 .font(themeStore.uiFont(size: 13))
                 .foregroundStyle(tokens.primaryText)
                 .textInputAutocapitalization(.never)
@@ -331,7 +331,7 @@ struct ProjectSidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(tokens.tertiaryText)
-                .accessibilityLabel("清除搜索")
+                .accessibilityLabel(L10n.text("ui.clear_search"))
             }
         }
         .padding(.horizontal, 10)
@@ -351,23 +351,23 @@ struct ProjectSidebarView: View {
                 Button {
                     Task { await sessionStore.startNewSession(in: project) }
                 } label: {
-                    Label("新建 Codex 会话", systemImage: "plus.circle")
+                    Label(L10n.text("ui.create_a_new_codex_session"), systemImage: "plus.circle")
                 }
                 if sessionStore.hasClaudeRuntimeChannel {
                     Button {
                         Task { await sessionStore.startNewSession(in: project, runtimeProvider: "claude") }
                     } label: {
-                        Label("新建 Claude Code 会话", systemImage: "sparkles")
+                        Label(L10n.text("ui.create_a_new_claude_code_session"), systemImage: "sparkles")
                     }
                 }
             } label: {
                 ViewThatFits(in: .horizontal) {
-                    Label("新会话", systemImage: "plus")
+                    Label(L10n.text("ui.new_session"), systemImage: "plus")
                         .padding(.horizontal, 10)
                         .frame(height: 34)
                     Image(systemName: "plus")
                         .frame(width: 34, height: 34)
-                        .accessibilityLabel("新会话")
+                        .accessibilityLabel(L10n.text("ui.new_session"))
                 }
                 .font(themeStore.uiFont(size: 13, weight: .semibold))
                 .foregroundStyle(tokens.accent)
@@ -379,7 +379,7 @@ struct ProjectSidebarView: View {
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
-            .accessibilityLabel("新建会话")
+            .accessibilityLabel(L10n.text("ui.new_session_3da224c4"))
         }
     }
 
@@ -393,16 +393,16 @@ struct ProjectSidebarView: View {
 
     private func sidebarHeaderSubtitle(projects: [AgentProject]) -> String {
         if sessionStore.isSessionSearchActive {
-            return projects.isEmpty ? "没有匹配结果" : "\(projects.count) 个匹配结果"
+            return projects.isEmpty ? L10n.text("ui.no_matching_results") : L10n.plural("ui.matching_results_count", count: projects.count)
         }
         if showsSessions {
             let configuredCount = sessionStore.sessionWorkspaceSelectionCount
             if projects.count > configuredCount, sessionStore.selectedSessionID != nil {
-                return configuredCount == 0 ? "当前会话临时保留" : "\(configuredCount) 个常用 + 当前会话"
+                return configuredCount == 0 ? L10n.text("ui.the_current_session_is_temporarily_reserved") : L10n.plural("ui.favorites_plus_current_session_count", count: configuredCount)
             }
-            return projects.isEmpty ? "只显示已加入会话的工作区" : "\(projects.count) 个工作区显示在会话里"
+            return projects.isEmpty ? L10n.text("ui.show_only_workspaces_that_are_part_of_a") : L10n.plural("ui.workspaces_displayed_count", count: projects.count)
         }
-        return projects.isEmpty ? "还没有打开的目录" : "\(projects.count) 个工作区"
+        return projects.isEmpty ? L10n.text("ui.directory_not_yet_opened") : L10n.plural("ui.workspaces_count", count: projects.count)
     }
 
     private func shouldShowSidebarHeaderActions(projects: [AgentProject]) -> Bool {
@@ -422,9 +422,9 @@ struct ProjectSidebarView: View {
                 .controlSize(.small)
                 .tint(tokens.secondaryText)
                 .frame(width: 32, height: 32)
-                .accessibilityLabel("正在刷新")
+                .accessibilityLabel(L10n.text("ui.refreshing_21eaf737"))
         } else if shouldShowSidebarRefresh(projects: projects) {
-            sidebarHeaderButton(tokens: tokens, systemImage: "arrow.clockwise", accessibilityLabel: "刷新") {
+            sidebarHeaderButton(tokens: tokens, systemImage: "arrow.clockwise", accessibilityLabel: L10n.text("ui.refresh")) {
                 Task { await sessionStore.refreshAll(autoAttach: false) }
             }
         }
@@ -491,7 +491,7 @@ private struct SidebarSearchLoadingMessage: View {
             ProgressView()
                 .controlSize(.small)
                 .tint(tokens.tertiaryText)
-            Text("正在搜索历史会话…")
+            Text(L10n.text("ui.searching_historical_conversations"))
                 .font(themeStore.uiFont(size: 12, weight: .medium))
                 .foregroundStyle(tokens.tertiaryText)
         }
@@ -589,7 +589,7 @@ struct OpenWorkspaceSheet: View {
                             .font(themeStore.uiFont(size: 13))
                             .foregroundStyle(.red)
                     } header: {
-                        Text("打开失败")
+                        Text(L10n.text("ui.open_failed"))
                     }
                 }
 
@@ -600,19 +600,19 @@ struct OpenWorkspaceSheet: View {
                     Button {
                         Task { await open(path: path) }
                     } label: {
-                        Label(isOpening ? "正在打开" : "打开输入的路径", systemImage: "folder.badge.plus")
+                        Label(isOpening ? L10n.text("ui.opening") : L10n.text("ui.open_the_input_path"), systemImage: "folder.badge.plus")
                     }
                     .disabled(!canOpenTypedPath)
                 } header: {
-                    Text("手动输入路径")
+                    Text(L10n.text("ui.enter_path_manually"))
                 } footer: {
-                    Text("可直接粘贴开发环境中的绝对路径；目录需在已授权范围内（默认是用户 Home）。")
+                    Text(L10n.text("ui.you_can_directly_paste_the_absolute_path_in"))
                 }
             }
-            .navigationTitle("打开工作区")
+            .navigationTitle(L10n.text("ui.open_workspace"))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") {
+                    Button(L10n.text("ui.complete")) {
                         dismiss()
                     }
                 }
@@ -646,7 +646,7 @@ struct OpenWorkspaceSheet: View {
                             .font(themeStore.uiFont(size: 16, weight: .semibold))
                             .foregroundStyle(tokens.primaryText)
                             .lineLimit(1)
-                        Text(browsePath ?? "正在定位...")
+                        Text(browsePath ?? L10n.text("ui.locating_be47409b"))
                             .font(themeStore.uiFont(size: 12))
                             .foregroundStyle(tokens.secondaryText)
                             .lineLimit(2)
@@ -659,13 +659,13 @@ struct OpenWorkspaceSheet: View {
                         Button {
                             Task { await browse(to: browseParentPath) }
                         } label: {
-                            Label("上一级", systemImage: "arrow.up")
+                            Label(L10n.text("ui.previous_level"), systemImage: "arrow.up")
                         }
                         .labelStyle(.iconOnly)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .disabled(isBrowsing)
-                        .accessibilityLabel("返回上一级")
+                        .accessibilityLabel(L10n.text("ui.return_to_previous_level"))
                     }
                 }
 
@@ -681,7 +681,7 @@ struct OpenWorkspaceSheet: View {
             }
             .padding(.vertical, 4)
         } header: {
-            Text("当前位置")
+            Text(L10n.text("ui.current_location"))
         }
     }
 
@@ -694,7 +694,7 @@ struct OpenWorkspaceSheet: View {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在加载目录…")
+                    Text(L10n.text("ui.loading_catalog"))
                         .foregroundStyle(.secondary)
                 }
             } else if let browseError {
@@ -704,10 +704,10 @@ struct OpenWorkspaceSheet: View {
                 Button {
                     Task { await browse(to: browsePath ?? "") }
                 } label: {
-                    Label("重试", systemImage: "arrow.clockwise")
+                    Label(L10n.text("ui.try_again"), systemImage: "arrow.clockwise")
                 }
             } else if browseEntries.isEmpty {
-                Text("没有可进入的子目录或可预览文件")
+                Text(L10n.text("ui.no_subdirectories_to_enter_or_files_to_preview"))
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(browseEntries) { entry in
@@ -752,19 +752,19 @@ struct OpenWorkspaceSheet: View {
                 }
             }
         } header: {
-            Text("内容")
+            Text(L10n.text("ui.content"))
         } footer: {
             if browseTruncated {
-                Text("目录过大，仅显示前面部分；其余内容请用下方手动输入路径打开目录。")
+                Text(L10n.text("ui.the_directory_is_too_large_only_the_front"))
             } else {
-                Text("隐藏目录、Library 与常见缓存目录不会显示；文件仅用于预览，不能作为工作区打开。")
+                Text(L10n.text("ui.hidden_directories_library_and_common_cache_directories_will"))
             }
         }
     }
 
     private var currentDirectoryName: String {
         guard let browsePath, !browsePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "正在定位"
+            return L10n.text("ui.locating")
         }
         let parts = browsePath.split(separator: "/").map(String.init)
         return parts.last ?? browsePath
@@ -805,10 +805,10 @@ struct OpenWorkspaceSheet: View {
 
     private func userFacingBrowseError(_ error: Error) -> String {
         if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
-            return "当前 agentd 版本还不支持目录浏览，请升级 agentd；也可以直接在下方输入路径。"
+            return L10n.text("ui.the_current_agentd_version_does_not_support_directory")
         }
         if case AgentAPIError.server(let status, _) = error, status == 403 {
-            return "该目录不在授权范围内或不可访问。"
+            return L10n.text("ui.the_directory_is_not_within_authorization_scope_or")
         }
         return error.localizedDescription
     }
@@ -834,13 +834,13 @@ struct OpenWorkspaceSheet: View {
 
     private func userFacingPreviewError(_ error: Error) -> String {
         if case AgentAPIError.server(let status, _) = error, status == 404 || status == 405 {
-            return "当前 agentd 版本还不支持文件预览，请升级 agentd。"
+            return L10n.text("ui.the_current_agentd_version_does_not_support_file")
         }
         if case AgentAPIError.server(let status, _) = error, status == 403 {
-            return "该文件不在授权范围内或不可访问。"
+            return L10n.text("ui.the_file_is_not_within_authorization_or_is")
         }
         if case AgentAPIError.server(let status, _) = error, status == 413 {
-            return "文件过大，暂不支持预览。"
+            return L10n.text("ui.the_file_is_too_large_and_preview_is")
         }
         return error.localizedDescription
     }
@@ -848,7 +848,7 @@ struct OpenWorkspaceSheet: View {
     private func open(path: String) async {
         let targetPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !targetPath.isEmpty else {
-            localError = "请输入开发环境中的目录路径"
+            localError = L10n.text("ui.please_enter_the_directory_path_in_the_development")
             return
         }
         isOpening = true
@@ -865,7 +865,7 @@ struct OpenWorkspaceSheet: View {
     }
 
     private func userFacingOpenWorkspaceError(_ message: String?, path: String) -> String {
-        let fallback = "无法打开“\(path)”"
+        let fallback = L10n.format("ui.unable_to_open_value", path)
         guard let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return fallback
         }
@@ -873,7 +873,7 @@ struct OpenWorkspaceSheet: View {
         if lowercased.contains("allowlist") ||
             message.contains("允许范围") ||
             message.contains("HTTP 403") {
-            return "“\(path)”还不在已授权范围内。默认浏览授权根是用户 Home；如改过配置，请在本地开发环境中调整 browse_roots（或 AGENTD_BROWSE_ROOTS）后重试。"
+            return L10n.format("ui.value_is_not_yet_within_the_authorized_scope", path)
         }
         return message
     }
@@ -903,10 +903,10 @@ struct WorkspaceOpenCurrentDirectoryButton: View {
                     )
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(isOpening ? "正在打开工作区…" : "打开为工作区")
+                    Text(isOpening ? L10n.text("ui.opening_workspace_bc794723") : L10n.text("ui.open_as_workspace"))
                         .font(themeStore.uiFont(size: 15, weight: .semibold))
                         .lineLimit(1)
-                    Text(isOpening ? directoryName : "使用当前文件夹开始工作")
+                    Text(isOpening ? directoryName : L10n.text("ui.start_working_using_the_current_folder"))
                         .font(themeStore.uiFont(size: 12))
                         .foregroundStyle(tokens.primaryActionForeground.opacity(0.78))
                         .lineLimit(1)
@@ -933,8 +933,8 @@ struct WorkspaceOpenCurrentDirectoryButton: View {
         .controlSize(.large)
         .tint(tokens.primaryAction)
         .disabled(isDisabled)
-        .accessibilityLabel(isOpening ? "正在打开工作区" : "打开当前文件夹为工作区")
-        .accessibilityHint("使用当前位置开始工作")
+        .accessibilityLabel(isOpening ? L10n.text("ui.opening_workspace") : L10n.text("ui.open_the_current_folder_as_a_workspace"))
+        .accessibilityHint(L10n.text("ui.start_working_using_your_current_location"))
     }
 }
 
@@ -952,7 +952,7 @@ private struct ProjectSessionRows: View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         if snapshot.isEmpty && !isLoading {
-            Text("暂无历史会话")
+            Text(L10n.text("ui.no_historical_conversations_yet"))
                 .font(themeStore.uiFont(size: 12))
                 .foregroundStyle(tokens.tertiaryText)
                 .padding(.leading, 30)
@@ -988,20 +988,20 @@ private struct ProjectSessionRows: View {
                         Button {
                             sessionStore.takeOverSession(session)
                         } label: {
-                            Label("接管到 iPad", systemImage: "hand.raised.fill")
+                            Label(L10n.text("ui.take_over_to_ipad"), systemImage: "hand.raised.fill")
                         }
                     }
 
                     Button {
                         sessionStore.toggleSessionPinned(session)
                     } label: {
-                        Label(isPinned ? "取消置顶" : "置顶", systemImage: isPinned ? "pin.slash" : "pin")
+                        Label(isPinned ? L10n.text("ui.unpin") : L10n.text("ui.pin_to_top"), systemImage: isPinned ? "pin.slash" : "pin")
                     }
 
                     Button {
                         Task { await sessionStore.handoffSessionToWorktree(session) }
                     } label: {
-                        Label("转到新 Git Worktree", systemImage: "arrow.triangle.branch")
+                        Label(L10n.text("ui.go_to_the_new_git_worktree"), systemImage: "arrow.triangle.branch")
                     }
                     .disabled(session.isRunning || sessionStore.isCreatingWorktree)
 
@@ -1009,33 +1009,33 @@ private struct ProjectSessionRows: View {
                         Button {
                             Task { await sessionStore.scheduleSessionReminder(session, after: 30 * 60) }
                         } label: {
-                            Label("30 分钟后", systemImage: "timer")
+                            Label(L10n.text("ui.30_minutes_later"), systemImage: "timer")
                         }
                         Button {
                             Task { await sessionStore.scheduleSessionReminder(session, after: 2 * 60 * 60) }
                         } label: {
-                            Label("2 小时后", systemImage: "clock")
+                            Label(L10n.text("ui.2_hours_later"), systemImage: "clock")
                         }
                         Button {
                             Task { await sessionStore.scheduleSessionReminder(session, after: 24 * 60 * 60) }
                         } label: {
-                            Label("明天", systemImage: "calendar")
+                            Label(L10n.text("ui.tomorrow"), systemImage: "calendar")
                         }
                         if reminder != nil {
                             Button(role: .destructive) {
                                 sessionStore.clearSessionReminder(session)
                             } label: {
-                                Label("清除提醒", systemImage: "bell.slash")
+                                Label(L10n.text("ui.clear_reminder"), systemImage: "bell.slash")
                             }
                         }
                     } label: {
-                        Label("提醒", systemImage: reminder == nil ? "bell" : "bell.fill")
+                        Label(L10n.text("ui.reminder"), systemImage: reminder == nil ? "bell" : "bell.fill")
                     }
 
                     Button(role: isArchived ? nil : .destructive) {
                         Task { await sessionStore.toggleSessionArchivedRemote(session) }
                     } label: {
-                        Label(isArchived ? "取消归档" : "归档", systemImage: isArchived ? "archivebox.fill" : "archivebox")
+                        Label(isArchived ? L10n.text("ui.unarchive") : L10n.text("ui.archive"), systemImage: isArchived ? "archivebox.fill" : "archivebox")
                     }
                 }
                 .padding(.leading, 30)
@@ -1129,7 +1129,7 @@ private struct ProjectRow: View, Equatable {
                     .layoutPriority(1)
                 Spacer(minLength: 8)
                 if isUnavailable {
-                    Text("不可用")
+                    Text(L10n.text("ui.not_available"))
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
                         .foregroundStyle(tokens.warning)
                 } else if isLoading {
@@ -1153,12 +1153,12 @@ private struct ProjectRow: View, Equatable {
                 if showsSessionActions {
                     // 会话在创建瞬间就绑定 runtime，事后无法切换通道；菜单里保留显式通道选择。
                     Button(action: onNewSession) {
-                        Label("新建 Codex 会话", systemImage: "plus.circle")
+                        Label(L10n.text("ui.create_a_new_codex_session"), systemImage: "plus.circle")
                     }
                     .disabled(isUnavailable)
                     if claudeChannelAvailable {
                         Button(action: onNewClaudeSession) {
-                            Label("新建 Claude Code 会话", systemImage: "sparkles")
+                            Label(L10n.text("ui.create_a_new_claude_code_session"), systemImage: "sparkles")
                         }
                         .disabled(isUnavailable)
                     }
@@ -1166,18 +1166,18 @@ private struct ProjectRow: View, Equatable {
                 }
                 if isUnavailable {
                     Button(action: onRetry) {
-                        Label("重试", systemImage: "arrow.clockwise")
+                        Label(L10n.text("ui.try_again"), systemImage: "arrow.clockwise")
                     }
                 }
                 Button(action: onCreateWorktree) {
-                    Label("新建 Git Worktree", systemImage: "square.stack.3d.up")
+                    Label(L10n.text("ui.create_a_new_git_worktree"), systemImage: "square.stack.3d.up")
                 }
                 .disabled(isUnavailable)
                 Button(action: onManageWorktrees) {
-                    Label("管理 Git Worktree", systemImage: "wrench.and.screwdriver")
+                    Label(L10n.text("ui.manage_git_worktree"), systemImage: "wrench.and.screwdriver")
                 }
                 Button(role: .destructive, action: onForget) {
-                    Label("从当前设备移除", systemImage: "xmark.circle")
+                    Label(L10n.text("ui.remove_from_current_device"), systemImage: "xmark.circle")
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -1189,7 +1189,7 @@ private struct ProjectRow: View, Equatable {
                     .contentShape(Rectangle())
             }
             .menuStyle(.button)
-            .accessibilityLabel("项目操作")
+            .accessibilityLabel(L10n.text("ui.project_operations"))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -1252,19 +1252,19 @@ private struct SessionRow: View, Equatable {
                     Image(systemName: "pin.fill")
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
                         .foregroundStyle(isSelected ? tokens.secondaryText : tokens.tertiaryText)
-                        .accessibilityLabel("已置顶")
+                        .accessibilityLabel(L10n.text("ui.pinned"))
                 }
                 if isArchived {
                     Image(systemName: "archivebox.fill")
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
                         .foregroundStyle(tokens.tertiaryText)
-                        .accessibilityLabel("已归档")
+                        .accessibilityLabel(L10n.text("ui.archived"))
                 }
                 if reminder != nil {
                     Image(systemName: "bell.fill")
                         .font(themeStore.uiFont(size: 11, weight: .semibold))
                         .foregroundStyle(tokens.warning.opacity(0.86))
-                        .accessibilityLabel("已设置提醒")
+                        .accessibilityLabel(L10n.text("ui.reminder_set"))
                 }
                 Text(session.title)
                     .font(themeStore.uiFont(size: 15, weight: isSelected ? .semibold : .regular))
@@ -1386,7 +1386,7 @@ private struct SessionRow: View, Equatable {
     private var observationCapsule: some View {
         let tokens = themeStore.tokens(for: colorScheme)
 
-        return Label("仅观察", systemImage: "eye")
+        return Label(L10n.text("ui.just_observe"), systemImage: "eye")
             .labelStyle(.titleAndIcon)
             .font(themeStore.uiFont(size: 10, weight: .medium))
             .foregroundStyle(tokens.tertiaryText)
@@ -1426,8 +1426,8 @@ private struct SessionRow: View, Equatable {
     // 左侧列表只展示到分钟，避免 relative 时间按秒触发刷新。
     private static let minuteTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "HH:mm"
+        formatter.locale = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate("Hm")
         return formatter
     }()
 }

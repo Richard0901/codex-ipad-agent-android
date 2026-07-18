@@ -23,7 +23,7 @@ struct ConversationScreenModel: Equatable {
         errorMessage: String?
     ) {
         self.sessionID = selectedSession?.id
-        self.title = selectedSession?.title ?? selectedProject?.name ?? "会话"
+        self.title = selectedSession?.title ?? selectedProject?.name ?? L10n.text("ui.session")
         self.subtitle = selectedSession?.dir ?? selectedProject?.path ?? ""
         self.foregroundActivity = foregroundActivity
         self.runtimeActivitySnapshot = runtimeActivitySnapshot

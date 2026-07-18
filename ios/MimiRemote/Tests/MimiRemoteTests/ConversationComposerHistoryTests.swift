@@ -359,8 +359,9 @@ extension ConversationDataFlowTests {
         XCTAssertFalse(submitted.voiceDraftNeedsReview)
     }
 
-    func testVoiceTranscriptionDefaultsUseFixedChinese() {
-        XCTAssertEqual(VoiceTranscriptionDefaults.languageCode, "zh")
+    func testVoiceTranscriptionDefaultsFollowCurrentLocaleWithEnglishFallback() {
+        let expected = Locale.autoupdatingCurrent.language.languageCode?.identifier ?? "en"
+        XCTAssertEqual(VoiceTranscriptionDefaults.languageCode, expected)
     }
 
     func testVoiceTranscriptionRequestOnlyEncodesCodexFields() throws {
@@ -973,7 +974,7 @@ extension ConversationDataFlowTests {
         XCTAssertTrue(store.messages(for: sessionID).contains { $0.itemID == "item-31" })
     }
 
-    func testHistoryMergeDoesNotLetFallbackOrdinalTimePushAccurateProcessEventsBehind() throws {
+    func testHistoryMergeKeepsSnapshotSourceOrderWhenTimestampsConflict() throws {
         let store = ConversationStore()
         let sessionID = "thread_fallback_plan_before_accurate_command"
         let turnID = "turn_fallback_plan_before_accurate_command"
@@ -1003,10 +1004,9 @@ extension ConversationDataFlowTests {
         ], sessionID: sessionID)
 
         let messages = store.messages(for: sessionID)
-        // 橙色估算时间只能辅助排序，不能把灰色真实时间的历史过程卡压到后面。
-        XCTAssertEqual(messages.map(\.content), ["命令：grep -n ConversationStore", "先列出修复计划。"])
-        XCTAssertFalse(try XCTUnwrap(messages.first).isTimestampFallback)
-        XCTAssertTrue(try XCTUnwrap(messages.last).isTimestampFallback)
+        XCTAssertEqual(messages.map(\.content), ["先列出修复计划。", "命令：grep -n ConversationStore"])
+        XCTAssertTrue(try XCTUnwrap(messages.first).isTimestampFallback)
+        XCTAssertFalse(try XCTUnwrap(messages.last).isTimestampFallback)
     }
 
     func testReplayedLiveCompletionWithOlderTimestampSortsBeforeEstimatedPlan() {
@@ -1131,8 +1131,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(plan.sendStatus, .confirmed)
     }
 
-    func testReplayedPlanTwinBackfillResortsAfterAccurateTimeArrives() {
-        // 孪生卡回填真实时间后必须重新归位；否则 plan 这类估算时间卡会继续留在旧位置。
+    func testReplayedPlanTwinBackfillUpdatesInPlaceWithoutReordering() {
         let store = ConversationStore()
         let sessionID = "thread_replay_plan_twin_resort"
         let turnID = "turn_replay_plan_twin_resort"
@@ -1164,7 +1163,7 @@ extension ConversationDataFlowTests {
 
         XCTAssertEqual(
             store.messages(for: sessionID).map(\.content),
-            ["命令：go test ./...", planText]
+            [planText, "命令：go test ./..."]
         )
 
         store.completeMessage(
@@ -1197,7 +1196,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(
             store.messages(for: sessionID).map(\.content),
             [planText, "命令：go test ./..."],
-            "live 真实时间到达后，历史孪生卡应从估算位置回到真实时间线位置"
+            "live 真实时间只能更新首次出现槽位，不能触发已有 Item 重排"
         )
     }
 
@@ -1280,7 +1279,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(messages.map(\.content), ["先读取本地实现。", "再和 Codex CLI 对齐。"])
     }
 
-    func testStructuredHistoryProcessMessagesCollapseBeforeFinalAssistantAndPinsPlanAfterAnswer() throws {
+    func testStructuredHistoryKeepsPlanAtSourcePositionBeforeFinalAssistant() throws {
         let store = ConversationStore()
         let sessionID = "sess_history_processed"
         let turnID = "turn_history_processed"
@@ -1330,16 +1329,16 @@ extension ConversationDataFlowTests {
         }
         XCTAssertEqual(commentary.kind, .commentary)
         XCTAssertEqual(commentary.content, "我先调用一个子 agent。")
-        guard case .message(let final) = items[2] else {
+        guard case .message(let plan) = items[2] else {
+            return XCTFail("计划卡应保留在服务端输入顺序中的原始位置")
+        }
+        XCTAssertEqual(plan.kind, .plan)
+        XCTAssertEqual(plan.content, "让子 agent 生成一个短笑话。")
+        guard case .message(let final) = items[3] else {
             return XCTFail("最终 assistant 应保持独立展开")
         }
         XCTAssertEqual(final.role, .assistant)
         XCTAssertEqual(final.content, "程序员相亲，对方问：你会浪漫吗？")
-        guard case .message(let plan) = items[3] else {
-            return XCTFail("计划卡应固定在最终回答之后，作为一级卡片展示")
-        }
-        XCTAssertEqual(plan.kind, .plan)
-        XCTAssertEqual(plan.content, "让子 agent 生成一个短笑话。")
     }
 
     func testHistoryDeduplicatesClientMessageEcho() {
@@ -1884,7 +1883,7 @@ extension ConversationDataFlowTests {
         let response = try JSONDecoder().decode(SessionsResponse.self, from: Data(json.utf8))
 
         XCTAssertEqual(response.rows.count, 1)
-        XCTAssertEqual(response.rows.first?.title, "未命名会话")
+        XCTAssertEqual(response.rows.first?.title, L10n.text("ui.unnamed_session"))
         XCTAssertEqual(response.rows.first?.status, .unknown)
         XCTAssertEqual(response.rows.first?.source, "codex")
         XCTAssertEqual(response.rows.first?.revision, 0)
@@ -2411,4 +2410,3 @@ extension ConversationDataFlowTests {
     }
 
 }
-

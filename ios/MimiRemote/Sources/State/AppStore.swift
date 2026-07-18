@@ -10,13 +10,13 @@ enum PairingLinkError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .unsupportedURL:
-            return "连接链接无效"
+            return L10n.text("ui.invalid_connection_link")
         case .missingEndpoint:
-            return "连接链接缺少地址"
+            return L10n.text("ui.the_link_is_missing_an_address")
         case .missingToken:
-            return "连接链接缺少访问码"
+            return L10n.text("ui.the_connection_link_is_missing_the_access_code")
         case .expired:
-            return "配对二维码已过期"
+            return L10n.text("ui.the_pairing_qr_code_has_expired")
         }
     }
 }
@@ -52,24 +52,24 @@ struct ConnectionTestStageTiming: Identifiable, Equatable {
         var title: String {
             switch self {
             case .health:
-                return "基础连通"
+                return L10n.text("ui.basic_connectivity")
             case .version:
-                return "鉴权版本"
+                return L10n.text("ui.authentication_version")
             case .appServerConfig:
-                return "Gateway 配置"
+                return L10n.text("ui.gateway_configuration")
             case .appServerGateway:
-                return "app-server 握手"
+                return L10n.text("ui.app_server_handshake")
             }
         }
 
         var detail: String {
             switch self {
             case .health:
-                return "iPad 到 agentd 的 /healthz"
+                return L10n.text("ui.ipad_to_agentd_healthz")
             case .version:
-                return "带 Token 访问 /api/version"
+                return L10n.text("ui.access_api_version_with_token")
             case .appServerConfig:
-                return "读取 Mac 端 gateway 配置"
+                return L10n.text("ui.read_mac_side_gateway_configuration")
             case .appServerGateway:
                 return "WebSocket + JSON-RPC initialize"
             }
@@ -277,29 +277,29 @@ struct ConnectionCredentialRemovalConfirmation: Identifiable, Equatable {
     var title: String {
         switch target {
         case .current:
-            return "忘记当前 Mac？"
+            return L10n.text("ui.forgot_your_current_mac")
         case .savedProfile:
-            return "删除“\(displayName ?? "这台 Mac")”？"
+            return L10n.format("ui.delete_value_c193903e", displayName ?? L10n.text("ui.this_mac"))
         }
     }
 
     var message: String {
         switch target {
         case .current:
-            let targetName = displayName.map { "“\($0)”" } ?? "当前 Mac"
-            return "这会从当前设备的系统钥匙串（Keychain）删除\(targetName)的访问码，并清除 App 中当前连接的会话、消息和日志。再次连接时需要重新扫码配对。"
+            let targetName = displayName.map { "“\($0)”" } ?? L10n.text("ui.current_mac")
+            return L10n.format("ui.this_will_delete_value_s_access_code_from", targetName)
         case .savedProfile:
-            let targetName = displayName ?? "这台 Mac"
-            return "这会从当前设备删除“\(targetName)”的连接档案和系统钥匙串（Keychain）访问码。再次连接时需要重新扫码配对；当前 Mac 连接不会受影响。"
+            let targetName = displayName ?? L10n.text("ui.this_mac")
+            return L10n.format("ui.this_will_delete_value_s_connection_profile_and", targetName)
         }
     }
 
     var confirmButtonTitle: String {
         switch target {
         case .current:
-            return "忘记这台 Mac"
+            return L10n.text("ui.forget_this_mac")
         case .savedProfile:
-            return "删除连接档案"
+            return L10n.text("ui.delete_connection_file")
         }
     }
 }
@@ -315,17 +315,17 @@ enum ConnectionProfileError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .notFound:
-            return "找不到这台 Mac 的连接档案"
+            return L10n.text("ui.the_connection_file_cannot_be_found_for_this")
         case .missingToken:
-            return "这台 Mac 的访问码不存在，请重新配对"
+            return L10n.text("ui.the_access_code_for_this_mac_does_not")
         case .cannotDeleteCurrent:
-            return "请先切换到其它 Mac，再删除这个档案"
+            return L10n.text("ui.please_switch_to_another_mac_before_deleting_this")
         case .operationInProgress:
-            return "另一项 Mac 连接操作仍在进行，请稍后再试"
+            return L10n.text("ui.another_mac_connection_operation_is_still_in_progress")
         case .invalidDisplayName:
-            return "Mac 名称不能为空"
+            return L10n.text("ui.mac_name_cannot_be_empty")
         case .displayNameTooLong(let maximum):
-            return "Mac 名称最多 \(maximum) 个字符"
+            return L10n.format("ui.mac_name_can_be_up_to_value_characters", maximum)
         }
     }
 }
@@ -368,7 +368,7 @@ enum ActiveConnectionRoute: Equatable {
         case .configured:
             return "Tailscale"
         case .local:
-            return "本机直连"
+            return L10n.text("ui.direct_connection_to_this_machine")
         }
     }
 }
@@ -1006,7 +1006,7 @@ final class AppStore: ObservableObject {
                     connectionStatus = .idle
                     return false
                 }
-                let message = "已检测到本机助手，但自动连接失败。请升级并重启 agentd，或扫描二维码连接。"
+                let message = L10n.text("ui.the_native_assistant_was_detected_but_the_automatic")
                 connectionStatus = .failed(message)
                 lastError = message
                 return false
@@ -1148,9 +1148,15 @@ final class AppStore: ObservableObject {
             return "\(milliseconds) ms"
         }
         if milliseconds < 10_000 {
-            return String(format: "%.1f 秒", Double(milliseconds) / 1_000)
+            let seconds = Double(milliseconds) / 1_000
+            let formatter = NumberFormatter()
+            formatter.locale = .autoupdatingCurrent
+            formatter.minimumFractionDigits = 1
+            formatter.maximumFractionDigits = 1
+            let value = formatter.string(from: NSNumber(value: seconds)) ?? String(seconds)
+            return L10n.format("ui.seconds_decimal", value)
         }
-        return "\(Int((Double(milliseconds) / 1_000).rounded())) 秒"
+        return L10n.plural("ui.seconds_count", count: Int((Double(milliseconds) / 1_000).rounded()))
     }
 
     private static func elapsedMilliseconds(since startDate: Date) -> Int {
@@ -1294,10 +1300,10 @@ final class AppStore: ObservableObject {
     private static func defaultProfileDisplayName(endpoint: String) -> String {
         guard let host = URLComponents(string: endpoint)?.host,
               !host.isEmpty else {
-            return "我的 Mac"
+            return L10n.text("ui.my_mac")
         }
         if host == "127.0.0.1" || host == "::1" || host == "localhost" {
-            return "这台 Mac"
+            return L10n.text("ui.this_mac")
         }
         return host
     }
@@ -1347,7 +1353,7 @@ final class AppStore: ObservableObject {
             endpoint: localAgentEndpoint,
             token: claimedToken,
             profileTarget: .currentOrNew(
-                displayName: activeConnectionProfile == nil ? "这台 Mac" : nil
+                displayName: activeConnectionProfile == nil ? L10n.text("ui.this_mac") : nil
             )
         )
         _ = try commitConnectionSettings(prepared)

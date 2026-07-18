@@ -20,25 +20,85 @@ struct DoctorDiagnosticCheck: Decodable, Equatable, Identifiable {
 
     var displayName: String {
         switch name {
-        case "token": return "访问令牌"
-        case "projects": return "项目配置"
+        case "token": return L10n.text("ui.access_token")
+        case "projects": return L10n.text("ui.project_configuration")
         case "codex": return "Codex CLI"
         case "runtime": return "Agent Runtime"
         case "tailscale": return "Tailscale"
-        case "config-file": return "配置文件权限"
-        case "app-server-token-file": return "app-server 凭据文件"
+        case "config-file": return L10n.text("ui.profile_permissions")
+        case "app-server-token-file": return L10n.text("ui.app_server_credentials_file")
         case "codex-app-server": return "Codex app-server"
         case "claude-bridge": return "Claude bridge"
         case "app-server": return "app-server gateway"
-        case "agentd-port": return "agentd 端口"
-        case "app-server-port": return "app-server 端口"
+        case "app-server-upstream": return "app-server upstream"
+        case "agentd-port": return L10n.text("ui.agentd_port")
+        case "app-server-port": return L10n.text("ui.app_server_port")
         default: return name
         }
     }
 
-    var normalizedFix: String? {
-        let value = fix?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? nil : value
+    /// The Mac service currently returns Chinese prose. Render stable check states locally so
+    /// the Doctor screen follows the app language; the raw response remains available below.
+    var displayMessage: String {
+        let failedKey: String
+        let passedKey: String
+        switch name {
+        case "token":
+            passedKey = "ui.doctor_access_token_ready"
+            failedKey = "ui.doctor_access_token_needs_attention"
+        case "projects":
+            passedKey = "ui.doctor_projects_ready"
+            failedKey = "ui.doctor_projects_needs_attention"
+        case "codex":
+            passedKey = "ui.doctor_codex_cli_ready"
+            failedKey = "ui.doctor_codex_cli_needs_attention"
+        case "runtime":
+            passedKey = "ui.doctor_runtime_ready"
+            failedKey = "ui.doctor_runtime_needs_attention"
+        case "tailscale":
+            passedKey = "ui.doctor_tailscale_ready"
+            failedKey = "ui.doctor_tailscale_needs_attention"
+        case "config-file", "app-server-token-file":
+            passedKey = "ui.doctor_sensitive_file_ready"
+            failedKey = "ui.doctor_sensitive_file_needs_attention"
+        case "codex-app-server":
+            passedKey = "ui.doctor_codex_app_server_ready"
+            failedKey = "ui.doctor_codex_app_server_needs_attention"
+        case "claude-bridge":
+            passedKey = "ui.doctor_claude_bridge_ready"
+            failedKey = "ui.doctor_claude_bridge_needs_attention"
+        case "app-server", "app-server-upstream":
+            passedKey = "ui.doctor_gateway_ready"
+            failedKey = "ui.doctor_gateway_needs_attention"
+        case "agentd-port", "app-server-port":
+            passedKey = "ui.doctor_port_ready"
+            failedKey = "ui.doctor_port_needs_attention"
+        default:
+            return L10n.text(ok ? "ui.doctor_check_passed" : (isWarning ? "ui.doctor_check_warning" : "ui.doctor_check_failed"))
+        }
+        return L10n.text(ok ? passedKey : failedKey)
+    }
+
+    var displayFix: String? {
+        guard !ok else { return nil }
+        switch name {
+        case "token": return L10n.text("ui.doctor_fix_token")
+        case "projects": return L10n.text("ui.doctor_fix_projects")
+        case "codex": return L10n.text("ui.doctor_fix_codex")
+        case "runtime": return L10n.text("ui.doctor_fix_runtime")
+        case "tailscale": return L10n.text("ui.doctor_fix_tailscale")
+        case "config-file", "app-server-token-file": return L10n.text("ui.doctor_fix_sensitive_file")
+        case "codex-app-server": return L10n.text("ui.doctor_fix_codex_app_server")
+        case "claude-bridge": return L10n.text("ui.doctor_fix_claude_bridge")
+        case "app-server", "app-server-upstream": return L10n.text("ui.doctor_fix_gateway")
+        case "agentd-port", "app-server-port": return L10n.text("ui.doctor_fix_port")
+        default: return L10n.text("ui.doctor_fix_generic")
+        }
+    }
+
+    var hasRawDiagnosticDetails: Bool {
+        !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            !(fix?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
     var isWarning: Bool {
@@ -60,17 +120,17 @@ enum DoctorDiagnosticError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidEndpoint:
-            return "Mac 助手地址无效，请返回设置检查连接地址。"
+            return L10n.text("ui.the_mac_assistant_address_is_invalid_please_return")
         case .invalidHTTPResponse:
-            return "Mac 助手返回了无法识别的网络响应。"
+            return L10n.text("ui.mac_assistant_returned_an_unrecognized_network_response")
         case .httpStatus(let code, let message):
             let detail = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if detail.isEmpty {
-                return "诊断请求失败（HTTP \(code)），请检查 Mac 助手状态后重试。"
+                return L10n.format("ui.diagnostic_request_failed_http_value_please_check_mac", code)
             }
-            return "诊断请求失败（HTTP \(code)）：\(detail)"
+            return L10n.format("ui.diagnostic_request_failed_http_value_value", code, detail)
         case .invalidPayload(let detail):
-            return "诊断结果格式无法识别：\(detail)"
+            return L10n.format("ui.the_diagnostic_result_format_cannot_be_recognized_value", detail)
         }
     }
 }
@@ -98,7 +158,7 @@ enum DoctorDiagnosticsParser {
             let report = try JSONDecoder().decode(DoctorDiagnosticReport.self, from: data)
             return DoctorDiagnosticDocument(
                 report: report,
-                rawJSON: formatDiagnosticPayload(data, fallback: "诊断结果不是 UTF-8")
+                rawJSON: formatDiagnosticPayload(data, fallback: L10n.text("ui.diagnosis_result_is_not_utf_8"))
             )
         } catch {
             throw DoctorDiagnosticError.invalidPayload(error.localizedDescription)
@@ -207,7 +267,7 @@ struct DoctorView: View {
             .frame(maxWidth: .infinity, alignment: .top)
         }
         .background(tokens.background.ignoresSafeArea())
-        .navigationTitle("诊断")
+        .navigationTitle(L10n.text("ui.diagnosis"))
         .tint(tokens.accent)
         .task {
             guard doctorState == .idle else {
@@ -219,11 +279,11 @@ struct DoctorView: View {
 
     private func introduction(tokens: ThemeTokens) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("检查 Mac 助手、Codex CLI、app-server gateway 和项目配置。")
+            Text(L10n.text("ui.check_the_mac_assistant_codex_cli_app_server"))
                 .font(themeStore.uiFont(.callout))
                 .foregroundStyle(tokens.secondaryText)
             if !showsHistoryDiagnostics {
-                Text("历史诊断仅在设置里开启开发者模式后显示。")
+                Text(L10n.text("ui.historical_diagnostics_are_only_displayed_after_developer_mode"))
                     .font(themeStore.uiFont(.footnote))
                     .foregroundStyle(tokens.secondaryText)
             }
@@ -236,25 +296,25 @@ struct DoctorView: View {
                 Task { await runDoctor() }
             } label: {
                 if activeOperation == .doctor {
-                    Label("检查中", systemImage: "hourglass")
+                    Label(L10n.text("ui.under_inspection"), systemImage: "hourglass")
                 } else {
-                    Label("重新检查", systemImage: "arrow.clockwise")
+                    Label(L10n.text("ui.recheck"), systemImage: "arrow.clockwise")
                 }
             }
             .buttonStyle(.borderedProminent)
             .tint(tokens.primaryAction)
             .foregroundStyle(tokens.primaryActionForeground)
             .disabled(activeOperation != nil)
-            .accessibilityHint("重新请求 Mac 助手的 Doctor 诊断结果")
+            .accessibilityHint(L10n.text("ui.request_doctor_diagnosis_results_from_mac_assistant"))
 
             if showsHistoryDiagnostics {
                 Button {
                     Task { await runHistoryDiagnostics() }
                 } label: {
                     if activeOperation == .history {
-                        Label("加载历史诊断", systemImage: "hourglass")
+                        Label(L10n.text("ui.load_historical_diagnostics"), systemImage: "hourglass")
                     } else {
-                        Label("历史诊断", systemImage: "clock.badge.questionmark")
+                        Label(L10n.text("ui.historical_diagnosis"), systemImage: "clock.badge.questionmark")
                     }
                 }
                 .buttonStyle(.bordered)
@@ -271,8 +331,8 @@ struct DoctorView: View {
         switch doctorState {
         case .idle:
             diagnosticPlaceholder(
-                title: "尚未运行诊断",
-                message: "点击重新检查从 Mac 助手获取状态。",
+                title: L10n.text("ui.diagnostics_have_not_been_run_yet"),
+                message: L10n.text("ui.click_recheck_to_get_status_from_mac_assistant"),
                 systemImage: "stethoscope",
                 tokens: tokens
             )
@@ -289,10 +349,10 @@ struct DoctorView: View {
         HStack(spacing: 12) {
             ProgressView()
             VStack(alignment: .leading, spacing: 3) {
-                Text("正在运行 Doctor")
+                Text(L10n.text("ui.running_doctor"))
                     .font(themeStore.uiFont(.headline))
                     .foregroundStyle(tokens.primaryText)
-                Text("正在等待 Mac 助手返回检查结果……")
+                Text(L10n.text("ui.waiting_for_mac_assistant_to_return_check_results"))
                     .font(themeStore.uiFont(.footnote))
                     .foregroundStyle(tokens.secondaryText)
             }
@@ -304,7 +364,7 @@ struct DoctorView: View {
 
     private func errorCard(message: String, tokens: ThemeTokens) -> some View {
         return VStack(alignment: .leading, spacing: 12) {
-            Label("诊断请求失败", systemImage: "exclamationmark.triangle.fill")
+            Label(L10n.text("ui.diagnostic_request_failed"), systemImage: "exclamationmark.triangle.fill")
                 .font(themeStore.uiFont(.headline))
                 .foregroundStyle(.red)
             Text(message)
@@ -314,7 +374,7 @@ struct DoctorView: View {
             Button {
                 Task { await runDoctor() }
             } label: {
-                Label("重试", systemImage: "arrow.clockwise")
+                Label(L10n.text("ui.try_again"), systemImage: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
             .disabled(activeOperation != nil)
@@ -333,7 +393,7 @@ struct DoctorView: View {
             summaryCard(document.report, tokens: tokens)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("检查项")
+                Text(L10n.text("ui.check_items"))
                     .font(themeStore.uiFont(.headline))
                     .foregroundStyle(tokens.primaryText)
                 ForEach(document.report.checks) { check in
@@ -342,7 +402,7 @@ struct DoctorView: View {
             }
 
             rawJSONSection(
-                title: "Doctor 原始 JSON",
+                title: L10n.text("ui.doctor_raw_json"),
                 text: document.rawJSON,
                 isExpanded: $isRawJSONExpanded,
                 tokens: tokens
@@ -366,12 +426,17 @@ struct DoctorView: View {
                     .font(.title2)
                     .foregroundStyle(statusColor)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(report.ok ? (hasWarnings ? "服务可用，有提醒" : "服务可用") : "发现需要处理的问题")
+                    Text(report.ok ? (hasWarnings ? L10n.text("ui.service_available_reminders_available") : L10n.text("ui.service_available")) : L10n.text("ui.discover_issues_that_need_to_be_addressed"))
                         .font(themeStore.uiFont(.headline))
                         .foregroundStyle(tokens.primaryText)
                     Text(report.ok
-                        ? (hasWarnings ? "必要检查已通过，另有 \(warningCount) 项可选建议。" : "Doctor 的所有必要检查已通过。")
-                        : "查看下方失败项的处理建议，完成后重新检查。")
+                        ? (hasWarnings
+                            ? L10n.format(
+                                "ui.required_checks_passed_optional_suggestions",
+                                L10n.plural("ui.optional_suggestions_count", count: warningCount)
+                            )
+                            : L10n.text("ui.all_necessary_checks_by_doctor_passed"))
+                        : L10n.text("ui.check_out_the_suggestions_for_handling_failed_items"))
                         .font(themeStore.uiFont(.footnote))
                         .foregroundStyle(tokens.secondaryText)
                 }
@@ -379,8 +444,8 @@ struct DoctorView: View {
             }
 
             Divider()
-            LabeledContent("服务版本", value: report.version.isEmpty ? "未知" : report.version)
-            LabeledContent("监听地址", value: report.listen.isEmpty ? "未配置" : report.listen)
+            LabeledContent(L10n.text("ui.service_version"), value: report.version.isEmpty ? L10n.text("ui.unknown") : report.version)
+            LabeledContent(L10n.text("ui.listening_address"), value: report.listen.isEmpty ? L10n.text("ui.not_configured") : report.listen)
         }
         .font(themeStore.uiFont(.callout))
         .padding(16)
@@ -396,7 +461,7 @@ struct DoctorView: View {
             ? "checkmark.circle.fill"
             : (check.isWarning ? "exclamationmark.triangle.fill" : "xmark.circle.fill")
         let statusColor: Color = check.ok ? .green : (check.isWarning ? tokens.warning : .red)
-        let statusLabel = check.ok ? "已通过" : (check.isWarning ? "提醒" : "未通过")
+        let statusLabel = check.ok ? L10n.text("ui.passed") : (check.isWarning ? L10n.text("ui.reminder") : L10n.text("ui.failed_349c9e63"))
 
         return HStack(alignment: .top, spacing: 12) {
             Image(systemName: iconName)
@@ -415,11 +480,11 @@ struct DoctorView: View {
                             .foregroundStyle(tokens.secondaryText)
                     }
                 }
-                Text(check.message)
+                Text(check.displayMessage)
                     .font(themeStore.uiFont(.callout))
                     .foregroundStyle(tokens.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
-                if !check.ok, let fix = check.normalizedFix {
+                if !check.ok, let fix = check.displayFix {
                     Label(fix, systemImage: "wrench.and.screwdriver")
                         .font(themeStore.uiFont(.footnote))
                         .foregroundStyle(tokens.primaryText)
@@ -427,6 +492,27 @@ struct DoctorView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .textSelection(.enabled)
+                }
+                if check.hasRawDiagnosticDetails {
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if !check.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                LabeledContent(L10n.text("ui.doctor_raw_message"), value: check.message)
+                                    .textSelection(.enabled)
+                            }
+                            if let fix = check.fix?.trimmingCharacters(in: .whitespacesAndNewlines), !fix.isEmpty {
+                                LabeledContent(L10n.text("ui.doctor_raw_fix"), value: fix)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .font(themeStore.uiFont(.footnote))
+                        .foregroundStyle(tokens.secondaryText)
+                        .padding(.top, 2)
+                    } label: {
+                        Label(L10n.text("ui.mac_returned_raw_diagnostic_details"), systemImage: "doc.text.magnifyingglass")
+                            .font(themeStore.uiFont(.footnote))
+                            .foregroundStyle(tokens.secondaryText)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -447,13 +533,13 @@ struct DoctorView: View {
         case .loading:
             HStack(spacing: 10) {
                 ProgressView()
-                Text("正在加载历史诊断……")
+                Text(L10n.text("ui.loading_historical_diagnostics"))
                     .foregroundStyle(tokens.secondaryText)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         case .failed(let message):
             VStack(alignment: .leading, spacing: 8) {
-                Label("历史诊断加载失败", systemImage: "exclamationmark.triangle")
+                Label(L10n.text("ui.failed_to_load_historical_diagnostics"), systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
                 Text(message)
                     .font(themeStore.uiFont(.footnote))
@@ -462,7 +548,7 @@ struct DoctorView: View {
             }
         case .loaded(let text):
             rawJSONSection(
-                title: "历史诊断 JSON",
+                title: L10n.text("ui.historical_diagnostic_json"),
                 text: text,
                 isExpanded: $isHistoryJSONExpanded,
                 tokens: tokens
@@ -483,11 +569,11 @@ struct DoctorView: View {
                     Button {
                         UIPasteboard.general.string = text
                     } label: {
-                        Label("复制原始 JSON", systemImage: "doc.on.doc")
+                        Label(L10n.text("ui.copy_original_json"), systemImage: "doc.on.doc")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .accessibilityHint("将完整诊断内容复制到剪贴板")
+                    .accessibilityHint(L10n.text("ui.copy_complete_diagnostic_content_to_clipboard"))
                 }
 
                 ScrollView(.horizontal, showsIndicators: true) {
@@ -585,7 +671,7 @@ struct DoctorView: View {
             historyState = .loaded(try DoctorDiagnosticsParser.parseRawResponse(
                 data: data,
                 response: response,
-                fallback: "历史诊断结果不是 UTF-8"
+                fallback: L10n.text("ui.historical_diagnostic_results_are_not_utf_8")
             ))
             isHistoryJSONExpanded = true
         } catch is CancellationError {
@@ -602,16 +688,16 @@ struct DoctorView: View {
 
         switch urlError.code {
         case .notConnectedToInternet:
-            return "当前设备没有网络连接。恢复网络后再重新检查。"
+            return L10n.text("ui.the_device_currently_has_no_network_connection_restore")
         case .cannotConnectToHost, .cannotFindHost, .networkConnectionLost:
-            return "无法连接到 Mac 助手。请确认助手正在运行，并检查连接地址和网络。"
+            return L10n.text("ui.unable_to_connect_to_mac_assistant_please_confirm")
         case .timedOut:
-            return "连接 Mac 助手超时。请确认助手正在运行，然后重试。"
+            return L10n.text("ui.timeout_connecting_to_mac_assistant_please_confirm_that")
         case .userAuthenticationRequired, .userCancelledAuthentication:
-            return "访问码验证失败，请在 Mac 连接设置中重新配对。"
+            return L10n.text("ui.access_code_verification_failed_please_pair_again_in")
         default:
             // 未知 URL 错误保留稳定的中文说明和错误码，便于支持人员定位且不泄露底层英文文案。
-            return "网络请求失败（错误码 \(urlError.errorCode)），请稍后重试。"
+            return L10n.format("ui.the_network_request_failed_error_code_value_please", urlError.errorCode)
         }
     }
 }

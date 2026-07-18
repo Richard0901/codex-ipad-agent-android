@@ -311,9 +311,8 @@ extension ConversationDataFlowTests {
         let saved = try XCTUnwrap(store.sessionReminder(for: session.id))
         XCTAssertEqual(reminderStore.load(endpoint: appStore.endpoint)[session.id], saved)
         XCTAssertEqual(scheduler.scheduled, [saved])
-        XCTAssertTrue(store.statusMessage?.contains("已保存 App 内提醒") == true)
-        XCTAssertTrue(store.statusMessage?.contains("系统通知未开启") == true)
-        XCTAssertFalse(store.statusMessage?.contains("已设置提醒") == true)
+        XCTAssertEqual(store.statusMessage, L10n.text("ui.the_in_app_reminder_has_been_saved_the"))
+        XCTAssertNotEqual(store.statusMessage, L10n.format("ui.reminder_value_has_been_set", session.title))
 
         await store.scheduleSessionReminder(session, after: -1, now: now)
 
@@ -321,7 +320,7 @@ extension ConversationDataFlowTests {
         XCTAssertTrue(reminderStore.load(endpoint: appStore.endpoint).isEmpty)
         XCTAssertEqual(scheduler.scheduled, [saved], "已过期请求不能再进入系统通知调度")
         XCTAssertEqual(scheduler.canceledSessionIDs, [session.id])
-        XCTAssertTrue(store.statusMessage?.contains("提醒时间已过") == true)
+        XCTAssertEqual(store.statusMessage, L10n.format("ui.the_reminder_time_has_passed_and_the_reminder", session.title))
     }
 
     func testSessionReminderReloadAndForegroundPruneExpiredStateWithoutTimer() async throws {
@@ -2367,4 +2366,3 @@ extension ConversationDataFlowTests {
     }
 
 }
-

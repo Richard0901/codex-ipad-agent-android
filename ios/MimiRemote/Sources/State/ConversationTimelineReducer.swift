@@ -1,0 +1,350 @@
+import Foundation
+
+/// 将 app-server 的权威快照与已经展示的实时 Item 合并成一条稳定时间线。
+///
+/// 核心约束是“首次出现决定槽位，后续事件原位更新”。时间只在两个完全没有顺序关系的
+/// 独立片段之间充当插入提示，绝不能重新排列已经建立的 Turn/Item 顺序。
+struct ConversationTimelineReducer {
+    struct RebaseResult {
+        let messages: [ConversationMessage]
+        let stableIDAliases: [MessageID: UUID]
+        let ambiguousAliasCount: Int
+        let hadOrderingCycle: Bool
+    }
+
+    private struct Node {
+        var message: ConversationMessage
+        let currentIndex: Int?
+        let snapshotIndex: Int?
+    }
+
+    func rebase(
+        snapshot rawSnapshot: [ConversationMessage],
+        current: [ConversationMessage],
+        replacingHistoryProjectionIDs: Set<UUID>? = nil,
+        authoritativeCompletedTurnItems: [TurnID: Set<AgentItemID>] = [:]
+    ) -> RebaseResult {
+        let snapshot = deduplicatedSnapshot(rawSnapshot)
+        var matchedCurrentBySnapshotIndex: [Int: Int] = [:]
+        var consumedCurrentIndices = Set<Int>()
+        var ambiguousAliasCount = 0
+
+        var currentIndicesByUUID: [UUID: Int] = [:]
+        var currentIndicesByPrimaryKey: [String: [Int]] = [:]
+        var currentIndicesBySemanticKey: [String: [Int]] = [:]
+        for index in current.indices {
+            // 极端情况下旧缓存可能已有重复 UUID；保留首次出现槽位，不能在重建时间线时崩溃。
+            currentIndicesByUUID[current[index].id] = currentIndicesByUUID[current[index].id] ?? index
+            if let key = primaryKey(for: current[index]) {
+                currentIndicesByPrimaryKey[key, default: []].append(index)
+            }
+            if let key = semanticAliasKey(for: current[index]) {
+                currentIndicesBySemanticKey[key, default: []].append(index)
+            }
+        }
+
+        // 先使用 UUID/协议稳定键匹配；legacy thread/read 的 item-N 最后再走受限语义别名。
+        for snapshotIndex in snapshot.indices {
+            let item = snapshot[snapshotIndex]
+            let candidates: [Int]
+            if let currentIndex = currentIndicesByUUID[item.id] {
+                candidates = [currentIndex]
+            } else if let key = primaryKey(for: item) {
+                candidates = currentIndicesByPrimaryKey[key] ?? []
+            } else {
+                candidates = []
+            }
+            if let match = candidates.first(where: { !consumedCurrentIndices.contains($0) }) {
+                matchedCurrentBySnapshotIndex[snapshotIndex] = match
+                consumedCurrentIndices.insert(match)
+            }
+        }
+
+        var unmatchedSnapshotIndicesBySemanticKey: [String: [Int]] = [:]
+        for snapshotIndex in snapshot.indices where matchedCurrentBySnapshotIndex[snapshotIndex] == nil {
+            if let key = semanticAliasKey(for: snapshot[snapshotIndex]) {
+                unmatchedSnapshotIndicesBySemanticKey[key, default: []].append(snapshotIndex)
+            }
+        }
+        for (key, snapshotIndices) in unmatchedSnapshotIndicesBySemanticKey {
+            let currentCandidates = (currentIndicesBySemanticKey[key] ?? []).filter { !consumedCurrentIndices.contains($0) }
+            guard snapshotIndices.count == 1, currentCandidates.count == 1,
+                  let snapshotIndex = snapshotIndices.first,
+                  let currentIndex = currentCandidates.first else {
+                if !snapshotIndices.isEmpty, !currentCandidates.isEmpty {
+                    ambiguousAliasCount += 1
+                }
+                continue
+            }
+            matchedCurrentBySnapshotIndex[snapshotIndex] = currentIndex
+            consumedCurrentIndices.insert(currentIndex)
+        }
+
+        // 老 gateway 可能不给 client_message_id；只允许“未确认本地回显”与唯一、近时间同文历史合并。
+        for snapshotIndex in snapshot.indices where matchedCurrentBySnapshotIndex[snapshotIndex] == nil {
+            let history = snapshot[snapshotIndex]
+            let candidates = current.indices.filter { index in
+                guard !consumedCurrentIndices.contains(index) else { return false }
+                let local = current[index]
+                return local.sendStatus != .confirmed
+                    && local.role == history.role
+                    && local.content == history.content
+                    && abs(local.createdAt.timeIntervalSince(history.createdAt)) <= 10 * 60
+            }
+            guard candidates.count == 1, let currentIndex = candidates.first else {
+                continue
+            }
+            matchedCurrentBySnapshotIndex[snapshotIndex] = currentIndex
+            consumedCurrentIndices.insert(currentIndex)
+        }
+
+        let snapshotIndexByCurrentIndex = Dictionary(uniqueKeysWithValues: matchedCurrentBySnapshotIndex.map { ($0.value, $0.key) })
+        var nodes: [Node] = []
+        var nodeIndexByCurrentIndex: [Int: Int] = [:]
+        var nodeIndexBySnapshotIndex: [Int: Int] = [:]
+        var stableIDAliases: [MessageID: UUID] = [:]
+
+        for currentIndex in current.indices {
+            let existing = current[currentIndex]
+            if let snapshotIndex = snapshotIndexByCurrentIndex[currentIndex] {
+                let authoritative = mergedMessage(snapshot: snapshot[snapshotIndex], existing: existing)
+                let nodeIndex = nodes.count
+                nodes.append(Node(message: authoritative, currentIndex: currentIndex, snapshotIndex: snapshotIndex))
+                nodeIndexByCurrentIndex[currentIndex] = nodeIndex
+                nodeIndexBySnapshotIndex[snapshotIndex] = nodeIndex
+                if let stableID = existing.stableID {
+                    stableIDAliases[stableID] = authoritative.id
+                }
+                if let stableID = authoritative.stableID {
+                    stableIDAliases[stableID] = authoritative.id
+                }
+                continue
+            }
+            if replacingHistoryProjectionIDs?.contains(existing.id) == true {
+                continue
+            }
+            if shouldPruneProjectedProcess(existing, authoritativeCompletedTurnItems: authoritativeCompletedTurnItems) {
+                continue
+            }
+            let nodeIndex = nodes.count
+            nodes.append(Node(message: existing, currentIndex: currentIndex, snapshotIndex: nil))
+            nodeIndexByCurrentIndex[currentIndex] = nodeIndex
+        }
+
+        for snapshotIndex in snapshot.indices where nodeIndexBySnapshotIndex[snapshotIndex] == nil {
+            let nodeIndex = nodes.count
+            let message = snapshot[snapshotIndex]
+            nodes.append(Node(message: message, currentIndex: nil, snapshotIndex: snapshotIndex))
+            nodeIndexBySnapshotIndex[snapshotIndex] = nodeIndex
+            if let stableID = message.stableID {
+                stableIDAliases[stableID] = message.id
+            }
+        }
+
+        guard nodes.count > 1 else {
+            return RebaseResult(
+                messages: nodes.map(\.message),
+                stableIDAliases: stableIDAliases,
+                ambiguousAliasCount: ambiguousAliasCount,
+                hadOrderingCycle: false
+            )
+        }
+
+        var outgoing = Array(repeating: Set<Int>(), count: nodes.count)
+        var indegree = Array(repeating: 0, count: nodes.count)
+        func addEdge(_ from: Int, _ to: Int) {
+            guard from != to, outgoing[from].insert(to).inserted else { return }
+            indegree[to] += 1
+        }
+
+        let keptCurrentNodeIndices = current.indices.compactMap { nodeIndexByCurrentIndex[$0] }
+        for pair in zip(keptCurrentNodeIndices, keptCurrentNodeIndices.dropFirst()) {
+            let left = nodes[pair.0]
+            let right = nodes[pair.1]
+            // 两端都来自 snapshot 时由服务端顺序裁决；只保留含本地专属 Item 的首次出现约束。
+            if left.snapshotIndex == nil || right.snapshotIndex == nil {
+                addEdge(pair.0, pair.1)
+            }
+        }
+        let snapshotNodeIndices = snapshot.indices.compactMap { nodeIndexBySnapshotIndex[$0] }
+        for pair in zip(snapshotNodeIndices, snapshotNodeIndices.dropFirst()) {
+            addEdge(pair.0, pair.1)
+        }
+
+        var ready = nodes.indices.filter { indegree[$0] == 0 }
+        var orderedNodeIndices: [Int] = []
+        orderedNodeIndices.reserveCapacity(nodes.count)
+        while !ready.isEmpty {
+            ready.sort { isNode(nodes[$0], orderedBefore: nodes[$1]) }
+            let nodeIndex = ready.removeFirst()
+            orderedNodeIndices.append(nodeIndex)
+            for next in outgoing[nodeIndex] {
+                indegree[next] -= 1
+                if indegree[next] == 0 {
+                    ready.append(next)
+                }
+            }
+        }
+
+        let hadOrderingCycle = orderedNodeIndices.count != nodes.count
+        if hadOrderingCycle {
+            // 快照顺序与本地首次槽位发生冲突时，时间排序无法解决语义矛盾，反而会再次制造跳动。
+            // 明确保留全部已展示 Item 的相对顺序，只把快照新增 Item 锚到相邻服务端 Item 附近。
+            orderedNodeIndices = currentFirstFallbackOrder(
+                nodes: nodes,
+                currentNodeIndices: keptCurrentNodeIndices,
+                snapshotNodeIndices: snapshotNodeIndices
+            )
+        }
+
+        return RebaseResult(
+            messages: orderedNodeIndices.map { nodes[$0].message },
+            stableIDAliases: stableIDAliases,
+            ambiguousAliasCount: ambiguousAliasCount,
+            hadOrderingCycle: hadOrderingCycle
+        )
+    }
+
+    private func deduplicatedSnapshot(_ snapshot: [ConversationMessage]) -> [ConversationMessage] {
+        var seenUUIDs = Set<UUID>()
+        var seenPrimaryKeys = Set<String>()
+        return snapshot.filter { message in
+            guard seenUUIDs.insert(message.id).inserted else { return false }
+            guard let key = primaryKey(for: message) else { return true }
+            return seenPrimaryKeys.insert(key).inserted
+        }
+    }
+
+    private func mergedMessage(snapshot: ConversationMessage, existing: ConversationMessage) -> ConversationMessage {
+        let shouldUseExistingTime = snapshot.isTimestampFallback && !existing.isTimestampFallback
+        return ConversationMessage(
+            id: existing.id,
+            stableID: snapshot.stableID ?? existing.stableID,
+            clientMessageID: snapshot.clientMessageID ?? existing.clientMessageID,
+            turnID: snapshot.turnID ?? existing.turnID,
+            itemID: snapshot.itemID ?? existing.itemID,
+            role: snapshot.role,
+            kind: snapshot.kind,
+            content: snapshot.content,
+            createdAt: shouldUseExistingTime ? existing.createdAt : snapshot.createdAt,
+            updatedAt: latest(snapshot.updatedAt, existing.updatedAt),
+            sendStatus: snapshot.sendStatus,
+            revision: latestRevision(snapshot.revision, existing.revision),
+            turnPayload: snapshot.turnPayload ?? existing.turnPayload,
+            activityPayload: snapshot.activityPayload ?? existing.activityPayload,
+            timelineOrdinal: snapshot.timelineOrdinal ?? existing.timelineOrdinal,
+            turnLifecycle: snapshot.turnLifecycle ?? existing.turnLifecycle,
+            userDelivery: snapshot.userDelivery ?? existing.userDelivery,
+            isTimestampFallback: shouldUseExistingTime ? false : snapshot.isTimestampFallback
+        )
+    }
+
+    private func latest(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case (.some(let left), .some(let right)):
+            return max(left, right)
+        case (.some(let value), .none), (.none, .some(let value)):
+            return value
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private func latestRevision(_ lhs: ModelRevision?, _ rhs: ModelRevision?) -> ModelRevision? {
+        switch (lhs, rhs) {
+        case (.some(let left), .some(let right)):
+            return max(left, right)
+        case (.some(let value), .none), (.none, .some(let value)):
+            return value
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private func primaryKey(for message: ConversationMessage) -> String? {
+        if let clientMessageID = message.clientMessageID {
+            return "client:\(clientMessageID)"
+        }
+        if let itemID = message.itemID, !itemID.isEmpty {
+            return "item:\(message.turnID ?? ""):\(itemID)"
+        }
+        if let stableID = message.stableID {
+            return "stable:\(stableID)"
+        }
+        return nil
+    }
+
+    private func semanticAliasKey(for message: ConversationMessage) -> String? {
+        guard let turnID = message.turnID, !turnID.isEmpty else { return nil }
+        let semanticKind: String
+        if message.role == .assistant {
+            semanticKind = "assistant:\(message.kind.rawValue)"
+        } else if message.role == .system {
+            switch message.kind {
+            case .reasoningSummary, .plan, .commandSummary, .fileChangeSummary:
+                semanticKind = "system:\(message.kind.rawValue)"
+            case .message, .commentary, .approval, .userInput, .error:
+                return nil
+            }
+        } else {
+            return nil
+        }
+        let normalized = AssistantTextNormalizer.normalizedAssistantTextForDedup(message.content)
+        guard !normalized.isEmpty else { return nil }
+        return "\(turnID):\(semanticKind):\(normalized)"
+    }
+
+    private func shouldPruneProjectedProcess(
+        _ message: ConversationMessage,
+        authoritativeCompletedTurnItems: [TurnID: Set<AgentItemID>]
+    ) -> Bool {
+        guard message.timelineOrdinal != nil,
+              let turnID = message.turnID,
+              let itemID = message.itemID,
+              let authoritativeItemIDs = authoritativeCompletedTurnItems[turnID],
+              !authoritativeItemIDs.contains(itemID) else {
+            return false
+        }
+        return message.kind == .commandSummary || message.kind == .fileChangeSummary
+    }
+
+    private func isNode(_ lhs: Node, orderedBefore rhs: Node) -> Bool {
+        if lhs.message.createdAt != rhs.message.createdAt {
+            return lhs.message.createdAt < rhs.message.createdAt
+        }
+        switch (lhs.snapshotIndex, rhs.snapshotIndex) {
+        case (.some(let left), .some(let right)) where left != right:
+            return left < right
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        default:
+            return (lhs.currentIndex ?? .max) < (rhs.currentIndex ?? .max)
+        }
+    }
+
+    private func currentFirstFallbackOrder(
+        nodes: [Node],
+        currentNodeIndices: [Int],
+        snapshotNodeIndices: [Int]
+    ) -> [Int] {
+        var result = currentNodeIndices
+        var emitted = Set(currentNodeIndices)
+        for (offset, nodeIndex) in snapshotNodeIndices.enumerated() where !emitted.contains(nodeIndex) {
+            let previousSnapshotNode = snapshotNodeIndices[..<offset].last(where: emitted.contains)
+            let nextSnapshotNode = snapshotNodeIndices[(offset + 1)...].first(where: emitted.contains)
+            if let previousSnapshotNode,
+               let anchor = result.firstIndex(of: previousSnapshotNode) {
+                result.insert(nodeIndex, at: result.index(after: anchor))
+            } else if let nextSnapshotNode,
+                      let anchor = result.firstIndex(of: nextSnapshotNode) {
+                result.insert(nodeIndex, at: anchor)
+            } else {
+                result.append(nodeIndex)
+            }
+            emitted.insert(nodeIndex)
+        }
+        return result
+    }
+}

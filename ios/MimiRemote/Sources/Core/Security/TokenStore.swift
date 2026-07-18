@@ -34,11 +34,11 @@ enum TokenStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .loadFailed(let status):
-            return "读取 Token 失败：\(status)"
+            return L10n.format("ui.failed_to_read_token_value", status)
         case .saveFailed(let status):
-            return "保存 Token 失败：\(status)"
+            return L10n.format("ui.failed_to_save_token_value", status)
         case .deleteFailed(let status):
-            return "删除 Token 失败：\(status)"
+            return L10n.format("ui.failed_to_delete_token_value", status)
         }
     }
 }

@@ -98,7 +98,7 @@ struct SessionResponse: Codable {
         } else {
             throw DecodingError.keyNotFound(
                 CodingKeys.session,
-                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "缺少 session 或 row")
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: L10n.text("ui.missing_session_or_row"))
             )
         }
         self.recentOutput = try container.decodeIfPresent(String.self, forKey: .recentOutput)
@@ -137,7 +137,7 @@ struct CreateSessionResponse: Codable {
         } else {
             throw DecodingError.keyNotFound(
                 CodingKeys.session,
-                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "缺少 session 或 row")
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: L10n.text("ui.missing_session_or_row"))
             )
         }
         self.wsURL = try container.decode(String.self, forKey: .wsURL)
@@ -304,13 +304,13 @@ enum CodexAppServerImageDetail: String, Codable, CaseIterable, Hashable, Identif
     var title: String {
         switch self {
         case .auto:
-            return "自动"
+            return L10n.text("ui.automatic")
         case .low:
-            return "低"
+            return L10n.text("ui.low")
         case .high:
-            return "高"
+            return L10n.text("ui.high")
         case .original:
-            return "原图"
+            return L10n.text("ui.original_picture")
         }
     }
 }
@@ -372,9 +372,9 @@ enum CodexAppServerUserInput: Codable, Hashable, Identifiable {
         case .text(let text, _):
             return text
         case .image:
-            return "[图片]"
+            return L10n.text("ui.image_attachment")
         case .localImage(let path, _):
-            return "[图片 \(URL(fileURLWithPath: path).lastPathComponent)]"
+            return L10n.format("ui.image_value", URL(fileURLWithPath: path).lastPathComponent)
         case .skill(let name, _):
             return "[$\(name)]"
         case .mention(let name, _):
@@ -456,7 +456,7 @@ enum CodexAppServerUserInput: Codable, Hashable, Identifiable {
             throw DecodingError.dataCorruptedError(
                 forKey: .type,
                 in: container,
-                debugDescription: "未知 app-server UserInput 类型：\(type)"
+                debugDescription: L10n.format("ui.unknown_app_server_userinput_type_value", type)
             )
         }
     }
@@ -539,11 +539,11 @@ enum CodexAppServerSandboxMode: String, Codable, CaseIterable, Hashable, Identif
     var title: String {
         switch self {
         case .readOnly:
-            return "只读"
+            return L10n.text("ui.read_only")
         case .workspaceWrite:
-            return "可写"
+            return L10n.text("ui.writable")
         case .dangerFullAccess:
-            return "完全访问"
+            return L10n.text("ui.full_access")
         }
     }
 }
@@ -1159,7 +1159,7 @@ indirect enum CodexAppServerJSONValue: Codable, Hashable {
         } else if let value = try? container.decode([String: CodexAppServerJSONValue].self) {
             self = .object(value)
         } else {
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "app-server JSON 值格式无效")
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: L10n.text("ui.app_server_json_value_format_is_invalid"))
         }
     }
 

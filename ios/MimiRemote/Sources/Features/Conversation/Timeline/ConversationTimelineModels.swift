@@ -30,7 +30,9 @@ struct ConversationExplorationGroup: Identifiable, Equatable {
     let isCompleted: Bool
 
     var title: String {
-        isCompleted ? "已探索 \(messages.count) 项" : "正在探索 \(messages.count) 项"
+        isCompleted
+            ? L10n.plural("ui.items_explored_count", count: messages.count)
+            : L10n.plural("ui.items_being_explored_count", count: messages.count)
     }
 
     var latestDetail: String? {
@@ -59,6 +61,6 @@ struct ConversationProcessGroup: Identifiable, Equatable {
         let source = header.activityPayload?.subtitle ?? header.content
         let plainText = ConversationActivityPayload.plainProgressText(source)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return plainText.isEmpty ? "正在处理任务" : plainText
+        return plainText.isEmpty ? L10n.text("ui.processing_task") : plainText
     }
 }

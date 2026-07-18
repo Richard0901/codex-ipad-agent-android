@@ -64,10 +64,10 @@ struct SkillVisualMetadata: Hashable {
 
     var scopeTitle: String? {
         switch scope?.lowercased() {
-        case "repo": return "项目"
-        case "user": return "个人"
-        case "system": return "系统"
-        case "admin": return "管理"
+        case "repo": return L10n.text("ui.project")
+        case "user": return L10n.text("ui.personal")
+        case "system": return L10n.text("ui.system")
+        case "admin": return L10n.text("ui.management")
         default: return scope?.uppercased()
         }
     }
@@ -123,10 +123,10 @@ struct SkillPickerPanel: View {
                     size: 38
                 )
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Skills")
+                    Text(L10n.text("ui.skills"))
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
-                    Text("选择后会作为结构化能力随消息发送")
+                    Text(L10n.text("ui.once_selected_it_will_be_sent_with_the"))
                         .font(themeStore.uiFont(.caption))
                         .foregroundStyle(tokens.secondaryText)
                 }
@@ -140,11 +140,11 @@ struct SkillPickerPanel: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(isRefreshing)
-                .accessibilityLabel("刷新 Skill 列表")
+                .accessibilityLabel(L10n.text("ui.refresh_skill_list"))
             }
 
             if skills.count > 7 {
-                TextField("搜索 Skill", text: $searchText)
+                TextField(L10n.text("ui.search_skill"), text: $searchText)
                     .textFieldStyle(.roundedBorder)
             }
 
@@ -165,7 +165,7 @@ struct SkillPickerPanel: View {
             }
 
             Button(action: onManualAdd) {
-                Label("手动添加 Skill", systemImage: "square.and.pencil")
+                Label(L10n.text("ui.add_skills_manually"), systemImage: "square.and.pencil")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
@@ -235,8 +235,8 @@ struct SkillPickerPanel: View {
         }
         .buttonStyle(.plain)
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.32, dampingFraction: 0.86), value: selected)
-        .accessibilityLabel("Skill \(metadata.displayName)")
-        .accessibilityValue(selected ? "已选择" : "未选择")
+        .accessibilityLabel(L10n.format("ui.skill_named", metadata.displayName))
+        .accessibilityValue(selected ? L10n.text("ui.selected") : L10n.text("ui.not_selected"))
     }
 
     private func emptyState(tokens: ThemeTokens) -> some View {
@@ -244,7 +244,7 @@ struct SkillPickerPanel: View {
             Image(systemName: "wand.and.stars.inverse")
                 .font(themeStore.uiFont(size: 26, weight: .medium))
                 .foregroundStyle(tokens.tertiaryText)
-            Text(searchText.isEmpty ? "暂无可用 Skill" : "没有匹配的 Skill")
+            Text(searchText.isEmpty ? L10n.text("ui.no_skills_available_yet") : L10n.text("ui.no_matching_skill"))
                 .font(themeStore.uiFont(.callout, weight: .medium))
                 .foregroundStyle(tokens.secondaryText)
             if searchText.isEmpty, let error = errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
@@ -298,7 +298,7 @@ struct SkillAttachmentToken: View {
                     .foregroundStyle(tokens.tertiaryText)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("移除 Skill \(metadata.displayName)")
+            .accessibilityLabel(L10n.format("ui.remove_skill_value", metadata.displayName))
         }
         .padding(.leading, 7)
         .padding(.trailing, 8)
@@ -344,7 +344,7 @@ struct SkillInvocationCard: View {
                         .foregroundStyle(secondary)
                         .lineLimit(2)
                 } else {
-                    Text("已随本轮调用")
+                    Text(L10n.text("ui.has_been_called_with_this_round"))
                         .font(themeStore.uiFont(.caption))
                         .foregroundStyle(secondary)
                 }
@@ -367,7 +367,7 @@ struct SkillInvocationCard: View {
             )
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("已调用 Skill \(metadata.displayName)")
+        .accessibilityLabel(L10n.format("ui.skill_value_has_been_called", metadata.displayName))
     }
 
     @ViewBuilder
@@ -402,9 +402,9 @@ struct SkillAutocompletePanel: View {
 
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Label("选择 Skill", systemImage: "wand.and.stars")
+                Label(L10n.text("ui.select_skill"), systemImage: "wand.and.stars")
                 Spacer()
-                Text("↑↓ 选择  ↩︎ 确认  esc 关闭")
+                Text(L10n.text("ui.select_confirm_esc_close"))
             }
             .font(themeStore.uiFont(.caption2, weight: .semibold))
             .foregroundStyle(tokens.secondaryText)

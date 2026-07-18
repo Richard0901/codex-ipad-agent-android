@@ -45,15 +45,15 @@ struct SettingsView: View {
                     .background(tokens.background.ignoresSafeArea())
             }
         }
-        .navigationTitle(isInitialSetup ? "连接你的 Mac" : "设置")
+        .navigationTitle(isInitialSetup ? L10n.text("ui.connect_your_mac") : L10n.text("ui.settings"))
         .navigationBarTitleDisplayMode(initialNavigationTitleDisplayMode)
         .toolbar {
             if !isInitialSetup && showsDoneButton {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") {
+                    Button(L10n.text("ui.complete")) {
                         dismiss()
                     }
-                    .accessibilityLabel("关闭设置")
+                    .accessibilityLabel(L10n.text("ui.close_settings"))
                     .accessibilityIdentifier("settings.close")
                 }
             }
@@ -74,25 +74,25 @@ struct SettingsView: View {
         let claudeUsage = sessionStore.accountClaudeUsageWindowsDisplay
 
         return Form {
-            Section("Mac 连接") {
+            Section(L10n.text("ui.mac_connection")) {
                 NavigationLink {
                     ConnectionManagementView()
                 } label: {
                     LabeledContent(
-                        "状态",
+                        L10n.text("ui.status"),
                         value: appStore.connectionTermination?.title
-                            ?? (sessionStore.isNetworkUnavailable ? "网络不可用" : appStore.connectionStatus.title)
+                            ?? (sessionStore.isNetworkUnavailable ? L10n.text("ui.network_is_unavailable") : appStore.connectionStatus.title)
                     )
                 }
-                LabeledContent("连接地址", value: appStore.endpoint)
+                LabeledContent(L10n.text("ui.connection_address"), value: appStore.endpoint)
                 if appStore.isUsingLocalConnection {
-                    LabeledContent("连接方式", value: "本机直连")
+                    LabeledContent(L10n.text("ui.connection_method"), value: L10n.text("ui.direct_connection_to_this_machine"))
                 }
                 NavigationLink {
                     ConnectionSpeedTestView()
                 } label: {
                     HStack(spacing: 12) {
-                        Label("连接测速", systemImage: "bolt.horizontal.circle")
+                        Label(L10n.text("ui.connection_speed_test"), systemImage: "bolt.horizontal.circle")
                         Spacer(minLength: 12)
                         Text(connectionSpeedTestSummary)
                             .font(themeStore.uiFont(.callout))
@@ -107,7 +107,7 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(tokens.warning)
                 } else if sessionStore.isNetworkUnavailable {
-                    Label("网络不可用，已暂停同步；恢复后会自动重连。", systemImage: "wifi.slash")
+                    Label(L10n.text("ui.the_network_is_unavailable_and_synchronization_has_been"), systemImage: "wifi.slash")
                         .font(.footnote)
                         .foregroundStyle(tokens.warning)
                 }
@@ -116,16 +116,16 @@ struct SettingsView: View {
             Section {
                 RuntimeUsageSettingsCard(runtimeProvider: "codex", display: codexUsage)
             } header: {
-                Text("Codex 用量")
+                Text(L10n.text("ui.codex_usage_ff1ef7d7"))
             }
 
             if sessionStore.hasClaudeRuntimeChannel {
                 Section {
                     RuntimeUsageSettingsCard(runtimeProvider: "claude", display: claudeUsage)
                 } header: {
-                    Text("Claude 用量")
+                    Text(L10n.text("ui.claude_dosage"))
                 } footer: {
-                    Text("Claude Code headless 当前不提供完整使用百分比；收到官方 rate-limit 事件后会显示真实窗口与重置时间，不会估算或抓取网页数据。")
+                    Text(L10n.text("ui.claude_code_headless_currently_does_not_provide_full"))
                 }
             }
 
@@ -133,41 +133,41 @@ struct SettingsView: View {
                 NavigationLink {
                     AppearanceView()
                 } label: {
-                    Label("外观", systemImage: "paintpalette")
+                    Label(L10n.text("ui.appearance"), systemImage: "paintpalette")
                 }
                 NavigationLink {
                     DefaultPermissionView()
                 } label: {
-                    Label("默认权限", systemImage: "lock.shield")
+                    Label(L10n.text("ui.default_permissions"), systemImage: "lock.shield")
                 }
-                Toggle("运行中保持屏幕常亮", isOn: $keepAwakeWhileRunning)
+                Toggle(L10n.text("ui.keep_the_screen_on_during_operation"), isOn: $keepAwakeWhileRunning)
             } header: {
-                Text("偏好")
+                Text(L10n.text("ui.preference"))
             } footer: {
-                Text("仅在前台选中会话运行或等待审批时生效。")
+                Text(L10n.text("ui.it_only_takes_effect_when_the_session_is"))
             }
 
             Section {
-                Toggle("开发者模式", isOn: $developerModeEnabled)
+                Toggle(L10n.text("ui.developer_mode"), isOn: $developerModeEnabled)
                 NavigationLink {
                     DoctorView(showsHistoryDiagnostics: developerModeEnabled)
                 } label: {
-                    Label("诊断与支持", systemImage: "stethoscope")
+                    Label(L10n.text("ui.diagnosis_and_support"), systemImage: "stethoscope")
                 }
                 NavigationLink {
                     CapabilitiesView()
                 } label: {
-                    Label("能力清单", systemImage: "wand.and.stars")
+                    Label(L10n.text("ui.competency_checklist"), systemImage: "wand.and.stars")
                 }
                 NavigationLink {
                     ThirdPartyNoticesView()
                 } label: {
-                    Label("开源许可", systemImage: "doc.text")
+                    Label(L10n.text("ui.open_source_license"), systemImage: "doc.text")
                 }
             } header: {
-                Text("高级")
+                Text(L10n.text("ui.advanced"))
             } footer: {
-                Text(developerModeEnabled ? "历史诊断可能显示本机路径和会话标题，仅用于排障。" : "开启后可使用高级运行选项和历史诊断。")
+                Text(developerModeEnabled ? L10n.text("ui.historical_diagnostics_may_display_the_local_machine_path") : L10n.text("ui.turn_on_to_use_advanced_operating_options_and"))
             }
         }
         .themedSettingsForm(tokens: tokens)
@@ -199,13 +199,13 @@ struct SettingsView: View {
 
     private var connectionSpeedTestSummary: String {
         if case .testing = appStore.connectionStatus {
-            return "测试中…"
+            return L10n.text("ui.testing")
         }
         if appStore.lastConnectionTestReport?.failedStage != nil {
-            return "测试失败"
+            return L10n.text("ui.test_failed")
         }
         guard let milliseconds = appStore.lastConnectionTestDurationMillis else {
-            return "未测试"
+            return L10n.text("ui.not_tested")
         }
         return AppStore.connectionTestDurationText(milliseconds: milliseconds)
     }
@@ -233,7 +233,7 @@ private struct ConnectionManagementView: View {
         .frame(maxWidth: 720)
         .frame(maxWidth: .infinity)
         .background(themeStore.tokens(for: colorScheme).background.ignoresSafeArea())
-        .navigationTitle("Mac 连接")
+        .navigationTitle(L10n.text("ui.mac_connection"))
     }
 }
 
@@ -294,7 +294,7 @@ private struct ConnectionSpeedTestView: View {
                         } else {
                             Image(systemName: "bolt.horizontal.circle")
                         }
-                        Text(isTesting ? "正在测速…" : appStore.lastConnectionTestReport == nil ? "开始测速" : "重新测速")
+                        Text(isTesting ? L10n.text("ui.testing_speed") : appStore.lastConnectionTestReport == nil ? L10n.text("ui.start_speed_test") : L10n.text("ui.retest_speed"))
                     }
                     .font(themeStore.uiFont(.body, weight: .semibold))
                     .frame(maxWidth: .infinity)
@@ -303,53 +303,53 @@ private struct ConnectionSpeedTestView: View {
                 .disabled(!canRunTest)
                 .accessibilityIdentifier("settings.connectionSpeedTest.run")
             } header: {
-                Text("当前连接")
+                Text(L10n.text("ui.current_connection"))
             } footer: {
-                Text(canRunTest || isTesting ? "依次检查 iPhone / iPad 到 Mac 助手、鉴权、Gateway 配置和 app-server 握手。" : "当前没有可用的连接凭据，请先返回 Mac 连接完成配对。")
+                Text(canRunTest || isTesting ? L10n.text("ui.check_iphone_ipad_to_mac_assistant_authentication_gateway") : L10n.text("ui.there_are_currently_no_connection_credentials_available_please"))
             }
 
             if let report = appStore.lastConnectionTestReport {
-                Section("测速结果") {
-                    LabeledContent("总耗时") {
+                Section(L10n.text("ui.speed_test_results")) {
+                    LabeledContent(L10n.text("ui.total_time_spent")) {
                         Text(AppStore.connectionTestDurationText(milliseconds: report.totalMillis))
                             .monospacedDigit()
                             .foregroundStyle(resultTone(tokens: tokens))
                     }
-                    LabeledContent("测试时间", value: report.startedAt.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent(L10n.text("ui.test_time"), value: report.startedAt.formatted(date: .abbreviated, time: .shortened))
                     if let failedStage = report.failedStage {
-                        LabeledContent("失败环节", value: failedStage.kind.title)
+                        LabeledContent(L10n.text("ui.failure_link"), value: failedStage.kind.title)
                             .foregroundStyle(tokens.warning)
                     } else if let slowestStage = report.slowestStage {
-                        LabeledContent("最慢环节") {
+                        LabeledContent(L10n.text("ui.slowest_link")) {
                             Text("\(slowestStage.kind.title) · \(AppStore.connectionTestDurationText(milliseconds: slowestStage.durationMillis))")
                                 .monospacedDigit()
                         }
                     }
                 }
 
-                Section("分段耗时") {
+                Section(L10n.text("ui.segmentation_takes_time")) {
                     ForEach(report.stages) { stage in
                         ConnectionSpeedTestStageRow(stage: stage)
                     }
                 }
 
                 if let diagnostics = report.gatewayDiagnostics {
-                    Section("Gateway 观测") {
+                    Section(L10n.text("ui.gateway_observation")) {
                         if let connection = diagnostics.relatedConnection {
                             ConnectionSpeedMetricRow(
-                                title: "Mac 上游拨号",
+                                title: L10n.text("ui.mac_upstream_dialing"),
                                 value: AppStore.connectionTestDurationText(milliseconds: connection.upstreamDialMillis)
                             )
                         }
                         if let rpc = diagnostics.latestRPC {
                             ConnectionSpeedMetricRow(
-                                title: "最近 RPC",
+                                title: L10n.text("ui.recent_rpcs"),
                                 value: AppStore.connectionTestDurationText(milliseconds: rpc.latencyMillis)
                             )
                         }
                         if diagnostics.writeBackMillisMax > 0 {
                             ConnectionSpeedMetricRow(
-                                title: "写回设备",
+                                title: L10n.text("ui.write_back_to_device"),
                                 value: AppStore.connectionTestDurationText(milliseconds: diagnostics.writeBackMillisMax)
                             )
                         }
@@ -361,7 +361,7 @@ private struct ConnectionSpeedTestView: View {
         .frame(maxWidth: 720)
         .frame(maxWidth: .infinity)
         .background(tokens.background.ignoresSafeArea())
-        .navigationTitle("连接测速")
+        .navigationTitle(L10n.text("ui.connection_speed_test"))
         .tint(tokens.accent)
     }
 
@@ -381,15 +381,15 @@ private struct ConnectionSpeedTestView: View {
 
     private var resultTitle: String {
         if isTesting {
-            return "正在测试完整链路"
+            return L10n.text("ui.testing_full_link")
         }
         if appStore.lastConnectionTestReport?.failedStage != nil {
-            return "连接测试失败"
+            return L10n.text("ui.connection_test_failed")
         }
         if appStore.lastConnectionTestReport != nil {
-            return "连接链路正常"
+            return L10n.text("ui.the_connection_link_is_normal")
         }
-        return appStore.isConfigured ? "可以开始测速" : "尚未连接 Mac"
+        return appStore.isConfigured ? L10n.text("ui.you_can_start_speed_measurement") : L10n.text("ui.not_connected_to_mac_yet")
     }
 
     private var resultSystemImage: String {
@@ -447,7 +447,7 @@ private struct ConnectionSpeedTestStageRow: View {
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(stage.kind.title)，\(stage.status.isFailed ? "失败" : "成功")")
+        .accessibilityLabel(L10n.format("ui.connection_test_stage_accessibility", stage.kind.title, stage.status.isFailed ? L10n.text("ui.failed_status") : L10n.text("ui.success")))
         .accessibilityValue(AppStore.connectionTestDurationText(milliseconds: stage.durationMillis))
     }
 }
@@ -515,7 +515,7 @@ private struct RuntimeUsageSettingsCard: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(tokens.accent)
                 .disabled(isRefreshing)
-                .accessibilityLabel(isRefreshing ? "正在刷新 \(display.displayName) 用量" : "刷新 \(display.displayName) 用量")
+                .accessibilityLabel(isRefreshing ? L10n.format("ui.refreshing_value_usage", display.displayName) : L10n.format("ui.refresh_value_usage", display.displayName))
                 .accessibilityIdentifier("settings.\(runtimeProvider)Usage.refresh")
             }
 
@@ -566,9 +566,9 @@ private struct RuntimeUsageSettingsCard: View {
 
     private var emptyStateText: String {
         if runtimeProvider == "claude" {
-            return "Claude headless 暂未返回可展示的额度窗口"
+            return L10n.text("ui.claude_headless_has_not_yet_returned_to_the")
         }
-        return "刷新后显示 \(display.displayName) 返回的账号窗口"
+        return L10n.format("ui.after_refreshing_the_account_window_returned_by_value", display.displayName)
     }
 }
 
@@ -606,8 +606,8 @@ private struct CodexCompactUsageWindow: View {
                 .minimumScaleFactor(0.76)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(window.accessibilityName)剩余用量")
-        .accessibilityValue("\(window.remainingText)，\(window.resetText)")
+        .accessibilityLabel(L10n.format("ui.value_remaining_usage", window.accessibilityName))
+        .accessibilityValue(L10n.format("ui.usage_window_accessibility_value", window.remainingText, window.resetText))
     }
 
     private var usageTint: Color {
@@ -656,14 +656,14 @@ private struct DefaultPermissionView: View {
                     }
                 }
             } header: {
-                Text("新对话默认权限")
+                Text(L10n.text("ui.default_permissions_for_new_conversations"))
             } footer: {
-                Text("用于新输入区和切换会话后的默认运行权限。输入区里的权限按钮也会同步更新这个全局默认值。")
+                Text(L10n.text("ui.default_run_permissions_for_new_input_areas_and"))
             }
             .listRowBackground(tokens.elevatedSurface)
         }
         .themedSettingsForm(tokens: tokens)
-        .navigationTitle("默认权限")
+        .navigationTitle(L10n.text("ui.default_permissions"))
         .tint(tokens.accent)
     }
 

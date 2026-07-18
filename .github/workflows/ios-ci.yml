@@ -5,6 +5,8 @@ on:
     paths:
       - "ios/MimiRemote/**"
       - "scripts/test-conversation-regressions.sh"
+      - "scripts/test-ios-localization-smoke.sh"
+      - "scripts/check-ios-localization.sh"
       - "scripts/check-ios-network-security.sh"
       - "scripts/check-ios-privacy-manifest.sh"
       - "scripts/check-source-size.sh"
@@ -15,6 +17,8 @@ on:
     paths:
       - "ios/MimiRemote/**"
       - "scripts/test-conversation-regressions.sh"
+      - "scripts/test-ios-localization-smoke.sh"
+      - "scripts/check-ios-localization.sh"
       - "scripts/check-ios-network-security.sh"
       - "scripts/check-ios-privacy-manifest.sh"
       - "scripts/check-source-size.sh"
@@ -55,8 +59,17 @@ jobs:
       - name: Check privacy manifest
         run: bash ./scripts/check-ios-privacy-manifest.sh
 
+      - name: Check iOS localization
+        run: bash ./scripts/check-ios-localization.sh
+
       - name: Check source size
         run: bash ./scripts/check-source-size.sh
 
       - name: Run core regressions
         run: bash ./scripts/test-conversation-regressions.sh
+
+      # The core regression suite deliberately uses the established zh-Hans/CN
+      # baseline. Run the localization unit tests independently in English so a
+      # fresh GitHub runner cannot mask an English bundle lookup regression.
+      - name: Run English localization smoke
+        run: bash ./scripts/test-ios-localization-smoke.sh

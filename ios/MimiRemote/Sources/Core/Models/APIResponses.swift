@@ -803,30 +803,30 @@ struct WorktreeCleanupBlocker: Codable, Equatable, Hashable, Identifiable, RawRe
     var message: String {
         switch rawValue {
         case "metadata_incomplete":
-            return "管理元数据不完整"
+            return L10n.text("ui.management_metadata_is_incomplete")
         case "outside_managed_root":
-            return "不在 agentd 托管的 checkout 目录内"
+            return L10n.text("ui.not_within_the_checkout_directory_hosted_by_agentd")
         case "checkout_missing":
-            return "checkout 已不存在，请改用清理丢失登记"
+            return L10n.text("ui.checkout_no_longer_exists_please_use_clear_lost")
         case "repository_mismatch":
-            return "checkout 与登记的 Git 仓库不匹配"
+            return L10n.text("ui.checkout_does_not_match_the_registered_git_repository")
         case "recent":
-            return "最近 30 天内仍使用过"
+            return L10n.text("ui.still_used_in_the_last_30_days")
         case "keep_latest":
-            return "属于该项目最近保留的 Worktree"
+            return L10n.text("ui.belongs_to_the_most_recently_reserved_worktree_for")
         case "git_dirty":
-            return "包含未提交改动"
+            return L10n.text("ui.contains_uncommitted_changes")
         case "git_state_unknown":
-            return "无法确认 Git 状态为干净"
+            return L10n.text("ui.unable_to_confirm_git_status_is_clean")
         case "session_running":
-            return "仍有会话正在运行"
+            return L10n.text("ui.there_are_still_sessions_running")
         case "root_project_missing":
-            return "根项目已不在当前配置中"
+            return L10n.text("ui.the_root_project_is_no_longer_in_the")
         case "last_used_unpersisted":
-            return "最近使用时间尚未可靠保存"
+            return L10n.text("ui.recent_usage_time_has_not_been_reliably_saved")
         default:
             // 新版 agentd 增加 blocker 时保持 fail-closed，并把稳定 code 留给排障。
-            return "agentd 返回了新的保护原因"
+            return L10n.text("ui.agentd_returned_a_new_protection_reason")
         }
     }
 }
@@ -870,9 +870,14 @@ struct WorktreeCleanupResponse: Decodable, Equatable {
         guard hasPartialFailure else {
             return nil
         }
-        let target = failedPath.flatMap { $0.isEmpty ? nil : $0 } ?? "未知路径"
-        let detail = error.flatMap { $0.isEmpty ? nil : $0 } ?? "agentd 未返回详细原因"
-        return "已删除 \(deletedPaths.count) 个 Worktree，但在 \(target) 失败：\(detail)。请重新生成清理预览。"
+        let target = failedPath.flatMap { $0.isEmpty ? nil : $0 } ?? L10n.text("ui.unknown_path")
+        let detail = error.flatMap { $0.isEmpty ? nil : $0 } ?? L10n.text("ui.agentd_did_not_return_detailed_reasons")
+        return L10n.format(
+            "ui.worktree_cleanup_partial_failure",
+            L10n.plural("ui.worktrees_deleted_count", count: deletedPaths.count),
+            target,
+            detail
+        )
     }
 
     enum CodingKeys: String, CodingKey {

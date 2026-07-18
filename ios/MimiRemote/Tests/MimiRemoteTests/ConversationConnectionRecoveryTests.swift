@@ -122,7 +122,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(appStore.endpoint, endpoint)
         XCTAssertEqual(appStore.token, token)
         XCTAssertTrue(appStore.isConfigured)
-        XCTAssertTrue(appStore.lastError?.contains("连接凭据已安全保存") == true)
+        XCTAssertEqual(appStore.lastError, L10n.text("ui.the_connection_credentials_have_been_saved_safely_but"))
         XCTAssertEqual(store.errorMessage, appStore.lastError)
 
         // 重建 AppStore 验证凭据仍在持久化档案和 Keychain 中，而不是只留在当前内存。
@@ -261,7 +261,7 @@ extension ConversationDataFlowTests {
 
         XCTAssertEqual(store.networkReachabilityStatus, .satisfied)
         XCTAssertFalse(store.isNetworkUnavailable)
-        XCTAssertNotEqual(store.statusMessage, "网络不可用，恢复后自动重连")
+        XCTAssertNotEqual(store.statusMessage, L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
     }
 
     func testUnknownToSatisfiedRecoversExistingNetworkErrorExactlyOnce() async throws {
@@ -378,7 +378,7 @@ extension ConversationDataFlowTests {
         XCTAssertEqual(conversationStore.messages(for: running.id), messagesBeforeOffline)
         XCTAssertNil(conversationStore.messages(for: running.id).first { $0.content == "网络恢复后仍等待当前 Turn 完成" })
         XCTAssertEqual(store.selectedQueuedTurns.map(\.previewText), ["网络恢复后仍等待当前 Turn 完成"])
-        XCTAssertEqual(store.statusMessage, "网络不可用，恢复后自动重连")
+        XCTAssertEqual(store.statusMessage, L10n.text("ui.the_network_is_unavailable_and_will_automatically_reconnect_682354fa"))
     }
 
     func testNetworkRecoveryReconnectsExactlyOnce() async throws {
@@ -711,7 +711,7 @@ extension ConversationDataFlowTests {
 
         XCTAssertEqual(store.filteredSessions.map(\.id), [existing.id])
         XCTAssertNil(store.errorMessage)
-        XCTAssertEqual(store.statusMessage, "会话列表刷新过快，已保留现有会话，稍后自动重试。")
+        XCTAssertEqual(store.statusMessage, L10n.plural("ui.session_list_retry_seconds_count", count: 10))
         XCTAssertFalse(store.statusMessage?.contains("itemsView") == true)
 
         // 冷却窗口内继续刷新必须复用旧页，不能再撞 gateway。

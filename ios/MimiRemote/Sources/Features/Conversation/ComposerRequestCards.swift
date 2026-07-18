@@ -10,33 +10,33 @@ struct PendingApprovalActionCard: View {
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                LabeledContent("类型", value: approval.kind)
-                LabeledContent("请求", value: approval.title)
+                LabeledContent(L10n.text("ui.type"), value: approval.kind)
+                LabeledContent(L10n.text("ui.request"), value: approval.title)
                 if let risk = approval.risk {
-                    LabeledContent("风险", value: risk)
+                    LabeledContent(L10n.text("ui.risk"), value: risk)
                 }
                 if let count = approval.count {
-                    LabeledContent("影响项", value: "\(count) 项")
+                    LabeledContent(L10n.text("ui.impact_items"), value: L10n.plural("ui.items_count", count: count))
                 }
-                DisclosureGroup("审批详情") {
+                DisclosureGroup(L10n.text("ui.approval_details")) {
                     if let body = approval.body {
                         Text(body)
                             .font(.system(.footnote, design: .monospaced))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        Text("审批详情不可用")
+                        Text(L10n.text("ui.approval_details_not_available"))
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 if isSendingDecision {
-                    Label("决定已发送", systemImage: "hourglass")
+                    Label(L10n.text("ui.decision_sent"), systemImage: "hourglass")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 if !approval.hasDecisionContext {
-                    Label("Claude bridge 未提供可核对的命令、路径或工具输入；为避免误批准，只能拒绝。请升级 bridge 后重试。", systemImage: "exclamationmark.triangle")
+                    Label(L10n.text("ui.claude_bridge_provides_no_verifiable_command_path_or"), systemImage: "exclamationmark.triangle")
                         .font(.footnote)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -45,7 +45,7 @@ struct PendingApprovalActionCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
-            Label("等待审批", systemImage: "exclamationmark.shield")
+            Label(L10n.text("ui.waiting_for_approval"), systemImage: "exclamationmark.shield")
                 .foregroundStyle(.orange)
         }
         // 审批卡位于输入框上方，用户无需跳转到 Inspector 才能作出决定。
@@ -62,21 +62,21 @@ struct PendingApprovalActionCard: View {
             Button(role: .destructive) {
                 onDecision("decline")
             } label: {
-                Label("拒绝", systemImage: "xmark.circle")
+                Label(L10n.text("ui.reject"), systemImage: "xmark.circle")
             }
             .disabled(isSendingDecision)
-            .accessibilityLabel("拒绝审批")
-            .accessibilityHint("拒绝始终可用")
+            .accessibilityLabel(L10n.text("ui.deny_approval"))
+            .accessibilityHint(L10n.text("ui.deny_is_always_available"))
 
             Button {
                 onDecision("accept")
             } label: {
-                Label("批准一次", systemImage: "checkmark.circle.fill")
+                Label(L10n.text("ui.approve_once"), systemImage: "checkmark.circle.fill")
             }
             .disabled(isSendingDecision || !approval.hasDecisionContext)
-            .accessibilityLabel("批准审批")
-            .accessibilityValue(approval.hasDecisionContext ? "可用" : "审批详情不可用")
-            .accessibilityHint(approval.hasDecisionContext ? "批准这项请求" : "缺少审批详情，无法批准")
+            .accessibilityLabel(L10n.text("ui.approval_36f0d72e"))
+            .accessibilityValue(approval.hasDecisionContext ? L10n.text("ui.available") : L10n.text("ui.approval_details_not_available"))
+            .accessibilityHint(approval.hasDecisionContext ? L10n.text("ui.approve_this_request") : L10n.text("ui.approval_details_are_missing_and_cannot_be_approved"))
 
             if approval.canPersistPermission, let rules = approval.persistentPermissionRules {
                 Button {
@@ -86,10 +86,10 @@ struct PendingApprovalActionCard: View {
                         rules: rules
                     )
                 } label: {
-                    Label("始终允许", systemImage: "checkmark.shield")
+                    Label(L10n.text("ui.always_allowed"), systemImage: "checkmark.shield")
                 }
                 .disabled(isSendingDecision || !approval.hasDecisionContext)
-                .accessibilityHint("确认后把 Claude 建议的精确规则写入当前项目本地设置")
+                .accessibilityHint(L10n.text("ui.after_confirmation_write_the_precise_rules_suggested_by"))
             }
         }
         .controlGroupStyle(.navigation)
@@ -112,10 +112,10 @@ struct PersistentPermissionConfirmationSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("当前请求") {
+                Section(L10n.text("ui.current_request")) {
                     Text(grant.approvalTitle)
                 }
-                Section("将始终允许") {
+                Section(L10n.text("ui.will_always_be_allowed")) {
                     ForEach(grant.rules, id: \.self) { rule in
                         Text(rule)
                             .font(.system(.body, design: .monospaced))
@@ -123,18 +123,18 @@ struct PersistentPermissionConfirmationSheet: View {
                     }
                 }
                 Section {
-                    Text("Claude 会把以上精确规则追加到当前项目的 .claude/settings.local.json。不会授予全局权限，也不会扩大规则范围。")
+                    Text(L10n.text("ui.claude_will_append_the_above_precise_rules_to"))
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("确认始终允许")
+            .navigationTitle(L10n.text("ui.confirm_always_allow"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("确认允许") {
+                    Button(L10n.text("ui.confirm_permission")) {
                         onConfirm()
                         dismiss()
                     }
@@ -166,7 +166,7 @@ struct PendingUserInputActionCard: View {
             }
 
             HStack(spacing: 10) {
-                Button("跳过") {
+                Button(L10n.text("ui.skip")) {
                     onSubmit([:])
                 }
                 .buttonStyle(.bordered)
@@ -177,11 +177,11 @@ struct PendingUserInputActionCard: View {
                     onSubmit(answerPayload)
                 } label: {
                     if isSubmitting {
-                        Label("提交中", systemImage: "hourglass")
+                        Label(L10n.text("ui.submitting"), systemImage: "hourglass")
                             .font(.body.weight(.semibold))
                             .frame(maxWidth: .infinity, minHeight: 30)
                     } else {
-                        Label("提交补充信息", systemImage: "arrow.up.circle.fill")
+                        Label(L10n.text("ui.submit_additional_information"), systemImage: "arrow.up.circle.fill")
                             .font(.body.weight(.semibold))
                             .frame(maxWidth: .infinity, minHeight: 30)
                     }
@@ -210,7 +210,7 @@ struct PendingUserInputActionCard: View {
                 .foregroundStyle(tokens.accent)
                 .frame(width: 22, height: 22)
             VStack(alignment: .leading, spacing: 4) {
-                Text("补充信息")
+                Text(L10n.text("ui.supplementary_information"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(tokens.accent)
                 Text(request.title)
@@ -219,7 +219,7 @@ struct PendingUserInputActionCard: View {
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
                 if isSubmitting {
-                    Label("答案已发送", systemImage: "hourglass")
+                    Label(L10n.text("ui.answer_sent"), systemImage: "hourglass")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -243,7 +243,7 @@ struct PendingUserInputActionCard: View {
             }
             if !question.options.isEmpty {
                 if question.allowsMultipleSelection {
-                    Text("可多选")
+                    Text(L10n.text("ui.multiple_selections_possible"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -295,11 +295,11 @@ struct PendingUserInputActionCard: View {
     @ViewBuilder
     private func answerField(for question: AgentUserInputQuestion) -> some View {
         if question.isSecret {
-            SecureField("Other", text: binding(for: question.id))
+            SecureField(L10n.text("ui.other"), text: binding(for: question.id))
                 .textFieldStyle(.roundedBorder)
                 .disabled(isSubmitting)
         } else {
-            TextField("Other", text: binding(for: question.id), axis: .vertical)
+            TextField(L10n.text("ui.other"), text: binding(for: question.id), axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...3)
                 .disabled(isSubmitting)

@@ -20,9 +20,9 @@ private enum CompactWorkbenchTab: Hashable {
 
     var title: String {
         switch self {
-        case .sessions: return "会话"
-        case .workspaces: return "工作区"
-        case .settings: return "设置"
+        case .sessions: return L10n.text("ui.session")
+        case .workspaces: return L10n.text("ui.workspace")
+        case .settings: return L10n.text("ui.settings")
         }
     }
 
@@ -202,17 +202,17 @@ struct UnifiedWorkbenchShell: View {
                 .foregroundStyle(tokens.warning)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("访问码已失效")
+                Text(L10n.text("ui.access_code_has_expired"))
                     .font(themeStore.uiFont(.subheadline, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
-                Text("已停止自动重试；现有会话仍保留，请重新扫描 Mac 上的配对二维码。")
+                Text(L10n.text("ui.automatic_retries_stopped_existing_sessions_remain_please_rescan"))
                     .font(themeStore.uiFont(.caption))
                     .foregroundStyle(tokens.secondaryText)
             }
 
             Spacer(minLength: 8)
 
-            Button("重新配对") {
+            Button(L10n.text("ui.re_pair")) {
                 presentedSheet = .settings
             }
             .buttonStyle(.borderedProminent)
@@ -236,10 +236,10 @@ struct UnifiedWorkbenchShell: View {
                 .foregroundStyle(tokens.warning)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("网络不可用")
+                Text(L10n.text("ui.network_is_unavailable"))
                     .font(themeStore.uiFont(.subheadline, weight: .semibold))
                     .foregroundStyle(tokens.primaryText)
-                Text("已暂停同步和重连；网络恢复后会自动重新连接，现有会话和排队消息不会清空。")
+                Text(L10n.text("ui.synchronization_and_reconnection_have_been_paused_it_will"))
                     .font(themeStore.uiFont(.caption))
                     .foregroundStyle(tokens.secondaryText)
             }
@@ -267,14 +267,14 @@ struct UnifiedWorkbenchShell: View {
                 Section {
                     sidebarDestinationRow(
                         destination: .sessions,
-                        title: "会话",
+                        title: L10n.text("ui.session"),
                         systemImage: "bubble.left.and.bubble.right",
                         tokens: tokens,
                         layout: layout
                     )
                     sidebarDestinationRow(
                         destination: .workspaces,
-                        title: "工作区",
+                        title: L10n.text("ui.workspace"),
                         systemImage: "folder",
                         tokens: tokens,
                         layout: layout
@@ -282,16 +282,16 @@ struct UnifiedWorkbenchShell: View {
                 }
 
                 if !sessionStore.activeSessions.isEmpty {
-                    Section("进行中") {
+                    Section(L10n.text("ui.in_progress")) {
                         ForEach(sessionStore.activeSessions) { session in
                             sidebarSessionLink(session)
                         }
                     }
                 }
 
-                Section(sessionStore.activeSessions.isEmpty ? "最近" : "最近历史") {
+                Section(sessionStore.activeSessions.isEmpty ? L10n.text("ui.recently") : L10n.text("ui.recent_history")) {
                     if sessionStore.recentHistorySessions.isEmpty {
-                        Text(sessionStore.activeSessions.isEmpty ? "还没有最近会话" : "还没有历史会话")
+                        Text(sessionStore.activeSessions.isEmpty ? L10n.text("ui.no_recent_conversations_yet") : L10n.text("ui.no_history_sessions_yet"))
                             .font(themeStore.uiFont(.caption))
                             .foregroundStyle(tokens.tertiaryText)
                             .listRowBackground(Color.clear)
@@ -347,7 +347,7 @@ struct UnifiedWorkbenchShell: View {
                             .accessibilityHidden(true)
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Mimi Remote，\(connectionSubtitle)")
+                    .accessibilityLabel(L10n.format("ui.mimi_remote_connection_accessibility", connectionSubtitle))
                 }
             }
         }
@@ -481,12 +481,12 @@ struct UnifiedWorkbenchShell: View {
         WorkspaceView {
             open(.workspaces, layout: layout)
         }
-        .navigationTitle(sessionStore.selectedSession?.title ?? "会话")
+        .navigationTitle(sessionStore.selectedSession?.title ?? L10n.text("ui.session"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 2) {
-                    Text(sessionStore.selectedSession?.title ?? "会话")
+                    Text(sessionStore.selectedSession?.title ?? L10n.text("ui.session"))
                         .font(themeStore.uiFont(.subheadline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
                         .lineLimit(1)
@@ -508,7 +508,7 @@ struct UnifiedWorkbenchShell: View {
             ToolbarItem(placement: .topBarTrailing) {
                 workbenchToolbarIconButton(
                     systemImage: "arrow.clockwise",
-                    accessibilityLabel: "刷新当前会话",
+                    accessibilityLabel: L10n.text("ui.refresh_current_session"),
                     tokens: tokens,
                     isDisabled: sessionStore.isRefreshingSelectedSession || sessionStore.isLoading
                 ) {
@@ -518,7 +518,7 @@ struct UnifiedWorkbenchShell: View {
             ToolbarItem(placement: .topBarTrailing) {
                 workbenchToolbarIconButton(
                     systemImage: "sidebar.right",
-                    accessibilityLabel: showingInspector ? "隐藏详情" : "显示详情",
+                    accessibilityLabel: showingInspector ? L10n.text("ui.hide_details") : L10n.text("ui.show_details"),
                     tokens: tokens,
                     isActive: showingInspector
                 ) {
@@ -669,7 +669,7 @@ struct UnifiedWorkbenchShell: View {
 
     private var sessionTitleSubtitle: String {
         guard let session = sessionStore.selectedSession else {
-            return "会话"
+            return L10n.text("ui.session")
         }
         let project = session.project.trimmingCharacters(in: .whitespacesAndNewlines)
         return project.isEmpty ? session.displayStatus(foregroundActivity: sessionStore.selectedForegroundActivity).title : project
@@ -695,12 +695,12 @@ struct UnifiedWorkbenchShell: View {
 
     private var connectionSubtitle: String {
         if appStore.requiresRePairing {
-            return "需要重新配对"
+            return L10n.text("ui.need_to_re_pair")
         }
         if sessionStore.isNetworkUnavailable {
-            return "网络不可用，等待自动重连"
+            return L10n.text("ui.the_network_is_unavailable_waiting_for_automatic_reconnection")
         }
-        return sessionStore.webSocketStatus == .connected ? "Mac 已连接" : "远程开发工作台"
+        return sessionStore.webSocketStatus == .connected ? L10n.text("ui.mac_is_connected") : L10n.text("ui.remote_development_workbench")
     }
 
     private func connectionTone(tokens: ThemeTokens) -> Color {
@@ -763,7 +763,7 @@ struct WorkbenchSidebarDestinationButton: View {
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
         .accessibilityLabel(title)
-        .accessibilityValue(isSelected ? "已选择" : "未选择")
+        .accessibilityValue(isSelected ? L10n.text("ui.selected") : L10n.text("ui.not_selected"))
     }
 }
 
@@ -795,7 +795,7 @@ struct WorkbenchSidebarFooter: View {
 
         HStack {
             Button(action: onOpenSettings) {
-                Label("设置", systemImage: "gearshape")
+                Label(L10n.text("ui.settings"), systemImage: "gearshape")
                     .font(themeStore.uiFont(.subheadline, weight: .medium))
                     .padding(.horizontal, 12)
                     .frame(height: 36)
@@ -807,7 +807,7 @@ struct WorkbenchSidebarFooter: View {
                 Capsule()
                     .stroke(tokens.border.opacity(0.6), lineWidth: 1)
             }
-            .accessibilityLabel("打开设置")
+            .accessibilityLabel(L10n.text("ui.open_settings"))
             .accessibilityIdentifier("sidebar.settings")
 
             Spacer(minLength: 0)
@@ -825,7 +825,7 @@ struct WorkbenchSidebarFooter: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(tokens.primaryActionForeground)
-            .accessibilityLabel("新建会话")
+            .accessibilityLabel(L10n.text("ui.new_session_3da224c4"))
             .accessibilityIdentifier("sidebar.newSession")
         }
         .offset(y: safeAreaVisualOffset)
@@ -865,7 +865,7 @@ private struct CodexUsageRingsControl: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Codex 剩余用量")
+        .accessibilityLabel(L10n.text("ui.codex_remaining_usage"))
         .accessibilityValue(accessibilityValue)
         .accessibilityIdentifier("sidebar.codexUsageRings")
         .popover(isPresented: $showsDetails, arrowEdge: .top) {
@@ -884,7 +884,7 @@ private struct CodexUsageRingsControl: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Codex 剩余用量")
+                    Text(L10n.text("ui.codex_remaining_usage"))
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
                     Text(display.windowSummaryText)
@@ -917,12 +917,12 @@ private struct CodexUsageRingsControl: View {
                         .stroke(tokens.border.opacity(0.72), lineWidth: 1)
                 }
                 .disabled(isRefreshing)
-                .accessibilityLabel("刷新 Codex 用量")
+                .accessibilityLabel(L10n.text("ui.refresh_codex_usage_c0f2c6f0"))
             }
 
             VStack(spacing: 14) {
                 if display.windows.isEmpty {
-                    Text("刷新后显示 Codex 当前返回的账号窗口")
+                    Text(L10n.text("ui.after_refreshing_the_account_window_currently_returned_by"))
                         .font(themeStore.uiFont(.caption))
                         .foregroundStyle(tokens.secondaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -985,8 +985,8 @@ private struct CodexUsageRingsControl: View {
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(window.accessibilityName)剩余用量")
-        .accessibilityValue("\(window.remainingText)，\(window.resetText)")
+        .accessibilityLabel(L10n.format("ui.value_remaining_usage", window.accessibilityName))
+        .accessibilityValue(L10n.format("ui.usage_window_accessibility_value", window.remainingText, window.resetText))
     }
 
     private func refreshUsage() async {
@@ -1005,11 +1005,11 @@ private struct CodexUsageRingsControl: View {
 
     private var accessibilityValue: String {
         guard !display.windows.isEmpty else {
-            return "尚未取得账号用量"
+            return L10n.text("ui.account_usage_has_not_been_obtained_yet")
         }
         return display.windows
             .map { "\($0.accessibilityName)\($0.remainingText)" }
-            .joined(separator: "，")
+            .joined(separator: L10n.text("ui.list_separator"))
     }
 }
 
@@ -1097,7 +1097,7 @@ struct CodexUsageRingMetrics {
 }
 
 #if DEBUG
-#Preview("Codex 用量双环自适应") {
+#Preview(L10n.text("ui.codex_usage_dual_loop_adaptive")) {
     let loaded = CodexUsageWindowsDisplay.make(
         rateLimit: RateLimitSummary(primaryUsedPercent: 62, secondaryUsedPercent: 38)
     )
@@ -1139,11 +1139,11 @@ private struct NewSessionSheet: View {
             Group {
                 if sessionStore.sidebarProjects.isEmpty {
                     ContentUnavailableView {
-                        Label("还没有工作区", systemImage: "folder.badge.plus")
+                        Label(L10n.text("ui.no_workspace_yet"), systemImage: "folder.badge.plus")
                     } description: {
-                        Text("先打开一个 Mac 上的项目目录，再创建会话。")
+                        Text(L10n.text("ui.first_open_a_project_directory_on_your_mac"))
                     } actions: {
-                        Button("去工作区") {
+                        Button(L10n.text("ui.go_to_work_area")) {
                             dismiss()
                             onOpenWorkspaces()
                         }
@@ -1176,11 +1176,11 @@ private struct NewSessionSheet: View {
                     .background(tokens.background)
                 }
             }
-            .navigationTitle("新会话")
+            .navigationTitle(L10n.text("ui.new_session"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(L10n.text("ui.cancel")) { dismiss() }
                         .disabled(isCreating)
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("newSession.cancel")
@@ -1193,10 +1193,10 @@ private struct NewSessionSheet: View {
                             if isCreating {
                                 HStack(spacing: 6) {
                                     ProgressView().controlSize(.small)
-                                    Text("创建中")
+                                    Text(L10n.text("ui.creating"))
                                 }
                             } else {
-                                Text("创建")
+                                Text(L10n.text("ui.create"))
                             }
                         }
                         .frame(minWidth: 48)
@@ -1233,8 +1233,8 @@ private struct NewSessionSheet: View {
     private func workspaceSection(tokens: ThemeTokens) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionHeader(
-                title: "工作区",
-                subtitle: "会话会在所选目录中运行",
+                title: L10n.text("ui.workspace"),
+                subtitle: L10n.text("ui.the_session_will_run_in_the_selected_directory"),
                 tokens: tokens
             )
 
@@ -1258,8 +1258,8 @@ private struct NewSessionSheet: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isCreating)
-                .accessibilityLabel("选择工作区")
-                .accessibilityValue("\(project.name)，\(compactWorkspacePath(project.path))")
+                .accessibilityLabel(L10n.text("ui.select_workspace"))
+                .accessibilityValue(L10n.format("ui.workspace_selection_accessibility", project.name, compactWorkspacePath(project.path)))
                 .accessibilityIdentifier("newSession.workspace")
             }
         }
@@ -1272,13 +1272,13 @@ private struct NewSessionSheet: View {
 
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader(
-                title: "运行时",
-                subtitle: "选择负责执行任务的 Agent",
+                title: L10n.text("ui.runtime"),
+                subtitle: L10n.text("ui.select_the_agent_responsible_for_performing_the_task"),
                 tokens: tokens
             )
 
             if choices.count > 1 {
-                Picker("运行时", selection: $lastRuntimeID) {
+                Picker(L10n.text("ui.runtime"), selection: $lastRuntimeID) {
                     ForEach(choices) { choice in
                         Text(runtimeTitle(for: choice))
                             .tag(choice.rawValue)
@@ -1299,7 +1299,7 @@ private struct NewSessionSheet: View {
                         Text("Codex")
                             .font(themeStore.uiFont(.body, weight: .semibold))
                             .foregroundStyle(tokens.primaryText)
-                        Text("当前唯一可用运行时")
+                        Text(L10n.text("ui.the_only_runtime_currently_available"))
                             .font(themeStore.uiFont(.caption))
                             .foregroundStyle(tokens.tertiaryText)
                     }
@@ -1321,7 +1321,7 @@ private struct NewSessionSheet: View {
                 .accessibilityIdentifier("newSession.runtime")
             }
 
-            Text("创建后运行时不能切换")
+            Text(L10n.text("ui.cannot_be_switched_during_runtime_after_creation"))
                 .font(themeStore.uiFont(.caption))
                 .foregroundStyle(tokens.tertiaryText)
         }
@@ -1442,7 +1442,7 @@ private struct NewSessionSheet: View {
         lastWorkspaceID = project.id
         await sessionStore.startNewSession(in: project, runtimeProvider: choice.runtimeProvider)
         guard let sessionID = sessionStore.selectedSessionID else {
-            creationErrorMessage = sessionStore.errorMessage ?? "创建失败，请稍后重试。"
+            creationErrorMessage = sessionStore.errorMessage ?? L10n.text("ui.creation_failed_please_try_again_later")
             return
         }
         leaveSheetForCreatedSession(sessionID)

@@ -14,7 +14,7 @@ struct LogTailView: View {
     @EnvironmentObject private var themeStore: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var exportDocument: SessionLogExportDocument?
-    @State private var exportFilename = "MimiRemote-日志.log"
+    @State private var exportFilename = L10n.text("ui.mimiremote_log_log")
     @State private var isPresentingExporter = false
     @State private var exportStatusMessage: String?
     @State private var exportErrorMessage: String?
@@ -30,7 +30,7 @@ struct LogTailView: View {
                     .frame(width: 24, height: 24)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("日志")
+                    Text(L10n.text("ui.log"))
                         .font(themeStore.uiFont(.subheadline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
                     Text(sessionSubtitle)
@@ -44,18 +44,18 @@ struct LogTailView: View {
                 Spacer()
 
                 Button(action: prepareLogExport) {
-                    Label("导出日志", systemImage: "square.and.arrow.up")
+                    Label(L10n.text("ui.export_log"), systemImage: "square.and.arrow.up")
                         .labelStyle(.titleAndIcon)
                 }
                 .buttonStyle(.borderless)
                 .disabled(!canExportLog)
-                .accessibilityLabel("导出当前会话日志")
+                .accessibilityLabel(L10n.text("ui.export_current_session_log"))
                 .accessibilityHint(exportAccessibilityHint)
 
-                Toggle("自动滚动", isOn: $logStore.autoScroll)
+                Toggle(L10n.text("ui.autoscroll"), isOn: $logStore.autoScroll)
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .accessibilityLabel("自动滚动")
+                    .accessibilityLabel(L10n.text("ui.autoscroll"))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -86,20 +86,20 @@ struct LogTailView: View {
         ) { result in
             switch result {
             case .success:
-                exportStatusMessage = "日志已导出（仅包含当前缓存窗口）"
+                exportStatusMessage = L10n.text("ui.log_exported_contains_only_current_cache_window")
             case .failure(let error):
-                exportErrorMessage = "日志导出失败：\(error.localizedDescription)"
+                exportErrorMessage = L10n.format("ui.log_export_failed_value", error.localizedDescription)
             }
         }
-        .alert("无法导出日志", isPresented: exportErrorBinding) {
-            Button("知道了", role: .cancel) {}
+        .alert(L10n.text("ui.unable_to_export_logs"), isPresented: exportErrorBinding) {
+            Button(L10n.text("ui.got_it"), role: .cancel) {}
         } message: {
-            Text(exportErrorMessage ?? "请稍后重试。")
+            Text(exportErrorMessage ?? L10n.text("ui.please_try_again_later"))
         }
     }
 
     private var sessionSubtitle: String {
-        return sessionStore.selectedSessionID ?? "未选择会话"
+        return sessionStore.selectedSessionID ?? L10n.text("ui.no_session_selected")
     }
 
     private var canExportLog: Bool {
@@ -111,12 +111,12 @@ struct LogTailView: View {
 
     private var exportAccessibilityHint: String {
         if sessionStore.selectedSession == nil {
-            return "请先选择会话"
+            return L10n.text("ui.please_select_a_session_first")
         }
         if !canExportLog {
-            return "当前会话没有可导出的缓存日志"
+            return L10n.text("ui.there_are_no_exportable_cache_logs_for_the")
         }
-        return "导出当前内存缓存窗口中的 UTF-8 日志"
+        return L10n.text("ui.export_utf_8_logs_in_the_current_memory")
     }
 
     private var exportErrorBinding: Binding<Bool> {
@@ -137,7 +137,7 @@ struct LogTailView: View {
                   cachedLog: logStore.cachedLogForExport(for: session.id),
                   generatedAt: Date(),
                   appVersion: SessionLogExportBuilder.currentAppVersion(),
-                  macDisplayName: appStore.activeConnectionProfile?.displayName ?? "当前 Mac"
+                  macDisplayName: appStore.activeConnectionProfile?.displayName ?? L10n.text("ui.current_mac")
               ) else {
             return
         }
@@ -171,11 +171,11 @@ enum SessionLogExportBuilder {
 
         // 文件头严格使用白名单字段：不接收 AppStore、endpoint 或 Token，避免误把凭据写入诊断文件。
         let header = [
-            "生成时间：\(ISO8601DateFormatter().string(from: generatedAt))",
-            "App 版本：\(singleLine(appVersion, fallback: "未知"))",
-            "会话 ID：\(singleLine(session.id, fallback: "未知"))",
-            "会话标题：\(singleLine(session.title, fallback: "未命名会话"))",
-            "当前 Mac：\(singleLine(macDisplayName, fallback: "当前 Mac"))"
+            L10n.format("ui.generation_time_value", ISO8601DateFormatter().string(from: generatedAt)),
+            L10n.format("ui.app_version_value", singleLine(appVersion, fallback: L10n.text("ui.unknown"))),
+            L10n.format("ui.session_id_value", singleLine(session.id, fallback: L10n.text("ui.unknown"))),
+            L10n.format("ui.session_title_value", singleLine(session.title, fallback: L10n.text("ui.unnamed_session"))),
+            L10n.format("ui.current_mac_named", singleLine(macDisplayName, fallback: L10n.text("ui.current_mac")))
         ].joined(separator: "\n")
         return SessionLogExportPayload(
             content: header + "\n\n" + cachedLog,
@@ -194,7 +194,7 @@ enum SessionLogExportBuilder {
         case let (_, build?) where !build.isEmpty:
             return build
         default:
-            return "未知"
+            return L10n.text("ui.unknown")
         }
     }
 
@@ -309,9 +309,9 @@ struct LogTailContentView: View {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     if lines.isEmpty {
                         ContentUnavailableView(
-                            "暂无日志",
+                            L10n.text("ui.no_logs_yet"),
                             systemImage: "terminal",
-                            description: Text("当前会话还没有终端输出。")
+                            description: Text(L10n.text("ui.there_is_no_terminal_output_for_the_current"))
                         )
                         .font(themeStore.uiFont(.caption))
                         .padding(.top, 48)
@@ -482,7 +482,7 @@ struct LogPanelFormatter {
         if line == "Working" || line == "thinking" || line == "esc to interrupt" {
             return true
         }
-        // 流式日志重绘会留下 W/Wo/Wor 这类半截状态，日志面板里直接过滤。
+        // Streaming redraws can leave partial W/Wo/Wor status tokens in the log.
         if "Working".hasPrefix(line), line.count <= 6 {
             return true
         }

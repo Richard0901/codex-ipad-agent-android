@@ -8,8 +8,10 @@ import UIKit
 import UniformTypeIdentifiers
 
 enum VoiceTranscriptionDefaults {
-    // iPad 端以中文口述为主，固定语言能降低短句和中英混合技术词的误判率。
-    static let languageCode = "zh"
+    // 语音识别跟随系统首选语言，避免英文系统仍以中文模型转写。
+    static var languageCode: String {
+        Locale.autoupdatingCurrent.language.languageCode?.identifier ?? "en"
+    }
 }
 
 struct ComposerView: View {
@@ -472,15 +474,15 @@ struct ComposerView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "tray.full")
                         .foregroundStyle(tokens.accent)
-                    Text("待发送 \(turns.count) 条")
+                    Text(L10n.plural("ui.items_to_send_count", count: turns.count))
                         .font(themeStore.uiFont(.caption, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
-                    Text("保存在此设备")
+                    Text(L10n.text("ui.save_on_this_device"))
                         .font(themeStore.uiFont(.caption2, weight: .medium))
                         .foregroundStyle(tokens.tertiaryText)
                     Spacer(minLength: 4)
                     if turns.count > 1 {
-                        Button("管理") {
+                        Button(L10n.text("ui.manage")) {
                             showsQueuedTurnManager = true
                         }
                         .buttonStyle(.borderless)
@@ -521,7 +523,7 @@ struct ComposerView: View {
                 .foregroundStyle(turn.displayTint(tokens: tokens))
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text(turn.previewText.isEmpty ? "（仅附件）" : turn.previewText)
+                Text(turn.previewText.isEmpty ? L10n.text("ui.accessories_only") : turn.previewText)
                     .font(themeStore.uiFont(.caption, weight: .medium))
                     .foregroundStyle(tokens.primaryText)
                     .lineLimit(1)
@@ -536,7 +538,7 @@ struct ComposerView: View {
                 Button {
                     editingQueuedTurn = QueuedTurnEditorDraft(turn: turn)
                 } label: {
-                    Label("编辑", systemImage: "pencil")
+                    Label(L10n.text("ui.edit"), systemImage: "pencil")
                 }
                 .disabled(turn.dispatchState == .dispatching)
 
@@ -544,7 +546,7 @@ struct ComposerView: View {
                     Button {
                         _ = sessionStore.guideQueuedTurnNow(clientMessageID: turn.id)
                     } label: {
-                        Label("立即引导当前回复", systemImage: "text.bubble")
+                        Label(L10n.text("ui.direct_current_reply_now"), systemImage: "text.bubble")
                     }
                     .disabled(!canUseGuidedFollowUp || turn.dispatchState != .waiting)
                 }
@@ -553,7 +555,7 @@ struct ComposerView: View {
                     Button {
                         _ = sessionStore.retryQueuedTurn(clientMessageID: turn.id)
                     } label: {
-                        Label("确认并重试", systemImage: "arrow.clockwise")
+                        Label(L10n.text("ui.confirm_and_try_again"), systemImage: "arrow.clockwise")
                     }
                 }
 
@@ -561,7 +563,7 @@ struct ComposerView: View {
                 Button(role: .destructive) {
                     _ = sessionStore.deleteQueuedTurn(clientMessageID: turn.id)
                 } label: {
-                    Label("删除", systemImage: "trash")
+                    Label(L10n.text("ui.delete"), systemImage: "trash")
                 }
                 .disabled(turn.dispatchState == .dispatching)
             } label: {
@@ -571,7 +573,7 @@ struct ComposerView: View {
                     .frame(width: 36, height: 36)
                     .contentShape(Rectangle())
             }
-            .accessibilityLabel("待发送消息操作")
+            .accessibilityLabel(L10n.text("ui.message_operation_to_be_sent"))
         }
         .padding(.leading, 2)
     }
@@ -701,17 +703,17 @@ struct ComposerView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(.secondary)
-                .accessibilityLabel("发送 Ctrl-C")
+                .accessibilityLabel(L10n.text("ui.send_ctrl_c"))
             }
 
             Button {
                 Task { await sessionStore.stopSelectedSession() }
             } label: {
-                Label("停止", systemImage: "xmark.circle")
+                Label(L10n.text("ui.stop"), systemImage: "xmark.circle")
             }
             .buttonStyle(.bordered)
             .tint(themeStore.tokens(for: colorScheme).primaryAction)
-            .accessibilityLabel("停止当前会话")
+            .accessibilityLabel(L10n.text("ui.stop_current_session"))
         }
         .controlSize(.small)
         .font(themeStore.uiFont(.caption, weight: .medium))
@@ -951,18 +953,18 @@ struct ComposerView: View {
 
     var composerPlaceholderText: String {
         if composerState.isGoalModeSelected {
-            return sessionStore.selectedThreadGoal == nil ? "描述目标任务" : "要求目标后续变更"
+            return sessionStore.selectedThreadGoal == nil ? L10n.text("ui.describe_the_target_task") : L10n.text("ui.request_subsequent_changes_to_goals")
         }
         if composerState.isPlanModeSelected {
-            return "描述要先规划的问题"
+            return L10n.text("ui.describe_the_issues_to_plan_for_first")
         }
         if canChooseRunningFollowUpDelivery {
-            return guidedFollowUpEnabled && canUseGuidedFollowUp ? "引导当前回复" : "追加下一轮指令"
+            return guidedFollowUpEnabled && canUseGuidedFollowUp ? L10n.text("ui.lead_current_reply") : L10n.text("ui.add_next_round_of_instructions")
         }
         if sessionStore.selectedThreadGoal != nil {
-            return "要求后续变更"
+            return L10n.text("ui.request_subsequent_changes")
         }
-        return "输入任务或后续指令"
+        return L10n.text("ui.enter_tasks_or_follow_up_instructions")
     }
 
     var composerCardBorderWidth: CGFloat {
@@ -1022,14 +1024,14 @@ struct ComposerView: View {
             }
         } label: {
             composerToolbarControlLabel(
-                title: "快捷",
+                title: L10n.text("ui.quick"),
                 systemImage: prefersExpandedShortcutBar ? "chevron.left" : "chevron.right",
                 isSelected: prefersExpandedShortcutBar,
-                accessibilityLabel: prefersExpandedShortcutBar ? "收起快捷按钮" : "展开快捷按钮"
+                accessibilityLabel: prefersExpandedShortcutBar ? L10n.text("ui.close_shortcut_button") : L10n.text("ui.expand_shortcut_button")
             )
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel(prefersExpandedShortcutBar ? "收起快捷按钮" : "展开快捷按钮")
+        .accessibilityLabel(prefersExpandedShortcutBar ? L10n.text("ui.close_shortcut_button") : L10n.text("ui.expand_shortcut_button"))
     }
 
     var composerOptionsMenu: some View {
@@ -1043,25 +1045,25 @@ struct ComposerView: View {
             Button {
                 setSendMode(composerState.isPlanModeSelected ? .standard : .plan)
             } label: {
-                Label(composerState.isPlanModeSelected ? "关闭计划模式" : "计划模式", systemImage: composerState.isPlanModeSelected ? "checkmark" : "list.clipboard")
+                Label(composerState.isPlanModeSelected ? L10n.text("ui.turn_off_planning_mode") : L10n.text("ui.planning_mode"), systemImage: composerState.isPlanModeSelected ? "checkmark" : "list.clipboard")
             }
 
             Button {
                 setSendMode(composerState.isGoalModeSelected ? .standard : .goal)
             } label: {
-                Label(composerState.isGoalModeSelected ? "关闭目标任务" : "目标任务", systemImage: composerState.isGoalModeSelected ? "checkmark" : "target")
+                Label(composerState.isGoalModeSelected ? L10n.text("ui.close_target_task") : L10n.text("ui.target_task"), systemImage: composerState.isGoalModeSelected ? "checkmark" : "target")
             }
         } label: {
             composerToolbarControlLabel(
-                title: usesCompactComposerMetrics ? nil : "选项",
+                title: usesCompactComposerMetrics ? nil : L10n.text("ui.options"),
                 systemImage: "slider.horizontal.3",
                 isSelected: composerState.isPlanModeSelected || composerState.isGoalModeSelected,
-                accessibilityLabel: "会话选项"
+                accessibilityLabel: L10n.text("ui.session_options")
             )
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel("会话选项")
-        .accessibilityHint("调整生成设置和发送模式")
+        .accessibilityLabel(L10n.text("ui.session_options"))
+        .accessibilityHint(L10n.text("ui.adjust_build_settings_and_sending_mode"))
     }
 
     var voiceMicControl: some View {
@@ -1086,22 +1088,22 @@ struct ComposerView: View {
         .buttonStyle(.plain)
         .frame(width: 0, height: 0)
         .opacity(0)
-        .accessibilityLabel(voiceInput.isRecording || isVoicePressActive || isVoiceTranscribing ? "结束语音输入" : "开始语音输入")
+        .accessibilityLabel(voiceInput.isRecording || isVoicePressActive || isVoiceTranscribing ? L10n.text("ui.end_voice_input") : L10n.text("ui.start_voice_input"))
         .accessibilityHidden(true)
     }
 
     var composerKeyboardShortcutButtons: some View {
         ZStack {
-            hiddenKeyboardShortcut("打开命令面板", key: "k", modifiers: [.command]) {
+            hiddenKeyboardShortcut(L10n.text("ui.open_command_palette"), key: "k", modifiers: [.command]) {
                 showsAddContentPanel = true
             }
-            hiddenKeyboardShortcut("打开引用面板", key: "k", modifiers: [.command, .shift]) {
+            hiddenKeyboardShortcut(L10n.text("ui.open_the_references_panel"), key: "k", modifiers: [.command, .shift]) {
                 showsAddContentPanel = true
             }
-            hiddenKeyboardShortcut("切换目标任务模式", key: "g", modifiers: [.command, .shift]) {
+            hiddenKeyboardShortcut(L10n.text("ui.switch_target_mission_mode"), key: "g", modifiers: [.command, .shift]) {
                 setSendMode(composerState.isGoalModeSelected ? .standard : .goal)
             }
-            hiddenKeyboardShortcut("切换计划模式", key: "p", modifiers: [.command, .shift]) {
+            hiddenKeyboardShortcut(L10n.text("ui.switch_planning_mode"), key: "p", modifiers: [.command, .shift]) {
                 setSendMode(composerState.isPlanModeSelected ? .standard : .plan)
             }
         }
@@ -1134,12 +1136,12 @@ struct ComposerView: View {
             composerToolbarControlLabel(
                 title: nil,
                 systemImage: "plus",
-                accessibilityLabel: "添加内容"
+                accessibilityLabel: L10n.text("ui.add_content")
             )
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel("添加内容")
-        .help("添加图片、@ 插件、Skill 或快捷短语")
+        .accessibilityLabel(L10n.text("ui.add_content"))
+        .help(L10n.text("ui.add_an_image_plugin_skill_or_shortcut_phrase"))
         .popover(isPresented: $showsAddContentPanel, arrowEdge: .bottom) {
             AddContentPanel(
                 skillShortcuts: enabledSkillShortcuts,
@@ -1180,13 +1182,13 @@ struct ComposerView: View {
                 title: "Skill",
                 systemImage: "wand.and.stars",
                 isSelected: !selectedSkillPaths.isEmpty,
-                accessibilityLabel: "选择 Skill"
+                accessibilityLabel: L10n.text("ui.select_skill")
             )
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel("选择 Skill")
-        .accessibilityValue(selectedSkillPaths.isEmpty ? "未选择" : "已选择 \(selectedSkillPaths.count) 个")
-        .help("选择 Skill，或在输入框键入 $ 快速调用")
+        .accessibilityLabel(L10n.text("ui.select_skill"))
+            .accessibilityValue(selectedSkillPaths.isEmpty ? L10n.text("ui.not_selected") : L10n.plural("ui.skills_selected_count", count: selectedSkillPaths.count))
+        .help(L10n.text("ui.select_skill_or_type_in_the_input_box"))
         .popover(isPresented: $showsSkillPicker, arrowEdge: .bottom) {
             SkillPickerPanel(
                 skills: enabledSkillShortcuts,
@@ -1317,16 +1319,16 @@ struct ComposerView: View {
             let isGuidedAvailable = canUseGuidedFollowUp
             let isGuidedSelected = guidedFollowUpEnabled && isGuidedAvailable
             Menu {
-                Section("发送方式") {
+                Section(L10n.text("ui.send_method")) {
                     Button {
                         selectFollowUpDelivery(guided: false)
                     } label: {
-                        Label("排队（默认）", systemImage: isGuidedSelected ? "clock" : "checkmark")
+                        Label(L10n.text("ui.queue_default"), systemImage: isGuidedSelected ? "clock" : "checkmark")
                     }
                     Button {
                         selectFollowUpDelivery(guided: true)
                     } label: {
-                        Label(isGuidedAvailable ? "引导当前回复" : "引导当前回复（当前无活动回合）", systemImage: isGuidedSelected ? "checkmark" : "text.bubble")
+                        Label(isGuidedAvailable ? L10n.text("ui.lead_current_reply") : L10n.text("ui.guide_current_reply_no_active_round_currently"), systemImage: isGuidedSelected ? "checkmark" : "text.bubble")
                     }
                     .disabled(!isGuidedAvailable)
                 }
@@ -1335,7 +1337,7 @@ struct ComposerView: View {
                     Image(systemName: isGuidedSelected ? "text.bubble.fill" : "clock")
                         .font(themeStore.uiFont(size: 15, weight: .bold))
                     if !usesCompactComposerMetrics {
-                        Text(isGuidedSelected ? "引导" : "排队")
+                        Text(isGuidedSelected ? L10n.text("ui.guide") : L10n.text("ui.queue"))
                             .font(themeStore.uiFont(.callout, weight: .semibold))
                             .lineLimit(1)
                     }
@@ -1361,10 +1363,10 @@ struct ComposerView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-            .help(isGuidedSelected ? "立即改变当前正在生成的回复" : "先保存在此设备，当前回复完成后自动发送为下一轮")
-            .accessibilityLabel("运行中追加方式")
-            .accessibilityValue(isGuidedSelected ? "引导当前回复" : "排队下一轮")
-            .accessibilityHint("点按可切换排队或引导当前回复")
+            .help(isGuidedSelected ? L10n.text("ui.immediately_change_the_reply_currently_being_generated") : L10n.text("ui.save_it_in_this_device_first_and_automatically"))
+            .accessibilityLabel(L10n.text("ui.append_mode_on_the_fly"))
+            .accessibilityValue(isGuidedSelected ? L10n.text("ui.lead_current_reply") : L10n.text("ui.queue_for_next_round"))
+            .accessibilityHint(L10n.text("ui.tap_to_toggle_queuing_or_directing_current_replies"))
         }
     }
 
@@ -1384,7 +1386,7 @@ struct ComposerView: View {
         if composerState.voiceDraftNeedsReview {
             HStack(spacing: 7) {
                 Image(systemName: "checkmark.shield")
-                Text("语音草稿待确认")
+                Text(L10n.text("ui.voice_draft_to_be_confirmed"))
                     .lineLimit(1)
             }
             .font(themeStore.uiFont(.caption, weight: .medium))
@@ -1409,19 +1411,19 @@ struct ComposerView: View {
                 Button {
                     showsAdvancedOptionsSheet = true
                 } label: {
-                    Label("高级选项", systemImage: "ellipsis.circle")
+                    Label(L10n.text("ui.advanced_options"), systemImage: "ellipsis.circle")
                 }
             }
         } label: {
             composerToolbarControlLabel(
-                title: "生成",
+                title: L10n.text("ui.generate"),
                 systemImage: "gearshape",
-                accessibilityLabel: "生成设置"
+                accessibilityLabel: L10n.text("ui.build_settings")
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("生成设置")
-        .accessibilityHint("调整速度和输出")
+        .accessibilityLabel(L10n.text("ui.build_settings"))
+        .accessibilityHint(L10n.text("ui.adjust_speed_and_output"))
     }
 
     @ViewBuilder
@@ -1436,14 +1438,14 @@ struct ComposerView: View {
                     title: modelPickerTriggerTitle,
                     systemImage: "cpu",
                     titleMaxWidth: 150,
-                    accessibilityLabel: "切换模型与推理强度"
+                    accessibilityLabel: L10n.text("ui.switch_model_and_inference_strength")
                 )
                 .contentTransition(.opacity)
             }
             .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-            .accessibilityLabel("切换模型与推理强度")
+            .accessibilityLabel(L10n.text("ui.switch_model_and_inference_strength"))
             .accessibilityValue(modelPickerTriggerTitle)
-            .accessibilityHint("打开三乘三模型选择器，可沿两个方向滑动")
+            .accessibilityHint(L10n.text("ui.opens_the_three_by_three_model_selector_swipeable"))
             .popover(isPresented: $showsModelGridPicker, arrowEdge: .bottom) {
                 ModelReasoningGridPicker(
                     options: modelOptionsForMenu,
@@ -1480,13 +1482,13 @@ struct ComposerView: View {
                 title: selectedModelSummaryTitle,
                 systemImage: "cpu",
                 titleMaxWidth: 140,
-                accessibilityLabel: "切换模型"
+                accessibilityLabel: L10n.text("ui.switch_model")
             )
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel("切换模型")
+        .accessibilityLabel(L10n.text("ui.switch_model"))
         .accessibilityValue(selectedModelSummaryTitle)
-        .accessibilityHint("选择下一轮使用的模型")
+        .accessibilityHint(L10n.text("ui.select_the_model_to_use_in_the_next"))
     }
 
     var selectedModelGridSelection: GPT56ModelGridSelection {
@@ -1555,7 +1557,7 @@ struct ComposerView: View {
                 options.modelProvider = nil
             }
         } label: {
-            Label("默认 · \(defaultModelSummaryTitle)", systemImage: composerState.turnOptions.model == nil ? "checkmark" : "cpu")
+            Label(L10n.format("ui.default_value", defaultModelSummaryTitle), systemImage: composerState.turnOptions.model == nil ? "checkmark" : "cpu")
         }
         ForEach(modelOptionsForMenu) { option in
             let isSelected = isSelectedModelOption(option)
@@ -1573,7 +1575,7 @@ struct ComposerView: View {
         Button {
             Task { await sessionStore.refreshAppServerModelOptions(force: true) }
         } label: {
-            Label(sessionStore.isRefreshingAppServerModels ? "刷新中" : "刷新模型列表", systemImage: "arrow.clockwise")
+            Label(sessionStore.isRefreshingAppServerModels ? L10n.text("ui.refreshing") : L10n.text("ui.refresh_model_list"), systemImage: "arrow.clockwise")
         }
         .disabled(sessionStore.isRefreshingAppServerModels)
     }
@@ -1583,16 +1585,16 @@ struct ComposerView: View {
             reasoningEffortOptions
         } label: {
             composerToolbarControlLabel(
-                title: "推理 · \(reasoningEffortTitle)",
+                title: L10n.format("ui.reasoning_value", reasoningEffortTitle),
                 systemImage: "brain.head.profile",
-                accessibilityLabel: "推理强度"
+                accessibilityLabel: L10n.text("ui.reasoning_strength")
             )
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel("推理强度")
+        .accessibilityLabel(L10n.text("ui.reasoning_strength"))
         .accessibilityValue(reasoningEffortTitle)
-        .accessibilityHint("选择下一轮回答的思考深度")
-        .help("推理强度：\(reasoningEffortTitle)")
+        .accessibilityHint(L10n.text("ui.choose_the_depth_of_thinking_for_the_next"))
+        .help(L10n.format("ui.inference_strength_value", reasoningEffortTitle))
     }
 
     @ViewBuilder
@@ -1600,7 +1602,7 @@ struct ComposerView: View {
         Button {
             composerState.updateTurnOptions { $0.reasoningEffort = nil }
         } label: {
-            Label("默认", systemImage: composerState.turnOptions.reasoningEffort == nil ? "checkmark" : "brain.head.profile")
+            Label(L10n.text("ui.default_option"), systemImage: composerState.turnOptions.reasoningEffort == nil ? "checkmark" : "brain.head.profile")
         }
         ForEach(CodexAppServerReasoningEffort.allCases) { effort in
             Button {
@@ -1615,59 +1617,59 @@ struct ComposerView: View {
     }
 
     var reasoningEffortTitle: String {
-        composerState.turnOptions.reasoningEffort.map { reasoningEffortTitle(for: $0) } ?? "默认"
+        composerState.turnOptions.reasoningEffort.map { reasoningEffortTitle(for: $0) } ?? L10n.text("ui.default_option")
     }
 
     func reasoningEffortTitle(for effort: CodexAppServerReasoningEffort) -> String {
         switch effort {
         case .none:
-            return "关闭"
+            return L10n.text("ui.close")
         case .minimal:
-            return "最低"
+            return L10n.text("ui.lowest")
         case .low:
-            return "低"
+            return L10n.text("ui.low")
         case .medium:
-            return "中"
+            return L10n.text("ui.in")
         case .high:
-            return "高"
+            return L10n.text("ui.high")
         case .xhigh:
-            return "极高"
+            return L10n.text("ui.extremely_high")
         }
     }
 
     var serviceTierOptionsMenu: some View {
         Menu {
-            Button("默认") { composerState.updateTurnOptions { $0.serviceTier = nil } }
+            Button(L10n.text("ui.default_option")) { composerState.updateTurnOptions { $0.serviceTier = nil } }
             Button("auto") { composerState.updateTurnOptions { $0.serviceTier = "auto" } }
             Button("priority") { composerState.updateTurnOptions { $0.serviceTier = "priority" } }
             Button("flex") { composerState.updateTurnOptions { $0.serviceTier = "flex" } }
         } label: {
-            Label(composerState.turnOptions.serviceTier ?? "速度默认", systemImage: "speedometer")
+            Label(composerState.turnOptions.serviceTier ?? L10n.text("ui.speed_default"), systemImage: "speedometer")
         }
     }
 
     var outputOptionsMenu: some View {
         Menu {
-            Section("摘要") {
-                Button("默认") { composerState.updateTurnOptions { $0.reasoningSummary = nil } }
+            Section(L10n.text("ui.summary")) {
+                Button(L10n.text("ui.default_option")) { composerState.updateTurnOptions { $0.reasoningSummary = nil } }
                 ForEach(CodexAppServerReasoningSummary.allCases) { summary in
                     Button(summary.rawValue) { composerState.updateTurnOptions { $0.reasoningSummary = summary } }
                 }
             }
-            Section("人格") {
-                Button("默认") { composerState.updateTurnOptions { $0.personality = nil } }
+            Section(L10n.text("ui.personality")) {
+                Button(L10n.text("ui.default_option")) { composerState.updateTurnOptions { $0.personality = nil } }
                 Button("none") { composerState.updateTurnOptions { $0.personality = CodexAppServerPersonality.none } }
                 Button("friendly") { composerState.updateTurnOptions { $0.personality = .friendly } }
                 Button("pragmatic") { composerState.updateTurnOptions { $0.personality = .pragmatic } }
             }
         } label: {
-            Label("摘要/人格", systemImage: "text.bubble")
+            Label(L10n.text("ui.summary_personality"), systemImage: "text.bubble")
         }
     }
 
     var permissionMenu: some View {
         Menu {
-            Section("权限模式") {
+            Section(L10n.text("ui.permission_mode")) {
                 ForEach(availablePermissionModes) { mode in
                     Button {
                         setPermissionMode(mode)
@@ -1680,7 +1682,7 @@ struct ComposerView: View {
                     .accessibilityHint(mode.detail)
                 }
             }
-            Section("当前效果") {
+            Section(L10n.text("ui.current_effect")) {
                 Text(composerState.permissionMode.detail)
                 Text(permissionWireSummary)
             }
@@ -1689,11 +1691,11 @@ struct ComposerView: View {
                 title: composerState.permissionMode.title,
                 systemImage: composerState.permissionMode.systemImage,
                 tint: permissionTint,
-                accessibilityLabel: "权限模式"
+                accessibilityLabel: L10n.text("ui.permission_mode")
             )
         }
         .buttonStyle(ComposerPressButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel("权限模式")
+        .accessibilityLabel(L10n.text("ui.permission_mode"))
         .accessibilityValue(permissionTitle)
     }
 
@@ -1708,7 +1710,7 @@ struct ComposerView: View {
                     .controlSize(.small)
                     .tint(tokens.accent)
                 if !usesCompactComposerMetrics {
-                    Text("模型转写中")
+                    Text(L10n.text("ui.model_transcribing"))
                         .lineLimit(1)
                 }
             }
@@ -1717,7 +1719,7 @@ struct ComposerView: View {
                 VoiceWaveformView(meter: voiceInput.levelMeter, isActive: true, colors: tokens.voiceWaveformGradient)
                     .frame(width: usesCompactComposerMetrics ? 124 : 190, height: usesCompactComposerMetrics ? 32 : 34)
                 if !usesCompactComposerMetrics {
-                    Text("正在听，松手转写")
+                    Text(L10n.text("ui.listening_now_let_go_and_transcribe"))
                         .lineLimit(1)
                 }
             }
@@ -1727,7 +1729,7 @@ struct ComposerView: View {
                     .controlSize(.small)
                     .tint(tokens.accent)
                 if !usesCompactComposerMetrics {
-                    Text("正在准备…")
+                    Text(L10n.text("ui.preparing_572335f8"))
                         .lineLimit(1)
                 }
             }
@@ -1836,7 +1838,7 @@ struct ComposerView: View {
 
     var defaultModelSummaryTitle: String {
         guard let option = modelOptionsForMenu.first(where: \.isDefault) ?? modelOptionsForMenu.first else {
-            return "默认模型"
+            return L10n.text("ui.default_model")
         }
         return developerModeEnabled ? option.menuTitle : option.title
     }

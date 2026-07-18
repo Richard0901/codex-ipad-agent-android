@@ -100,10 +100,10 @@ struct RootView: View {
         .preferredColorScheme(themeStore.preferredColorScheme)
         .tint(tokens.accent)
         .background(tokens.background.ignoresSafeArea())
-        .alert("无法打开通知", isPresented: notificationRouteAlertBinding) {
-            Button("知道了", role: .cancel) {}
+        .alert(L10n.text("ui.can_t_open_notifications"), isPresented: notificationRouteAlertBinding) {
+            Button(L10n.text("ui.got_it"), role: .cancel) {}
         } message: {
-            Text(notificationRouteAlertMessage ?? "请稍后重试。")
+            Text(notificationRouteAlertMessage ?? L10n.text("ui.please_try_again_later"))
         }
     }
 
@@ -131,9 +131,9 @@ struct RootView: View {
             selectedAppTabRawValue = AppTab.sessions.rawValue
         case .requiresProfileSwitch(let displayName):
             if let displayName {
-                notificationRouteAlertMessage = "此通知来自“\(displayName)”，请先在设置中切换到该连接档案。"
+                notificationRouteAlertMessage = L10n.format("ui.this_notification_comes_from_value_please_switch_to", displayName)
             } else {
-                notificationRouteAlertMessage = "此通知来自其他 Mac，请先在设置中切换到对应连接档案。"
+                notificationRouteAlertMessage = L10n.text("ui.this_notification_comes_from_another_mac_please_switch")
             }
         case .unavailable(let message):
             notificationRouteAlertMessage = message
@@ -237,10 +237,10 @@ struct RootView: View {
                     ProgressView()
                         .controlSize(.large)
                         .tint(tokens.accent)
-                    Text("正在连接 Mac 助手")
+                    Text(L10n.text("ui.connecting_to_mac_assistant"))
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
-                    Text("如果刚启动 Tailscale 或 Mac 助手，这里会自动重试。")
+                    Text(L10n.text("ui.if_you_have_just_launched_tailscale_or_mac"))
                         .font(themeStore.uiFont(.callout))
                         .foregroundStyle(tokens.secondaryText)
                         .multilineTextAlignment(.center)
@@ -248,17 +248,17 @@ struct RootView: View {
                     Image(systemName: "wifi.exclamationmark")
                         .font(.system(size: 34, weight: .semibold))
                         .foregroundStyle(tokens.warning)
-                    Text("无法连接 Mac 助手")
+                    Text(L10n.text("ui.can_t_connect_to_mac_assistant"))
                         .font(themeStore.uiFont(.headline, weight: .semibold))
                         .foregroundStyle(tokens.primaryText)
-                    Text(sessionStore.errorMessage ?? "请检查 Mac 助手和网络连接。")
+                    Text(sessionStore.errorMessage ?? L10n.text("ui.please_check_mac_assistant_and_network_connections"))
                         .font(themeStore.uiFont(.callout))
                         .foregroundStyle(tokens.secondaryText)
                         .multilineTextAlignment(.center)
                     Button {
                         selectedAppTabRawValue = AppTab.settings.rawValue
                     } label: {
-                        Label("打开设置", systemImage: "gearshape")
+                        Label(L10n.text("ui.open_settings"), systemImage: "gearshape")
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -282,7 +282,7 @@ struct RootView: View {
             ProjectSidebarView(showsSessions: true, onOpenWorkspaceTab: {
                 selectedAppTabRawValue = AppTab.workspace.rawValue
             })
-                .navigationTitle("咪咪")
+                .navigationTitle(L10n.text("ui.mimi"))
                 .navigationBarTitleDisplayMode(.inline)
                 .navigationDestination(isPresented: compactSessionDetailBinding) {
                     workspaceDetail(layout: layout)
@@ -344,7 +344,7 @@ struct RootView: View {
         return WorkspaceView {
             selectedAppTabRawValue = AppTab.workspace.rawValue
         }
-            .navigationTitle(sessionStore.selectedSession?.title ?? sessionStore.selectedProject?.name ?? "会话")
+            .navigationTitle(sessionStore.selectedSession?.title ?? sessionStore.selectedProject?.name ?? L10n.text("ui.session"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -403,11 +403,11 @@ struct RootView: View {
                     .controlSize(.small)
                     .tint(tokens.secondaryText.opacity(0.8))
                     .frame(width: 32, height: 32)
-                    .accessibilityLabel("正在刷新")
+                    .accessibilityLabel(L10n.text("ui.refreshing_21eaf737"))
             } else {
                 detailToolbarButton(
                     systemImage: "arrow.clockwise",
-                    accessibilityLabel: sessionStore.selectedSessionID == nil ? "刷新会话列表" : "刷新当前会话",
+                    accessibilityLabel: sessionStore.selectedSessionID == nil ? L10n.text("ui.refresh_session_list") : L10n.text("ui.refresh_current_session"),
                     tokens: tokens
                 ) {
                     Task { await sessionStore.refreshCurrentContext() }
@@ -424,7 +424,7 @@ struct RootView: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(connectionBadgeColor)
                 .frame(width: 32, height: 32)
-                .accessibilityLabel(sessionStore.connectionBadgeTitle ?? "连接状态")
+                .accessibilityLabel(sessionStore.connectionBadgeTitle ?? L10n.text("ui.connection_status"))
         }
     }
 
@@ -433,7 +433,7 @@ struct RootView: View {
         if sessionStore.selectedSessionID != nil {
             detailToolbarButton(
                 systemImage: "sidebar.right",
-                accessibilityLabel: showingLogInspector ? "隐藏详情" : (layout.usesAttachedInspector ? "显示右侧详情" : "打开详情"),
+                accessibilityLabel: showingLogInspector ? L10n.text("ui.hide_details") : (layout.usesAttachedInspector ? L10n.text("ui.show_details_on_the_right") : L10n.text("ui.open_details")),
                 isActive: showingLogInspector,
                 tokens: tokens
             ) {
@@ -571,11 +571,11 @@ private enum AppTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .sessions:
-            return "会话"
+            return L10n.text("ui.session")
         case .workspace:
-            return "工作区"
+            return L10n.text("ui.workspace")
         case .settings:
-            return "设置"
+            return L10n.text("ui.settings")
         }
     }
 
@@ -654,7 +654,7 @@ private struct LegacyWorkspaceRootView: View {
             } else {
                 NavigationStack {
                     workspaceGrid(usesSplitLayout: false, availableWidth: proxy.size.width)
-                        .navigationTitle("工作区")
+                        .navigationTitle(L10n.text("ui.workspace"))
                         .navigationBarTitleDisplayMode(.inline)
                 }
                 .themedWorkbenchNavigationChrome(tokens: tokens, colorScheme: themeStore.resolvedColorScheme(for: colorScheme))
@@ -672,16 +672,16 @@ private struct LegacyWorkspaceRootView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 WorkbenchPageHeader(
-                    title: "工作区",
+                    title: L10n.text("ui.workspace"),
                     subtitle: workspaceSummary,
                     tokens: tokens
                 )
 
                 WorkspaceEmptyStateCard(
                     systemImage: "folder.badge.plus",
-                    title: "打开第一个工作区",
-                    detail: "工作区用来管理开发目录；加入会话后，会话页只显示你常用的项目。",
-                    actionTitle: "打开目录",
+                    title: L10n.text("ui.open_the_first_workspace"),
+                    detail: L10n.text("ui.the_workspace_is_used_to_manage_the_development"),
+                    actionTitle: L10n.text("ui.open_directory"),
                     actionSystemImage: "folder.badge.plus"
                 ) {
                     isPresentingOpenWorkspace = true
@@ -714,9 +714,9 @@ private struct LegacyWorkspaceRootView: View {
                 if projects.isEmpty && !sessionStore.isLoading {
                     WorkspaceEmptyStateCard(
                         systemImage: "folder.badge.plus",
-                        title: "没有已打开的工作区",
-                        detail: "打开项目后，这里会以文件夹卡片展示；会话页只显示你加入会话的项目。",
-                        actionTitle: "打开目录",
+                        title: L10n.text("ui.no_workspace_open"),
+                        detail: L10n.text("ui.after_opening_a_project_it_will_be_displayed"),
+                        actionTitle: L10n.text("ui.open_directory"),
                         actionSystemImage: "folder.badge.plus"
                     ) {
                         isPresentingOpenWorkspace = true
@@ -747,12 +747,12 @@ private struct LegacyWorkspaceRootView: View {
                         Button {
                             sessionStore.resetSessionWorkspaceSelection()
                         } label: {
-                            Label("恢复全部显示", systemImage: "arrow.counterclockwise")
+                            Label(L10n.text("ui.restore_all_display"), systemImage: "arrow.counterclockwise")
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .tint(tokens.accent)
-                        .accessibilityLabel("恢复会话页显示全部工作区")
+                        .accessibilityLabel(L10n.text("ui.the_recovery_session_page_shows_all_workspaces"))
                     }
                 }
             }
@@ -771,7 +771,7 @@ private struct LegacyWorkspaceRootView: View {
         if usesSplitLayout {
             HStack(alignment: .top, spacing: 16) {
                 WorkbenchPageHeader(
-                    title: "工作区",
+                    title: L10n.text("ui.workspace"),
                     subtitle: workspaceSummary,
                     tokens: tokens
                 )
@@ -809,14 +809,14 @@ private struct LegacyWorkspaceRootView: View {
                     Capsule()
                         .stroke(tokens.border.opacity(0.5), lineWidth: 1)
                 }
-                .accessibilityLabel("正在刷新工作区")
+                .accessibilityLabel(L10n.text("ui.refreshing_workspace"))
         } else if !projects.isEmpty {
             HStack(spacing: 2) {
-                workspaceHeaderButton(tokens: tokens, systemImage: "arrow.clockwise", accessibilityLabel: "刷新工作区") {
+                workspaceHeaderButton(tokens: tokens, systemImage: "arrow.clockwise", accessibilityLabel: L10n.text("ui.refresh_workspace")) {
                     Task { await sessionStore.refreshAll(autoAttach: false) }
                 }
 
-                workspaceHeaderButton(tokens: tokens, systemImage: "folder.badge.plus", accessibilityLabel: "打开目录") {
+                workspaceHeaderButton(tokens: tokens, systemImage: "folder.badge.plus", accessibilityLabel: L10n.text("ui.open_directory")) {
                     isPresentingOpenWorkspace = true
                 }
             }
@@ -871,12 +871,16 @@ private struct LegacyWorkspaceRootView: View {
         let total = sessionStore.sidebarProjects.count
         let shown = sessionStore.sessionWorkspaceSelectionCount
         guard total > 0 else {
-            return "还没有打开工作区"
+            return L10n.text("ui.the_workspace_has_not_been_opened_yet")
         }
         if sessionStore.sessionWorkspaceIDs == nil {
-            return "\(total) 个工作区，会话页显示全部"
+            return L10n.format("ui.session_pages_show_all_workspaces", L10n.plural("ui.workspaces_count", count: total))
         }
-        return "\(total) 个工作区，会话页显示 \(shown) 个"
+        return L10n.format(
+            "ui.counts_joined",
+            L10n.plural("ui.workspaces_count", count: total),
+            L10n.format("ui.session_pages_show_workspace_selection", L10n.plural("ui.workspaces_count", count: shown))
+        )
     }
 
     private func managedWorktreeCount(for project: AgentProject) -> Int {
@@ -1003,18 +1007,18 @@ private struct WorkspaceFolderCard: View {
             .buttonStyle(.plain)
 
             HStack(spacing: 8) {
-                WorkspaceMetricChip(value: "\(sessionCount)", title: "会话", systemImage: "bubble.left.and.text.bubble.right")
+                WorkspaceMetricChip(value: "\(sessionCount)", title: L10n.text("ui.session"), systemImage: "bubble.left.and.text.bubble.right")
                 WorkspaceMetricChip(value: "\(worktreeCount)", title: "Worktree", systemImage: "arrow.triangle.branch")
                 Spacer(minLength: 0)
                 HStack(spacing: 5) {
                     Circle()
                         .fill(statusTone)
                         .frame(width: 8, height: 8)
-                    Text(isUnavailable ? "异常" : "正常")
+                    Text(isUnavailable ? L10n.text("ui.abnormal") : L10n.text("ui.normal"))
                         .font(themeStore.uiFont(.caption, weight: .semibold))
                         .foregroundStyle(tokens.secondaryText)
                 }
-                .accessibilityLabel(isUnavailable ? "不可用" : "可访问")
+                .accessibilityLabel(isUnavailable ? L10n.text("ui.not_available") : L10n.text("ui.accessible"))
             }
 
             Spacer(minLength: 0)
@@ -1066,19 +1070,19 @@ private struct WorkspaceFolderCard: View {
             .buttonStyle(.plain)
 
             HStack(spacing: 8) {
-                WorkspaceMetricChip(value: "\(sessionCount)", title: "会话", systemImage: "bubble.left.and.text.bubble.right")
+                WorkspaceMetricChip(value: "\(sessionCount)", title: L10n.text("ui.session"), systemImage: "bubble.left.and.text.bubble.right")
                 WorkspaceMetricChip(value: "\(worktreeCount)", title: "Worktree", systemImage: "arrow.triangle.branch")
 
                 HStack(spacing: 5) {
                     Circle()
                         .fill(statusTone)
                         .frame(width: 7, height: 7)
-                    Text(isUnavailable ? "异常" : "正常")
+                    Text(isUnavailable ? L10n.text("ui.abnormal") : L10n.text("ui.normal"))
                         .font(themeStore.uiFont(.caption, weight: .semibold))
                         .foregroundStyle(tokens.secondaryText)
                         .lineLimit(1)
                 }
-                .accessibilityLabel(isUnavailable ? "不可用" : "可访问")
+                .accessibilityLabel(isUnavailable ? L10n.text("ui.not_available") : L10n.text("ui.accessible"))
 
                 Spacer(minLength: 0)
 
@@ -1108,7 +1112,7 @@ private struct WorkspaceFolderCard: View {
 
         if isShownInSessions {
             Button(action: onToggleSessionVisibility) {
-                Label("会话中", systemImage: "checkmark.circle.fill")
+                Label(L10n.text("ui.in_conversation"), systemImage: "checkmark.circle.fill")
                     .frame(maxWidth: .infinity)
                     .frame(height: 36)
             }
@@ -1123,7 +1127,7 @@ private struct WorkspaceFolderCard: View {
             .controlSize(.small)
         } else {
             Button(action: onToggleSessionVisibility) {
-                Label("加入会话", systemImage: "plus.circle")
+                Label(L10n.text("ui.join_conversation"), systemImage: "plus.circle")
                     .frame(maxWidth: .infinity)
                     .frame(height: 36)
             }
@@ -1143,7 +1147,7 @@ private struct WorkspaceFolderCard: View {
         let tokens = themeStore.tokens(for: colorScheme)
 
         return Button(action: onToggleSessionVisibility) {
-            Label(isShownInSessions ? "会话中" : "加入", systemImage: isShownInSessions ? "checkmark.circle.fill" : "plus.circle")
+            Label(isShownInSessions ? L10n.text("ui.in_conversation") : L10n.text("ui.join"), systemImage: isShownInSessions ? "checkmark.circle.fill" : "plus.circle")
                 .font(themeStore.uiFont(.caption, weight: .semibold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.82)
@@ -1157,7 +1161,7 @@ private struct WorkspaceFolderCard: View {
             Capsule()
                 .stroke(isShownInSessions ? tokens.accent.opacity(0.26) : tokens.border.opacity(0.72), lineWidth: 1)
         }
-        .accessibilityLabel(isShownInSessions ? "从会话页移除" : "加入会话页")
+        .accessibilityLabel(isShownInSessions ? L10n.text("ui.remove_from_conversation_page") : L10n.text("ui.join_conversation_page"))
     }
 }
 
@@ -1255,8 +1259,8 @@ private struct WorkspaceDetailView: View {
             } else {
                 WorkspaceEmptyStateCard(
                     systemImage: "folder",
-                    title: "选择一个工作区",
-                    detail: "选择后可查看会话、Worktree 和权限状态。"
+                    title: L10n.text("ui.choose_a_workspace"),
+                    detail: L10n.text("ui.select_to_view_session_worktree_and_permission_status")
                 )
                 .frame(maxWidth: 420)
                 .padding(32)
@@ -1264,7 +1268,7 @@ private struct WorkspaceDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(tokens.background.ignoresSafeArea())
-        .navigationTitle(project?.name ?? "工作区")
+        .navigationTitle(project?.name ?? L10n.text("ui.workspace"))
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -1277,25 +1281,25 @@ private struct WorkspaceDetailView: View {
                 VStack(spacing: 12) {
                     WorkspaceDetailActionRow(
                         systemImage: "terminal",
-                        title: "会话",
+                        title: L10n.text("ui.session"),
                         value: sessionSummary(for: project),
-                        detail: "会话仍在“会话”工作区里创建和继续运行。",
+                        detail: L10n.text("ui.the_session_is_still_created_and_continues_to"),
                         tone: tokens.accent,
                         showsChevron: false
                     )
                     WorkspaceDetailActionRow(
                         systemImage: "square.stack.3d.up",
-                        title: "Git Worktree",
+                        title: L10n.text("ui.git_worktree"),
                         value: worktreeSummary(for: project),
-                        detail: "在项目行菜单里管理这个工作区的 Worktree。",
+                        detail: L10n.text("ui.manage_the_worktree_for_this_workspace_in_the"),
                         tone: tokens.secondaryText,
                         showsChevron: false
                     )
                     WorkspaceDetailActionRow(
                         systemImage: "checkmark.shield",
-                        title: "权限状态",
-                        value: sessionStore.isWorkspaceUnavailable(project.id) ? "需要重试" : "可访问",
-                        detail: sessionStore.isWorkspaceUnavailable(project.id) ? "这个工作区可能已被移动、删除或不在授权范围内。" : "当前工作区在已授权范围内，可继续用于会话。",
+                        title: L10n.text("ui.permission_status"),
+                        value: sessionStore.isWorkspaceUnavailable(project.id) ? L10n.text("ui.need_to_retry") : L10n.text("ui.accessible"),
+                        detail: sessionStore.isWorkspaceUnavailable(project.id) ? L10n.text("ui.this_workspace_might_have_been_moved_deleted_or") : L10n.text("ui.the_current_workspace_is_within_authorized_scope_and"),
                         tone: sessionStore.isWorkspaceUnavailable(project.id) ? tokens.warning : tokens.success,
                         showsChevron: false
                     )
@@ -1333,7 +1337,7 @@ private struct WorkspaceDetailView: View {
 
             HStack(spacing: 6) {
                 Image(systemName: "link")
-                Text("路径已绑定")
+                Text(L10n.text("ui.path_is_bound"))
             }
             .font(themeStore.uiFont(.caption, weight: .semibold))
             .foregroundStyle(tokens.secondaryText)
@@ -1356,7 +1360,7 @@ private struct WorkspaceDetailView: View {
 
         return LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
             WorkspaceStatTile(
-                title: "会话",
+                title: L10n.text("ui.session"),
                 value: "\(sessionStore.sessions(forProjectID: project.id).count)",
                 systemImage: "bubble.left.and.text.bubble.right",
                 tone: tokens.accent
@@ -1368,13 +1372,13 @@ private struct WorkspaceDetailView: View {
                 tone: tokens.secondaryText
             )
             WorkspaceStatTile(
-                title: "状态",
-                value: sessionStore.isWorkspaceUnavailable(project.id) ? "异常" : "正常",
+                title: L10n.text("ui.status"),
+                value: sessionStore.isWorkspaceUnavailable(project.id) ? L10n.text("ui.abnormal") : L10n.text("ui.normal"),
                 systemImage: sessionStore.isWorkspaceUnavailable(project.id) ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
                 tone: sessionStore.isWorkspaceUnavailable(project.id) ? tokens.warning : tokens.success
             )
             WorkspaceStatTile(
-                title: "最近更新",
+                title: L10n.text("ui.latest_updates"),
                 value: lastActivityText(for: project),
                 systemImage: "clock",
                 tone: tokens.secondaryText
@@ -1385,12 +1389,12 @@ private struct WorkspaceDetailView: View {
 
     private func sessionSummary(for project: AgentProject) -> String {
         let count = sessionStore.sessions(forProjectID: project.id).count
-        return count == 0 ? "暂无历史" : "\(count) 个"
+        return count == 0 ? L10n.text("ui.no_history_yet") : L10n.format("ui.value", count)
     }
 
     private func worktreeSummary(for project: AgentProject) -> String {
         let count = managedWorktreeCount(for: project)
-        return count == 0 ? "暂无" : "\(count) 个"
+        return count == 0 ? L10n.text("ui.none") : L10n.format("ui.value", count)
     }
 
     private func managedWorktreeCount(for project: AgentProject) -> Int {
@@ -1401,7 +1405,7 @@ private struct WorkspaceDetailView: View {
     private func lastActivityText(for project: AgentProject) -> String {
         let sessions = sessionStore.sessions(forProjectID: project.id)
         guard let date = sessions.compactMap({ $0.updatedAt ?? $0.createdAt }).max() else {
-            return "暂无"
+            return L10n.text("ui.none")
         }
         return Self.minuteTimeFormatter.string(from: date)
     }
