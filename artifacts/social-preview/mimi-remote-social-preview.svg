@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10182d"/>
+      <stop offset="0.58" stop-color="#111b34"/>
+      <stop offset="1" stop-color="#1d3155"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.22" cy="0.18" r="0.85">
+      <stop offset="0" stop-color="#7ba7ff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#7ba7ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="device-shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="24" stdDeviation="24" flood-color="#020617" flood-opacity="0.6"/>
+    </filter>
+    <filter id="icon-shadow" x="-50%" y="-50%" width="200%" height="220%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#020617" flood-opacity="0.45"/>
+    </filter>
+    <clipPath id="icon-clip">
+      <rect x="72" y="58" width="70" height="70" rx="16"/>
+    </clipPath>
+    <clipPath id="ipad-clip">
+      <rect x="658" y="75" width="548" height="411" rx="22"/>
+    </clipPath>
+    <clipPath id="phone-clip">
+      <rect x="1024" y="279" width="145" height="315" rx="25"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <circle cx="1180" cy="30" r="210" fill="#61a7ff" opacity="0.08"/>
+  <circle cx="574" cy="660" r="260" fill="#9b8cff" opacity="0.08"/>
+
+  <g filter="url(#icon-shadow)">
+    <rect x="72" y="58" width="70" height="70" rx="16" fill="#ffffff"/>
+    <image x="72" y="58" width="70" height="70" preserveAspectRatio="xMidYMid slice"
+      clip-path="url(#icon-clip)"
+      xlink:href="../../ios/MimiRemote/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-ios-marketing-1024x1024@1x.png"/>
+  </g>
+  <text x="163" y="101" fill="#dce8ff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="26" font-weight="700" letter-spacing="2">MIMI REMOTE</text>
+
+  <text x="70" y="225" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="62" font-weight="760" letter-spacing="-2">Codex on iPad.</text>
+  <text x="70" y="294" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="58" font-weight="760" letter-spacing="-2">Away from your desk.</text>
+
+  <text x="72" y="356" fill="#bed0ed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="25" font-weight="450">Open-source native iPhone &amp; iPad client</text>
+  <text x="72" y="391" fill="#bed0ed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="25" font-weight="450">for OpenAI Codex CLI and Claude Code</text>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="19" font-weight="650">
+    <rect x="72" y="449" width="137" height="42" rx="21" fill="#ffffff" opacity="0.11" stroke="#ffffff" stroke-opacity="0.18"/>
+    <text x="94" y="477" fill="#e7efff">Local-first</text>
+    <rect x="222" y="449" width="145" height="42" rx="21" fill="#ffffff" opacity="0.11" stroke="#ffffff" stroke-opacity="0.18"/>
+    <text x="243" y="477" fill="#e7efff">Self-hosted</text>
+    <rect x="380" y="449" width="166" height="42" rx="21" fill="#ffffff" opacity="0.11" stroke="#ffffff" stroke-opacity="0.18"/>
+    <text x="401" y="477" fill="#e7efff">SwiftUI + Go</text>
+  </g>
+
+  <text x="72" y="568" fill="#8195b7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20">github.com/gaixianggeng/codex-ipad-agent</text>
+
+  <g filter="url(#device-shadow)">
+    <rect x="642" y="59" width="580" height="443" rx="34" fill="#070b14" stroke="#63708a" stroke-width="2"/>
+    <image x="658" y="75" width="548" height="411" preserveAspectRatio="xMidYMid slice"
+      clip-path="url(#ipad-clip)"
+      xlink:href="../app-screenshots/ipad-landscape-open-source-demo.png"/>
+  </g>
+
+  <g filter="url(#device-shadow)">
+    <rect x="1010" y="264" width="173" height="344" rx="36" fill="#080b12" stroke="#6f7b91" stroke-width="2"/>
+    <image x="1024" y="279" width="145" height="315" preserveAspectRatio="xMidYMid slice"
+      clip-path="url(#phone-clip)"
+      xlink:href="../app-screenshots/iphone-conversation-open-source-demo.png"/>
+  </g>
+</svg>
