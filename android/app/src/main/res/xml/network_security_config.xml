@@ -1,0 +1,8 @@
+<network-security-config>
+    <!--
+        Current agentd deployments may use Tailscale private HTTP. The app
+        layer rejects public HTTP in EndpointPolicy; production should prefer
+        MagicDNS + HTTPS.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
